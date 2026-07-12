@@ -7,6 +7,7 @@ MCP client
   → KasmTools
   → LiveAssemblyServices
       → Open Assembly bill/status APIs
+      → official bill detail + expert review-report PDF
       → meeting discovery APIs
       → official minutes PDF fetcher
       → transcript parser and relation builder
@@ -28,11 +29,12 @@ Issue research is staged to keep official traffic bounded:
 
 1. Expand high-signal statute and policy terms.
 2. Search official bill discovery and refresh status for top candidates.
-3. Derive committee and candidate months from bill metadata or explicit dates.
-4. Retrieve committee/plenary metadata for those scopes.
-5. Rank candidates and ingest at most the configured number of minutes.
-6. Search parsed speeches and reconstruct ordered discussion threads.
-7. Return official bill/minutes URLs, locators, and live-check time.
+3. Discover and ingest an official expert review report for the top related bills when available.
+4. Derive committee and candidate months from bill metadata or explicit dates.
+5. Retrieve committee/plenary metadata for those scopes.
+6. Rank candidates and ingest at most the configured number of minutes.
+7. Search reports and parsed speeches, then reconstruct ordered discussion threads.
+8. Return official bill/report/minutes URLs, locators, and live-check time.
 
 The bounded strategy is necessary because Open Assembly does not expose a universal full-text search
 over every historical speech. The response reports its evidence rather than claiming exhaustive

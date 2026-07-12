@@ -1,12 +1,22 @@
 # Korean Bill & Debate MCP
 
-**Status tells you where a bill is. Subcommittee minutes and committee expert reports reveal the
-forces that may move it next.**
+Current version: `v0.6.0`
 
-One question surfaces the two sources legislative insiders look for first: the record of actual
-subcommittee negotiation and the committee expert's legal and implementation review. It connects
-them to current status, government answers, lawmakers' actual words, and surrounding Q&A in
-official National Assembly sources.
+**Explore the Korean National Assembly with a question. Verify with official records.**
+
+From a bill's introduction and current status to committee review, expert analysis, and the actual
+words exchanged by lawmakers and government officials, the server connects scattered Assembly
+records into one evidence trail.
+
+One question answers four parts of legislative research: where a bill stands, why it is moving or
+stalled, who said what in context, and which official record proves it.
+
+It is built for people working with legislation inside and outside the Assembly: parliamentary
+staff, corporate policy and legal teams, public institutions and associations, researchers,
+journalists, and civil-society organizations.
+
+For deeper legislative analysis, it also surfaces two sources insiders look for first:
+subcommittee negotiation records and committee expert review reports.
 
 ![Demo tracing a question from bills to actual remarks and surrounding context](assets/demo.gif)
 

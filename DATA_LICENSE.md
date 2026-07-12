@@ -1,6 +1,7 @@
 # Parliamentary record notice
 
-The Apache-2.0 license covers the source code, not parliamentary records.
+The Apache-2.0 license covers the source code, not parliamentary records, minutes, or committee
+expert review reports retrieved from official Assembly systems.
 
 Metadata, short review excerpts, and derived indexes remain subject to the terms published by
 their official Korean National Assembly sources. KASM preserves official source URLs and
