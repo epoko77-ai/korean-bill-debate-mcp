@@ -1,6 +1,6 @@
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
-LABEL io.modelcontextprotocol.server.name="io.github.epoko77-ai/korean-bill-debate-mcp-core"
+LABEL io.modelcontextprotocol.server.name="io.github.epoko77-ai/korean-bill-debate-mcp"
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils \
