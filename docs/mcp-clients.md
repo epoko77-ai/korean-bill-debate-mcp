@@ -15,7 +15,7 @@
 주소를 사용하세요. 서버는 API 키 원문을 DB나 파일에 저장하지 않습니다. 개인 링크는 API
 할당량을 사용할 수 있으므로 외부에 공유하지 마세요.
 
-## 공통 준비
+## 로컬 설치 공통 준비
 
 1. 열린국회에서 본인 API 키를 발급받습니다.
 2. `uv`와 Poppler(`pdftotext`)를 설치합니다.
@@ -93,7 +93,12 @@ Gemini CLI 안에서는 `/mcp list`를 사용합니다.
   "mcpServers": {
     "korean-bill-debate": {
       "command": "uvx",
-      "args": ["korean-bill-debate-mcp", "mcp"],
+      "args": [
+        "--from",
+        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0",
+        "kbd",
+        "mcp"
+      ],
       "env": {
         "ASSEMBLY_OPEN_API_KEY": "본인의_열린국회_키"
       }

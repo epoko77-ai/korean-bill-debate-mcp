@@ -18,6 +18,8 @@ journalists, and civil-society organizations.
 For deeper legislative analysis, it also surfaces two sources insiders look for first:
 subcommittee negotiation records and committee expert review reports.
 
+![Demo tracing a question from bills to actual remarks and surrounding context](assets/demo.gif)
+
 ## Connect it to your AI in about three minutes
 
 You do not need to learn a separate research interface. Connect the MCP once, then ask Claude,
@@ -89,36 +91,9 @@ If the tool list includes `explore_issue`, `search_bills`, `get_bill_status`, an
 `search_speeches`, setup is complete. See the [client-by-client guide](docs/mcp-clients.md) for UI
 paths, manual configuration, verification, and troubleshooting.
 
-![Demo tracing a question from bills to actual remarks and surrounding context](assets/demo.gif)
-
-Users provide their own Open Assembly API key. The server queries official APIs at request time,
-downloads only relevant official minutes, parses the discussion, and keeps a private local cache for
-repeat performance. It does not require or distribute a prebuilt Assembly database.
-
-## Setup
-
-Install `uv` and `pdftotext` (Poppler), then run one setup command:
-
-```bash
-kbd setup --client claude-code
-kbd setup --client codex
-kbd setup --client gemini
-kbd setup --client claude-desktop
-```
-
-The wizard securely prompts for and validates your `ASSEMBLY_OPEN_API_KEY`. Manual configuration:
-
-```json
-{
-  "mcpServers": {
-    "korean-bill-debate": {
-      "command": "uvx",
-      "args": ["korean-bill-debate-mcp", "mcp"],
-      "env": {"ASSEMBLY_OPEN_API_KEY": "YOUR_OPEN_ASSEMBLY_KEY"}
-    }
-  }
-}
-```
+Both web and local modes use each user's own Open Assembly API key. The hosted connection does not
+store the raw key in a database or file. Local mode downloads only relevant official records and
+keeps a private cache for repeat performance. Neither mode requires a prebuilt Assembly database.
 
 ## Request flow
 
@@ -131,5 +106,6 @@ natural-language question
   → answer-ready evidence with official URLs and source locators
 ```
 
-SQLite is a private local cache, not a bundled source database. Current bill status is refreshed from
-the official status API. See the [Korean README](README.md) and [client guide](docs/mcp-clients.md).
+In local mode, SQLite is a private cache rather than a bundled source database. Hosted instances use
+ephemeral cache storage. Current bill status is refreshed from the official status API. See the
+[Korean README](README.md) and [client guide](docs/mcp-clients.md).
