@@ -1,0 +1,11 @@
+{
+  "model": "intfloat/multilingual-e5-small",
+  "dimensions": 384,
+  "documents": 25,
+  "queries": 25,
+  "recall_at_3": 1.0,
+  "recall_at_10": 1.0,
+  "required_recall_at_10": 0.8,
+  "passed": true,
+  "measured_at": "2026-07-11T14:44:02.534006+00:00"
+}

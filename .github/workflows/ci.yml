@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --extra dev --extra mcp --extra semantic
+      - run: uv run ruff check .
+      - run: uv run mypy src/kasm
+      - run: uv run pytest --cov=kasm --cov-report=term-missing
+      - run: uv build

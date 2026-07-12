@@ -1,0 +1,39 @@
+[
+  {"id":"law-01","query":"2026년 7월 검찰 보완수사권 폐지 관련 법안과 의원 의견","expected_committee":"법제사법위원회","minimum_bills":1,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"law-02","query":"2026년 7월 공소청과 중수청 출범 준비에 대한 논의","expected_committee":"법제사법위원회","minimum_bills":1,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"law-03","query":"2026년 7월 경찰 수사 통제와 범죄 피해자 보호 대책","expected_committee":"법제사법위원회","minimum_bills":1,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"law-04","query":"2026년 7월 형사소송법 검사 직접수사권 삭제 논의","expected_committee":"법제사법위원회","minimum_bills":1,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"law-05","query":"2026년 7월 보완수사 요구가 실제 작동하지 않는다는 지적과 답변","expected_committee":"법제사법위원회","minimum_bills":1,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"law-06","query":"2026년 7월 법왜곡죄 공소시효와 증거 인멸 문제","expected_committee":"법제사법위원회","minimum_bills":1,"minimum_speeches":1,"minimum_threads":1},
+  {"id":"law-07","query":"2026년 7월 피해자 국선변호인 확대 법안 검토","expected_committee":"법제사법위원회","minimum_bills":1,"minimum_speeches":1,"minimum_threads":1},
+  {"id":"law-08","query":"2026년 7월 구속기간 단축과 조건부 석방 제도","expected_committee":"법제사법위원회","minimum_bills":1,"minimum_speeches":1,"minimum_threads":1},
+
+  {"id":"economy-01","query":"2026년 7월 국가데이터처와 인공지능 데이터 정책","expected_committee":"재정경제기획위원회","minimum_bills":0,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"economy-02","query":"2026년 7월 물가와 민생경제에 대한 정부 답변","expected_committee":"재정경제기획위원회","minimum_bills":0,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"economy-03","query":"2026년 7월 국세청 세무조사 운영에 대한 지적","expected_committee":"재정경제기획위원회","minimum_bills":0,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"economy-04","query":"2026년 7월 관세와 통상 환경 변화 대응","expected_committee":"재정경제기획위원회","minimum_bills":0,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"economy-05","query":"2026년 7월 예산 집행과 재정 건전성 논의","expected_committee":"재정경제기획위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+
+  {"id":"science-01","query":"2026년 7월 인공지능 산업과 국내 AI 생태계 지원 의견","expected_committee":"과학기술정보방송통신위원회","minimum_bills":0,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"science-02","query":"2026년 7월 AI 대전환 입법 동력에 대한 과방위 의원 의견","expected_committee":"과학기술정보방송통신위원회","minimum_bills":0,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"science-03","query":"2026년 7월 AI 기본법과 디지털 포용법 논의","expected_committee":"과학기술정보방송통신위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+  {"id":"science-04","query":"2026년 7월 방송 개혁과 미디어 환경에 대한 의원 의견","expected_committee":"과학기술정보방송통신위원회","minimum_bills":0,"minimum_speeches":2,"minimum_threads":1},
+
+  {"id":"culture-01","query":"2026년 7월 대한축구협회 청문회와 독단적 행정 지적","expected_committee":"문화체육관광위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+  {"id":"culture-02","query":"2026년 7월 K-컬처와 문화예술 지원에 대한 문체위 의견","expected_committee":"문화체육관광위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+  {"id":"culture-03","query":"2026년 7월 체육 강국과 관광 정책에 대한 문체위 논의","expected_committee":"문화체육관광위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+
+  {"id":"climate-01","query":"2026년 7월 기후에너지환경노동위원회 기후위기 대응 의견","expected_committee":"기후에너지환경노동위원회","minimum_bills":0,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"climate-02","query":"2026년 7월 에너지전환과 산업 전환의 제도적 뒷받침","expected_committee":"기후에너지환경노동위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+  {"id":"climate-03","query":"2026년 7월 비정규직 노동자와 고용노동 정책 의견","expected_committee":"기후에너지환경노동위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+
+  {"id":"agriculture-01","query":"2026년 7월 농림축산식품해양수산위원회 법률안 소위원회 구성","expected_committee":"농림축산식품해양수산위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+  {"id":"agriculture-02","query":"2026년 7월 농업 축산 수산 법안 심사 준비","expected_committee":"농림축산식품해양수산위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+
+  {"id":"affairs-01","query":"2026년 7월 정무위원회 홈플러스 MBK 사태 청문회 논의","expected_committee":"정무위원회","minimum_bills":0,"minimum_speeches":2,"minimum_threads":1},
+  {"id":"affairs-02","query":"2026년 7월 금융 공공성과 자본시장 활성화에 대한 정무위 의견","expected_committee":"정무위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+  {"id":"affairs-03","query":"2026년 7월 공정한 시장질서와 자영업자 보호에 대한 정무위 논의","expected_committee":"정무위원회","minimum_bills":0,"minimum_speeches":1,"minimum_threads":1},
+
+  {"id":"status-01","query":"형사소송법 일부개정법률안의 최신 처리상태","minimum_bills":1,"minimum_speeches":0,"minimum_threads":0},
+  {"id":"status-02","query":"인공지능 관련 법률안의 최신 처리상태와 공식 의안 링크","minimum_bills":1,"minimum_speeches":0,"minimum_threads":0}
+]

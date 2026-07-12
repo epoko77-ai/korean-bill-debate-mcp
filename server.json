@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.epoko77-ai/korean-bill-debate-mcp-core",
+  "title": "Korean Bill & Debate MCP",
+  "description": "법안 상태부터 위원회, 의원 발언과 앞뒤 질의답변까지 연결하는 열린국회 조사 MCP",
+  "repository": {
+    "url": "https://github.com/epoko77-ai/korean-bill-debate-mcp-core",
+    "source": "github"
+  },
+  "version": "0.6.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "korean-bill-debate-mcp",
+      "version": "0.6.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

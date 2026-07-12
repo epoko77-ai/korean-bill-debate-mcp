@@ -1,0 +1,10 @@
+{
+  "recorded_at": "2026-07-11T21:00:00+09:00",
+  "source": "https://open.assembly.go.kr/portal/openapi",
+  "credentials_removed": true,
+  "fixtures": {
+    "committee.json": "f4757812e06ae2c5b736f4088e027d653bba3571cae956f09f133724e0df4855",
+    "plenary.json": "fdf65bbd7bab592ba1a25c47ee1c6e0fa014fdcdc9947bcc7201378dd60068b6",
+    "subcommittee.json": "92dd64839b595117781a8ec4c62fb772fd1a544fa605626c8ec8bd920c423415"
+  }
+}

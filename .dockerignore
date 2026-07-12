@@ -1,0 +1,9 @@
+.git
+.venv
+.uv-cache
+.hf-cache
+.kasm-cache
+__pycache__
+*.sqlite3
+*.faiss
+.env

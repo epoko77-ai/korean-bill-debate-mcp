@@ -1,0 +1,25 @@
+services:
+  mcp:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data:ro
+    environment:
+      KASM_DATABASE: /data/kasm.sqlite3
+      KASM_VECTOR_INDEX: /data/kasm-vectors.faiss
+      KASM_RATE_LIMIT_PER_MINUTE: "120"
+      KASM_ALLOWED_HOSTS: "127.0.0.1,127.0.0.1:*,localhost,localhost:*"
+      KASM_ALLOWED_ORIGINS: "http://127.0.0.1,http://127.0.0.1:*,http://localhost,http://localhost:*"
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"
+      interval: 30s
+      timeout: 5s
+      retries: 3

@@ -1,0 +1,18 @@
+{
+  "fixture_scope": "13 distinct official committee minutes PDFs from June 2024",
+  "meetings": 13,
+  "speeches": 1906,
+  "relations": 35,
+  "embeddings": 1906,
+  "embedding_model": "intfloat/multilingual-e5-small",
+  "dimensions": 384,
+  "corpus_hash": "62be87dc97ba6d63c596d1adf07f916a2824ceb8ba2bbd9018099fc5d952e373",
+  "keyless_english_query": "support for victims of rental deposit fraud",
+  "top_semantic_rank": 1,
+  "top_official_source": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52097",
+  "streamable_http_protocol": "2025-11-25",
+  "streamable_http_tools": 5,
+  "health_semantic_index": true,
+  "passed": true,
+  "measured_at": "2026-07-12T00:12:00+09:00"
+}

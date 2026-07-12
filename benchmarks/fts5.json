@@ -1,0 +1,10 @@
+{
+  "backend": "SQLite FTS5",
+  "synthetic_speeches": 50000,
+  "samples": 50,
+  "median_ms": 4.243978997692466,
+  "p95_ms": 4.458333132788539,
+  "required_p95_ms": 200.0,
+  "passed": true,
+  "measured_at": "2026-07-11T13:50:42.179463+00:00"
+}

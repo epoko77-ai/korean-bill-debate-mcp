@@ -1,0 +1,31 @@
+name: Bug report
+description: Report a reproducible parser, search, CLI, or MCP defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: Include the command/tool call and sanitized output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version and Python
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data safety
+      options:
+        - label: I removed API keys, raw private paths, and unnecessary full minutes text.
+          required: true

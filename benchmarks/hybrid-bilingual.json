@@ -1,0 +1,28 @@
+{
+  "fixture": "synthetic bilingual topic separation",
+  "model": "intfloat/multilingual-e5-small",
+  "queries": 50,
+  "metrics": {
+    "lexical": {
+      "recall_at_5": 0.48,
+      "recall_at_10": 0.48,
+      "mrr_at_10": 0.48,
+      "ndcg_at_10": 0.48
+    },
+    "semantic": {
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr_at_10": 0.99,
+      "ndcg_at_10": 0.9926185950714291
+    },
+    "hybrid": {
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr_at_10": 0.99,
+      "ndcg_at_10": 0.9926185950714291
+    }
+  },
+  "required_hybrid_mrr_at_10": 0.8,
+  "passed": true,
+  "measured_at": "2026-07-11T14:44:06.203196+00:00"
+}

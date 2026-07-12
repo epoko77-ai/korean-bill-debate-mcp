@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-07-12",
+  "dataset": {
+    "source": "official Open Assembly only",
+    "meetings": 8,
+    "speeches": 972,
+    "bills_from_official_agendas": 62,
+    "speech_bill_links": 124
+  },
+  "case": {
+    "query": "검찰 보완수사권 폐지",
+    "passed": true,
+    "quality_score": 100,
+    "speech_matches": 8,
+    "discussion_threads": 6,
+    "context_turns": 34,
+    "matched_speakers": 4,
+    "suspect_speakers": 0,
+    "bill_coverage": true,
+    "provenance_rate": 1.0,
+    "single_bill_agenda_misattributions": 0
+  },
+  "notes": [
+    "Only results matching at least two query terms were retained for lexical-only QA.",
+    "All returned context turns retained an official source URL and source locator.",
+    "Multiple jointly considered bills were labeled as a range instead of the last bill title."
+  ]
+}

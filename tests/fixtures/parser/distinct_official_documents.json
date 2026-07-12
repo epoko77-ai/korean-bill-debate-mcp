@@ -1,0 +1,247 @@
+{
+  "description": "Minimal reviewed quotations from distinct official Assembly minutes PDFs.",
+  "attribution": "대한민국 국회 회의록 (record.assembly.go.kr)",
+  "generated_at": "2026-07-11T14:52:01.782853+00:00",
+  "documents": [
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52097",
+      "source_sha256": "758df6f658f2a5ec8577482a361ff1c9e1a4504e5c450709c639845c58ff3b6e",
+      "excerpt_sha256": "d1b6d7d0ac3be682927ea777dc8c84f0cc8b22fe746a2ad777c7c0ab182c67db",
+      "excerpt": "◯위원장 맹성규        그러면 의사일정 제1항부터 제3항까지 전세사기피해자 지원 및 주거\n\f4 제415회-국토교통제3차(2024년6월25일)\n\n\n안정에 관한 특별법 일부개정법률안 3건과 의사일정 제4항 전세사기 피해자 지원 대책\n관련 청문회를 일괄하여 상정합니다.\n 설명에 앞서 위원님들 말씀 계시면……\n◯문진석 위원",
+      "expected": {
+        "speaker_name": "맹성규",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 481,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52096",
+      "source_sha256": "7aa629b66a8e4639b8cdbdf384078a384f400a1b2bc2ed595abd7f2cc8559c73",
+      "excerpt_sha256": "8402e5be6be223305d8208b99cca4e972fa45502234ac1e9947270c6cfbdad00",
+      "excerpt": "◯위원장 맹성규      그리고 위원장이 간사 위원과 협의로 오늘 의사일정을 변경하여 청문\n회 실시와 관련한 청문회 실시계획서 채택의 건, 서류제출요구의 건, 증인·참고인 출석요\n구의 건을 의사일정 2항부터 제4항까지 추가적으로 상정하고자 합니다.\n\n\n 2. 전세사기 피해자 지원 대책 관련 청문회 실시계획서 채택의 건",
+      "expected": {
+        "speaker_name": "맹성규",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 14,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52095",
+      "source_sha256": "e685fa78bf86e79482c024b535160438be67c583ba39540c787b56004df114bd",
+      "excerpt_sha256": "0e2175627efa270225fa1d6bedfb4977e1bc3ac7df40a90cc9436a13e40b155b",
+      "excerpt": "◯위원장 맹성규                   의석을 정돈해 주시기 바랍니다.\n  성원이 되었으므로 제415회 국회(임시회) 제1차 국토교통위원회를 개회하겠습니다.\n  보고사항은 단말기 자료를 참고해 주시기 바랍니다.",
+      "expected": {
+        "speaker_name": "맹성규",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 31,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52094",
+      "source_sha256": "8dabe393e6c2cd359b76a55bc758c9714c53131f98f65b50e3c8585e2549b665",
+      "excerpt_sha256": "eecdb6665fe4363439c50a6542311c7ec1e0aa0b1fd2bcfab57abaf9d91ded47",
+      "excerpt": "◯위원장 안호영                     그 문제는 일단 상정은 하고 이곳에서 심의를 할 것인지 아니면 소위\n\f                                  제415회-환경노동제5차(2024년6월28일) 3\n\n\n원회가 구성이 되면 소위원회에서 심의할 것인지……",
+      "expected": {
+        "speaker_name": "안호영",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 251,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52093",
+      "source_sha256": "52579f1be40b541cdc530ff40623d075cdd8850e1a9b9704e1149e0a497a9e8d",
+      "excerpt_sha256": "9b690d10f121e1e5537dd99894ec47d10d88fa3ac6491c0e27a2747649e80340",
+      "excerpt": "◯위원장 안호영       그러면 의사일정 제1항 폐기물관리법 일부개정법률안 입법공청회를\n상정합니다.\n 현재 우리 위원회에는 폐기물을 사용하여 시멘트를 제조하는 경우 사용된 폐기물의 종\n류와 원산지 및 구성성분을 포함한 정보를 공개하고 그 위반에 대한 벌칙규정을 신설하\n는 내용으로 박홍배 의원님이 대표발의한 폐기물관리법",
+      "expected": {
+        "speaker_name": "안호영",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 249,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52092",
+      "source_sha256": "a26bb7babdcb33b9304c47272b47014f299e54150f28a1578660539f36e5ce23",
+      "excerpt_sha256": "f1df31db9244593c2f74a8ef6feea7274607a808a1864f0c441eaea5610a5578",
+      "excerpt": "◯김위상 위원                  오늘 환노위의 위원들, 여야를 막론하고 여기 같이 이렇게 다 모였습니\n다. 모였고, 이렇게 보면 평소에 국회 외부에서도 함께 활동한 동료들 또는 그분들이 또\n국회에 입성해서 같이 얼굴을 보고 있습니다.\n  저는 그렇습니다. 국회 환노위는 갈등을 좀 해소시키는 환노위가 돼야 되지",
+      "expected": {
+        "speaker_name": "김위상",
+        "speaker_role": "위원"
+      },
+      "document_parsed_speeches": 77,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52091",
+      "source_sha256": "b20d388f3d35a03ee69bc38a5b1e734551ce6e8f1a3c4b8ef89710d81b8c99d1",
+      "excerpt_sha256": "ea7c089182c083f4b45edd466d6e52d82f175b3a3cca8c51a497c4af8cf80971",
+      "excerpt": "◯위원장 안호영                         저 역시 우리 김주영 간사님 말씀처럼 참석하지 않은 일부 위원들과\n또 정부에 대해서 강한 유감을 표합니다.\n 하루빨리 위원회 회의에 참석하셔서 시급한 민생 현안을 함께 논의하고 대책을 마련해\n주시기를 다시 한번 간곡히 요청드립니다.\n◯박해철 위원 위원장님, 의사진",
+      "expected": {
+        "speaker_name": "안호영",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 10,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52090",
+      "source_sha256": "0943c53a86675116f69f0184277f12ad44b0cbf9432d6162241a690bbcff78c0",
+      "excerpt_sha256": "db74f5c4aa9375d65a21c3f666eebffb73f1164ef7237538d751a4a393447dff",
+      "excerpt": "◯박해철 위원     22대 국회 전반기 환노위 위원으로 활동하게 된 경기 안산시병 국회의\n원 박해철입니다.\n 안호영 환노위원장님을 비롯한 선배·동료 위원님들과 함께 효능감 있는 22대 국회의원\n으로서의 역할을 다하겠다는 약속을 드리겠습니다.\n 대한민국 국민의 환경권과 노동권은 헌법에 규정된 가장 기본적인 가치입니다. 따",
+      "expected": {
+        "speaker_name": "박해철",
+        "speaker_role": "위원"
+      },
+      "document_parsed_speeches": 3,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52089",
+      "source_sha256": "3b3b8b19a30e9ded544194297aa1538fb9d88fb273a5bb9d21507023af1f4b71",
+      "excerpt_sha256": "582b35f87392af60dc443d60c9c26ebe5c3c0490863fb9283d419b29ae8f19c4",
+      "excerpt": "◯위원장 박주민    아직 자리에 안 계신 두 분 위원님이 계신데요. 최보윤 위원님과 추경\n호 위원님이신데 이 두 분의 경우에는 참석을 하셔서 기회가 될 때 인사말씀을 듣도록\n하겠습니다.\n\f4 제415회-보건복지제3차(2024년6월26일)\n\n\n 이것으로 인사말씀 듣는 순서는 마치는 것으로 하고요.\n◯김미애 위원 의사진행발",
+      "expected": {
+        "speaker_name": "박주민",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 754,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52088",
+      "source_sha256": "6aeca3b6fadae90c4d17dbf07e5f467fe5b782b85617ea1f23a626aa69b28093",
+      "excerpt_sha256": "ebe2563104cfbad6e4122034ce4bf70cb590bf8707e50577597d5c0d5d826993",
+      "excerpt": "◯백혜련 위원     오늘도 여당 위원님들이 자리에 안 오신 것을 보고 너무 실망을 금할\n수가 없습니다.\n 지금 아무리 국회의 상황이 여야가 대립하고 있는 관계라고 하더라도 국민의 생명권이\n걸린 이런 문제에 있어서는 여야 가리지 않고 당연히 협조해야 할 상황이라고 생각합니\n다. 지금 국민들이 의사들의 집단 휴진으로 인해서",
+      "expected": {
+        "speaker_name": "백혜련",
+        "speaker_role": "위원"
+      },
+      "document_parsed_speeches": 10,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52087",
+      "source_sha256": "f94fdf8992a0e08096276ea775e191b5a7baf7b66d83d4ed179242bcf61e5fef",
+      "excerpt_sha256": "67824659ba6a23756d23118a3399c620db565ad17b56c1cd982b05d6d76a76eb",
+      "excerpt": "◯위원장 박주민      다음은 우리 위원회에서 위원님들과 함께 일할 우리 전문위원실 소속\n직원분들을 좀 소개해 드리도록 하겠습니다.\n 우선 진선희 수석전문위원입니다.\n 다음은 정경윤 전문위원입니다.\n 다음은 조문상 전문위원입니다.\n 다음은 현승철 행정실장입니다.\n 입법조사관과 주무관 직원분들 다 같이 인사드리도록 하겠습",
+      "expected": {
+        "speaker_name": "박주민",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 7,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52086",
+      "source_sha256": "f7598556ff2b230fb11412538091214beb0e0364cc06c807cb68442ec386dbcf",
+      "excerpt_sha256": "73d1cebcc0761c0f0560a9c25c476a29f55dc2cf433270bffe869ad074973145",
+      "excerpt": "◯위원장 어기구     농업 농치를 너무나 사랑하시는 우리 서삼석 위원님 더 큰 목소리 내\n주시기를 바랍니다.\n 다음, 송옥주 위원님 인사해 주시기 바랍니다.\n◯송옥주 위원 반갑습니다.\n 경기 화성갑 국회의원 송옥주입니다.\n 화성에서 웬 농해수위를 신청했나 그렇게 말씀하실 분들이 계실 텐데요. 저희 지역은\n도농복합지역이고",
+      "expected": {
+        "speaker_name": "어기구",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 12,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52085",
+      "source_sha256": "c5307cc5c040332e5c4a85481731746c5efab5a8f8b6687f8d432dbf30f180b3",
+      "excerpt_sha256": "d936c9e9c280d3ae3329a80f51d9124b39ec7f7233fa29fe6ee4a12a3073a0e5",
+      "excerpt": "◯민형배 위원     지난주 화요일 상임위 전체회의 때 제가 김정숙 여사 기내식에 6000만\n원 썼다는 국힘의 주장이 완전히 잘못됐다, 결국 네 끼에 수십만 원에 불과하다 이런 말\n씀을 드렸는데 인도로부터 김정숙 여사가 초청을 받지 않았다는 허위사실 주장에 대해서\n도 한 말씀 드리려고 합니다.\n 그냥 결론부터 말씀드리면",
+      "expected": {
+        "speaker_name": "민형배",
+        "speaker_role": "위원"
+      },
+      "document_parsed_speeches": 7,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52165",
+      "source_sha256": "9d78a46d551ce4339b293d9baa60623d4ae0066812ad641927a4d55667fd9e8e",
+      "excerpt_sha256": "6258702811a5b83242074d10d1b3ad14eb12fcf8d76a222ecf4a8c5a1e4ff264",
+      "excerpt": "◯위원장 박범계     그러면 의사일정 제1항 대법관(노경필) 임명동의안 심사경과보고서 채\n택의 건과 의사일정 제2항 대법관(박영재) 임명동의안 심사경과보고서 채택의 건, 이상 2\n건을 일괄하여 상정합니다.\n 우리 인사청문특별위원회는 지난 7월 22일 노경필 대법관후보자에 대하여, 7월 24일\n박영재 대법관후보자에 대하여",
+      "expected": {
+        "speaker_name": "박범계",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 6,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52164",
+      "source_sha256": "3ed68a8fda72f613b2b5e5e0d9b36b7bff762f970f9a13919b39ab4f8dc30a15",
+      "excerpt_sha256": "b8fda8aab28878ee1755ced3df0a61e8bbfd99674079d2b88722c46df6a3dd20",
+      "excerpt": "◯위원장 박범계      의사일정 제1항 대법관(이숙연) 임명동의안 심사를 위한 인사청문회를\n\f2 제416회-인사청문특별제4차(2024년7월25일)\n\n\n상정합니다.\n 인사청문회에 들어가기에 앞서 오늘 인사청문회 진행 방식에 대하여 간략히 말씀드리\n겠습니다.\n 인사청문회는 인사청문회법 제7조에 따라 먼저 대법관후보자의 선서",
+      "expected": {
+        "speaker_name": "박범계",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 439,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52163",
+      "source_sha256": "833c97b61f240ddb22c4868fc1e23f022604248b5e8ad1fa79b0f23f2b252ec2",
+      "excerpt_sha256": "c71e4170030e38252a2082b5b5e468f2f724a6d399f083fe9162d4a72b636d97",
+      "excerpt": "◯위원장 박범계     의사일정 제1항 대법관(박영재) 임명동의안 심사를 위한 인사청문회를\n상정합니다.\n 오늘 인사청문회 들어가기에 앞서 인사청문회 진행 방식은 인사청문회법 7조에 따라\n먼저 대법관후보자의 선서와 모두발언을 들은 다음 위원님들의 질의와 대법관후보자의\n답변 순서로 진행하겠습니다.\n 후보자의 약력은 배부해 드",
+      "expected": {
+        "speaker_name": "박범계",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 476,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52162",
+      "source_sha256": "a1ffec9bbf40c76cb42caca518c7063a0c65d0c2bff43b11ad67f3b66205353a",
+      "excerpt_sha256": "f45cc89968c5d74f7e8cc4bf8b28d2af17bed4516963690393c66853d5626ba8",
+      "excerpt": "◯위원장 박범계     의사일정 제1항 대법관(노경필) 임명동의안 심사를 위한 인사청문회를\n상정합니다.\n 인사청문회에 들어가기에 앞서 오늘 인사청문회 진행 방식에 대하여 간략히 말씀드리\n겠습니다.\n 인사청문회는 인사청문회법 제7조에 따라 먼저 대법관후보자의 선서와 모두발언을 들\n은 다음 위원님들의 질의와 대법관후보자의 답",
+      "expected": {
+        "speaker_name": "박범계",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 546,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52161",
+      "source_sha256": "78211426bbd3b04736590c828ee9bfbee311e14338474db7142a74604ab438d7",
+      "excerpt_sha256": "92b5af19dfdf29d57fab068cca9ba25833a40af4b5d571d31cead8a679fb831b",
+      "excerpt": "◯위원장 박범계     우리 유상범 위원님으로부터 추천을 받는다니까 참 기분도 좋고 또\n약간 어색하기도 하고 또 존경하는 조배숙 임시 위원장님 참 법조 대선배이신데 위원장\n님 호천에 의해서…… 여러 위원님들, 제가 여러 가지 부덕한 인사임에도 불구하고 이렇\n게 중차대한 대법관 세 분에 대한 인사청문회 위원장으로 선임해 주",
+      "expected": {
+        "speaker_name": "박범계",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 5,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52159",
+      "source_sha256": "d77c321852bb35300755a618e5775592916aece2a6ce9bafd4f39f01ad339f96",
+      "excerpt_sha256": "f1699f5e6aac505d7ef86ea9857daa814248d3080e2f351b82587c6d847d5e76",
+      "excerpt": "◯김남근 위원     저출생으로 국가적 위기를 겪는 시대에 가정·여성·청소년 정책은 어느\n다른 정책보다도 아주 높은 위상, 중요한 위상을 갖는 문제라고 생각을 합니다. 정쟁의\n대상이 될 수가 없고 반드시 중요한 성과를 내야 되는 그러한 정책이라고 생각을 하는데\n요.\n 저도 이번 22대 국회 여가위에서 열심히 활동을 해서",
+      "expected": {
+        "speaker_name": "김남근",
+        "speaker_role": "위원"
+      },
+      "document_parsed_speeches": 6,
+      "document_parse_failures": 0
+    },
+    {
+      "source_url": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=52157",
+      "source_sha256": "0981728c0adf429e4044580b8c5f862968b3cffb0a2fd5fd3af7fc7c4fa242b5",
+      "excerpt_sha256": "2eb4fff2ef2a67a367e40a613645d3721445004b828539517302aa40df2f2c39",
+      "excerpt": "◯위원장 신성범                   의석을 정돈해 주시기 바랍니다.\n  성원이 되었으므로 제416회 국회(임시회) 제1차 정보위원회를 개회하겠습니다.\n  먼저 보고사항은 배부해 드린 유인물을 참고해 주시기 바랍니다.",
+      "expected": {
+        "speaker_name": "신성범",
+        "speaker_role": "위원장"
+      },
+      "document_parsed_speeches": 36,
+      "document_parse_failures": 0
+    }
+  ]
+}

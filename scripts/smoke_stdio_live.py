@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""End-to-end live smoke test through the real MCP stdio protocol."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+async def exercise() -> None:
+    if not os.getenv("ASSEMBLY_OPEN_API_KEY"):
+        raise RuntimeError("ASSEMBLY_OPEN_API_KEY is required")
+    with tempfile.TemporaryDirectory(prefix="kbd-live-mcp-") as data_dir:
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "kasm.cli", "mcp"],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(ROOT / "src"),
+                "KBD_DATA_DIR": data_dir,
+                "KBD_MAX_MINUTES_PER_REQUEST": "1",
+            },
+        )
+        async with (
+            stdio_client(parameters) as (read_stream, write_stream),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            initialized = await session.initialize()
+            assert initialized.serverInfo.name == "Korean Bill & Debate MCP"
+            tools = await session.list_tools()
+            assert len(tools.tools) == 8
+            response = await session.call_tool(
+                "explore_issue",
+                {
+                    "query": "2026년 7월 검찰 보완수사권 폐지 관련 법안과 의원 의견",
+                    "limit": 5,
+                },
+            )
+            assert not response.isError
+            result = response.structuredContent
+            assert result is not None
+            assert result["data_mode"] == "live_open_assembly_with_local_cache"
+            assert result["bills"]
+            assert result["speeches"]
+            assert all(speech["citation"]["official_url"] for speech in result["speeches"])
+            print(
+                {
+                    "server": initialized.serverInfo.name,
+                    "tools": len(tools.tools),
+                    "bills": len(result["bills"]),
+                    "speeches": len(result["speeches"]),
+                    "threads": len(result["discussion_threads"]),
+                    "data_mode": result["data_mode"],
+                    "live_refresh": result["live_refresh"],
+                }
+            )
+
+
+if __name__ == "__main__":
+    asyncio.run(exercise())
