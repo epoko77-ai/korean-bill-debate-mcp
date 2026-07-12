@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import urllib.parse
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,15 +17,17 @@ from kasm.adapters.korea.bills import (
     ingest_bill_rows,
 )
 from kasm.adapters.korea.client import AssemblyOpenApiClient
+from kasm.adapters.korea.documents import BillDocumentFetcher, BillDocumentsClient
 from kasm.adapters.korea.fetcher import MinutesFetcher
 from kasm.adapters.korea.ingestion import meeting_from_open_assembly_row
 from kasm.adapters.korea.pipeline import OpenAssemblyPipeline, distinct_minutes_rows
 from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
 from kasm.app import LocalServices, infer_bill_title_query, infer_issue_committee
+from kasm.core.models import BillDocument
 from kasm.mcp.tools import ServiceContext
 from kasm.search.lexical import query_terms
 from kasm.storage.database import Database
-from kasm.storage.repositories import MeetingRepository
+from kasm.storage.repositories import BillDocumentRepository, MeetingRepository
 
 _DATE_MONTH = re.compile(r"(?P<year>20\d{2})[.\-/년 ]+\s*(?P<month>1[0-2]|0?[1-9])")
 _STOPWORDS = {
@@ -52,6 +55,8 @@ class LiveAssemblyServices:
         client: AssemblyOpenApiClient,
         fetcher: MinutesFetcher,
         *,
+        document_client: BillDocumentsClient | None = None,
+        document_fetcher: BillDocumentFetcher | None = None,
         assembly_term: int = 22,
         max_minutes_per_request: int = 8,
         now: Callable[[], datetime] | None = None,
@@ -59,6 +64,10 @@ class LiveAssemblyServices:
         self.database = database
         self.client = client
         self.pipeline = OpenAssemblyPipeline(database, fetcher)
+        self.document_client = document_client
+        self.document_fetcher = document_fetcher
+        self.bill_documents = BillDocumentRepository(database)
+        self._document_checks: set[str] = set()
         self.local = LocalServices(database)
         self.assembly_term = assembly_term
         self.max_minutes_per_request = max_minutes_per_request
@@ -78,7 +87,11 @@ class LiveAssemblyServices:
 
     def get_bill_status(self, bill_id_or_no: str) -> dict[str, Any] | None:
         bill_no = bill_id_or_no.removeprefix("kna:bill:")
-        self._refresh_bill_status(bill_no)
+        status_row = self._refresh_bill_status(bill_no)
+        if status_row is None:
+            status_row = self._refresh_bill_by_number(bill_no)
+        if status_row:
+            self._refresh_bill_documents(status_row)
         result = self.local.get_bill_status(bill_id_or_no)
         if result is None and bill_no != bill_id_or_no:
             result = self.local.get_bill_status(bill_no)
@@ -147,6 +160,15 @@ class LiveAssemblyServices:
         queries = _bill_queries(query)
         rows: list[dict[str, Any]] = []
         hashes: list[str] = []
+        if query.strip().isdigit():
+            page = self.client.fetch_page(
+                BILL_DATASET,
+                page_size=10,
+                parameters={"AGE": assembly_term, "BILL_NO": query.strip()},
+                refresh=True,
+            )
+            rows.extend(page.rows)
+            hashes.append(page.source_hash)
         for candidate in queries[:4]:
             page = self.client.fetch_page(
                 BILL_DATASET,
@@ -163,9 +185,11 @@ class LiveAssemblyServices:
                 bill_no = _value(row, "BILL_NO")
                 if bill_no:
                     self._refresh_bill_status(bill_no)
+            for row in rows[:2]:
+                self._refresh_bill_documents(row)
         return rows
 
-    def _refresh_bill_status(self, bill_no: str) -> None:
+    def _refresh_bill_status(self, bill_no: str) -> dict[str, Any] | None:
         page = self.client.fetch_page(
             BILL_STATUS_DATASET,
             page_size=100,
@@ -174,6 +198,56 @@ class LiveAssemblyServices:
         )
         if page.rows:
             ingest_bill_rows(self.database, page.rows, source_hash=page.source_hash)
+            return page.rows[0]
+        return None
+
+    def _refresh_bill_by_number(self, bill_no: str) -> dict[str, Any] | None:
+        page = self.client.fetch_page(
+            BILL_DATASET,
+            page_size=10,
+            parameters={"AGE": self.assembly_term, "BILL_NO": bill_no},
+            refresh=True,
+        )
+        if page.rows:
+            ingest_bill_rows(self.database, page.rows, source_hash=page.source_hash)
+            return page.rows[0]
+        return None
+
+    def _refresh_bill_documents(self, row: dict[str, Any]) -> None:
+        if self.document_client is None or self.document_fetcher is None:
+            return
+        bill_no = _value(row, "BILL_NO")
+        external_bill_id = _bill_external_id(row)
+        if not bill_no or not external_bill_id or bill_no in self._document_checks:
+            return
+        self._document_checks.add(bill_no)
+        try:
+            links = self.document_client.review_reports(external_bill_id, bill_no)
+        except RuntimeError:
+            return
+        for link in links[:3]:
+            try:
+                fetched = self.document_fetcher.fetch(link.official_url)
+            except RuntimeError:
+                continue
+            if not fetched.text.strip():
+                continue
+            document_id = "kna:bill-document:" + hashlib.sha256(
+                link.official_url.encode()
+            ).hexdigest()[:24]
+            self.bill_documents.save(
+                BillDocument(
+                    id=document_id,
+                    bill_id=f"kna:bill:{bill_no}",
+                    document_type=link.document_type,
+                    title=link.title,
+                    file_format=link.file_format,
+                    official_url=link.official_url,
+                    text=fetched.text,
+                    source_hash=fetched.source_hash,
+                    retrieved_at=self._now(),
+                )
+            )
 
     def _refresh_meetings(
         self,
@@ -287,6 +361,8 @@ def create_live_services(
         database,
         api_client,
         MinutesFetcher(root),
+        document_client=BillDocumentsClient(),
+        document_fetcher=BillDocumentFetcher(root),
         max_minutes_per_request=int(
             os.getenv("KBD_MAX_MINUTES_PER_REQUEST", str(max_minutes_per_request))
         ),
@@ -303,6 +379,17 @@ def _bill_queries(query: str) -> list[str]:
         *sorted(terms, key=len, reverse=True),
     ]
     return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _bill_external_id(row: dict[str, Any]) -> str | None:
+    direct = _value(row, "BILL_ID")
+    if direct:
+        return direct
+    detail_url = _value(row, "DETAIL_LINK", "LINK_URL")
+    if not detail_url:
+        return None
+    values = urllib.parse.parse_qs(urllib.parse.urlsplit(detail_url).query)
+    return values.get("billId", [None])[0]
 
 
 def _meeting_relevance(row: dict[str, Any], query: str, committee: str | None) -> tuple[int, str]:

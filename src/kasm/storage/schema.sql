@@ -60,6 +60,36 @@ CREATE TABLE IF NOT EXISTS bills (
 );
 CREATE INDEX IF NOT EXISTS idx_bills_filters
     ON bills (assembly_term, committee, process_result, proposed_at);
+
+CREATE TABLE IF NOT EXISTS bill_documents (
+    id TEXT PRIMARY KEY,
+    bill_id TEXT NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
+    document_type TEXT NOT NULL CHECK (document_type IN ('committee_review_report')),
+    title TEXT NOT NULL,
+    file_format TEXT NOT NULL CHECK (file_format IN ('pdf')),
+    official_url TEXT NOT NULL,
+    text TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    UNIQUE (bill_id, document_type, official_url)
+);
+CREATE INDEX IF NOT EXISTS idx_bill_documents_bill ON bill_documents (bill_id, document_type);
+CREATE VIRTUAL TABLE IF NOT EXISTS bill_documents_fts USING fts5(
+    title, text, content='bill_documents', content_rowid='rowid', tokenize='unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS bill_documents_ai AFTER INSERT ON bill_documents BEGIN
+    INSERT INTO bill_documents_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS bill_documents_ad AFTER DELETE ON bill_documents BEGIN
+    INSERT INTO bill_documents_fts(bill_documents_fts, rowid, title, text)
+    VALUES ('delete', old.rowid, old.title, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS bill_documents_au AFTER UPDATE ON bill_documents BEGIN
+    INSERT INTO bill_documents_fts(bill_documents_fts, rowid, title, text)
+    VALUES ('delete', old.rowid, old.title, old.text);
+    INSERT INTO bill_documents_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+END;
+
 CREATE VIRTUAL TABLE IF NOT EXISTS bills_fts USING fts5(
     name, proposer, committee, content='bills', content_rowid='rowid', tokenize='unicode61'
 );

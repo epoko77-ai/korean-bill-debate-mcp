@@ -126,6 +126,29 @@ class Bill(Serializable):
 
 
 @dataclass(frozen=True, slots=True)
+class BillDocument(Serializable):
+    id: str
+    bill_id: str
+    document_type: str
+    title: str
+    file_format: str
+    official_url: str
+    text: str
+    source_hash: str
+    retrieved_at: datetime
+
+    _datetime_fields = {"retrieved_at"}
+
+    def __post_init__(self) -> None:
+        if not self.id or not self.bill_id or not self.title.strip():
+            raise ValidationError("bill document requires ids and a title")
+        if self.document_type != "committee_review_report" or self.file_format != "pdf":
+            raise ValidationError("unsupported bill document type or format")
+        if not self.official_url or not self.text.strip() or not self.source_hash:
+            raise ValidationError("bill document text and provenance are required")
+
+
+@dataclass(frozen=True, slots=True)
 class SpeechRelation(Serializable):
     source_speech_id: str
     target_speech_id: str

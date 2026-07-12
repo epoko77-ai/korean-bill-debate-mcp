@@ -7,7 +7,15 @@ from collections.abc import Iterable
 from typing import Any, Generic, TypeVar
 
 from kasm.core.exceptions import NotFoundError
-from kasm.core.models import Bill, EmbeddingRecord, Meeting, Person, Speech, SpeechRelation
+from kasm.core.models import (
+    Bill,
+    BillDocument,
+    EmbeddingRecord,
+    Meeting,
+    Person,
+    Speech,
+    SpeechRelation,
+)
 
 T = TypeVar("T")
 
@@ -92,6 +100,13 @@ class BillRepository(Repository[Bill]):
         with self.connection:
             for bill in bills:
                 _upsert(self.connection, self.table, bill.to_dict(), "id", commit=False)
+
+
+class BillDocumentRepository(Repository[BillDocument]):
+    table, model = "bill_documents", BillDocument
+
+    def save(self, document: BillDocument) -> None:
+        _upsert(self.connection, self.table, document.to_dict(), "id")
 
 
 class SpeechRelationRepository:

@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.0] - 2026-07-12
 
 ### Added
 
@@ -8,6 +8,8 @@
 - Bounded lazy minutes ingestion into a private local SQLite cache.
 - Secure setup command for Claude Code, Codex, Gemini CLI, and Claude Desktop.
 - Live-check metadata and official citations in issue research results.
+- On-demand discovery, PDF extraction, full-text search, and bill linking for official committee
+  expert review reports.
 
 ### Removed
 

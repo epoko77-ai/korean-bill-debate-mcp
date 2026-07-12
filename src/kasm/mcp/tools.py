@@ -185,7 +185,7 @@ class KasmTools:
         status: str | None = None,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Search live Open Assembly bill data using the caller's configured API key."""
+        """Search live bills and attach on-demand official committee expert review reports."""
         if not query.strip():
             raise ValueError("query must not be empty")
         if status not in {None, "pending", "processed"}:
@@ -205,7 +205,7 @@ class KasmTools:
         return {"query": query, "results": to_jsonable(result) or []}
 
     def get_bill_status(self, bill_id_or_no: str) -> dict[str, Any]:
-        """Refresh one bill from the official processing-status API before returning it."""
+        """Refresh one bill's status and attach its official expert review report when available."""
         if not bill_id_or_no.strip():
             raise ValueError("bill_id_or_no must not be empty")
         catalog = self.services.catalog or self.services.repository
@@ -219,7 +219,8 @@ class KasmTools:
 
         Use this as the primary tool for questions asking what happened, who argued what,
         or how a policy and bill evolved. Results include evidence-ranked speeches, ordered
-        multi-turn discussion threads, bill links, official provenance, and live-check metadata.
+        multi-turn discussion threads, bill and review-report links, official provenance, and
+        live-check metadata.
         It queries official Open Assembly APIs before searching the private local cache and reports
         bounded-refresh diagnostics. Synthesize the answer from actual turns; do not infer a stance
         that is not supported by a quoted speech. Put each quote's citation.official_url next

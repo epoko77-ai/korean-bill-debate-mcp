@@ -19,6 +19,7 @@ from kasm.search.lexical import LexicalSearch, query_terms
 from kasm.search.semantic import SemanticSearch
 from kasm.storage.database import Database
 from kasm.storage.repositories import (
+    BillDocumentRepository,
     BillRepository,
     MeetingRepository,
     SpeechRelationRepository,
@@ -139,6 +140,7 @@ class LocalServices:
         self.meetings = MeetingRepository(database)
         self.speeches = SpeechRepository(database)
         self.bills = BillRepository(database)
+        self.bill_documents = BillDocumentRepository(database)
         self.lexical = LexicalSearch(database)
         self.hybrid = hybrid
 
@@ -260,6 +262,12 @@ class LocalServices:
         return [dict(row) for row in rows]
 
     def search_bills(self, query: str, **filters: Any) -> list[dict[str, Any]]:
+        normalized_query = query.strip()
+        if normalized_query.isdigit():
+            row = self.database.connection.execute(
+                "SELECT * FROM bills WHERE bill_no = ?", (normalized_query,)
+            ).fetchone()
+            return [self._bill_payload(dict(row), query=query)] if row else []
         terms = query_terms(query)
         clauses = ["bills_fts MATCH ?"]
         parameters: list[Any] = [" OR ".join(f'"{term}"' for term in terms)]
@@ -281,7 +289,35 @@ class LocalServices:
                 LIMIT ?""",
             parameters,
         ).fetchall()
-        return [self._bill_payload(dict(row)) for row in rows]
+        results = [dict(row) for row in rows]
+        document_clauses = ["bill_documents_fts MATCH ?"]
+        document_parameters: list[Any] = [" OR ".join(f'"{term}"' for term in terms)]
+        if filters.get("assembly_term") is not None:
+            document_clauses.append("b.assembly_term = ?")
+            document_parameters.append(filters["assembly_term"])
+        if filters.get("committee"):
+            document_clauses.append("b.committee LIKE ?")
+            document_parameters.append(f"%{filters['committee']}%")
+        if status == "pending":
+            document_clauses.append("COALESCE(TRIM(b.process_result), '') = ''")
+        elif status == "processed":
+            document_clauses.append("COALESCE(TRIM(b.process_result), '') <> ''")
+        document_parameters.append(max(1, min(int(filters.get("limit", 10)), 100)))
+        document_rows = self.database.connection.execute(
+            f"""SELECT DISTINCT b.* FROM bill_documents_fts
+                JOIN bill_documents d ON d.rowid = bill_documents_fts.rowid
+                JOIN bills b ON b.id = d.bill_id
+                WHERE {" AND ".join(document_clauses)}
+                ORDER BY b.proposed_at DESC LIMIT ?""",
+            document_parameters,
+        ).fetchall()
+        seen = {row["id"] for row in results}
+        for row in document_rows:
+            if row["id"] not in seen:
+                results.append(dict(row))
+                seen.add(row["id"])
+        limit = max(1, min(int(filters.get("limit", 10)), 100))
+        return [self._bill_payload(row, query=query) for row in results[:limit]]
 
     def get_bill_status(self, bill_id_or_no: str) -> dict[str, Any] | None:
         row = self.database.connection.execute(
@@ -388,8 +424,22 @@ class LocalServices:
             "timeline": self._issue_timeline(bills, threads),
             "links": links,
             "graph": {
-                "node_types": ["bill", "committee", "meeting", "person", "speech"],
-                "edge_types": ["REFERRED_TO", "HELD", "SPOKE_IN", "MENTIONS", "REPLIES_TO"],
+                "node_types": [
+                    "bill",
+                    "bill_document",
+                    "committee",
+                    "meeting",
+                    "person",
+                    "speech",
+                ],
+                "edge_types": [
+                    "HAS_REVIEW_REPORT",
+                    "REFERRED_TO",
+                    "HELD",
+                    "SPOKE_IN",
+                    "MENTIONS",
+                    "REPLIES_TO",
+                ],
             },
         }
         payload["quality"] = issue_quality(payload)
@@ -485,11 +535,50 @@ class LocalServices:
             )
         return threads
 
-    @staticmethod
-    def _bill_payload(row: dict[str, Any]) -> dict[str, Any]:
+    def _bill_payload(self, row: dict[str, Any], *, query: str | None = None) -> dict[str, Any]:
         row["status"] = row.get("process_result") or "계류"
         row["is_pending"] = not bool(row.get("process_result"))
+        documents = self.database.connection.execute(
+            """SELECT id, document_type, title, file_format, official_url, text,
+                      source_hash, retrieved_at
+               FROM bill_documents WHERE bill_id = ? ORDER BY title, official_url""",
+            (row["id"],),
+        ).fetchall()
+        row["documents"] = [
+            {
+                "document_id": document["id"],
+                "document_type": document["document_type"],
+                "title": document["title"],
+                "file_format": document["file_format"],
+                "official_url": document["official_url"],
+                "text_excerpt": _document_excerpt(document["text"], query),
+                "source_hash": document["source_hash"],
+                "retrieved_at": document["retrieved_at"],
+                "citation": {
+                    "official_url": document["official_url"],
+                    "source_locator": "전문위원 검토보고서 PDF",
+                },
+            }
+            for document in documents
+        ]
         return row
+
+
+def _document_excerpt(text: str, query: str | None, *, width: int = 700) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= width:
+        return compact
+    positions = [
+        compact.casefold().find(term.casefold())
+        for term in query_terms(query or "")
+        if len(term) >= 2 and term.casefold() in compact.casefold()
+    ]
+    position = min(positions) if positions else 0
+    start = max(0, position - width // 4)
+    end = min(len(compact), start + width)
+    prefix = "…" if start else ""
+    suffix = "…" if end < len(compact) else ""
+    return f"{prefix}{compact[start:end].strip()}{suffix}"
 
 
 def create_services() -> ServiceContext:

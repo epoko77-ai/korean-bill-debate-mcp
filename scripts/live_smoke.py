@@ -43,6 +43,7 @@ def main() -> int:
             started = datetime.now(UTC)
             result = service.explore_issue(case["query"], limit=10)
             speeches = result["speeches"]
+            documents = sum(len(bill.get("documents", [])) for bill in result["bills"])
             citations = [speech.get("citation", {}).get("official_url") for speech in speeches]
             expected_committee = case.get("expected_committee")
             committee_hits = sum(
@@ -74,6 +75,7 @@ def main() -> int:
                     "query": case["query"],
                     "passed": not failures,
                     "bills": len(result["bills"]),
+                    "documents": documents,
                     "speeches": len(speeches),
                     "threads": len(result["discussion_threads"]),
                     "committee_precision": round(committee_precision, 3),
