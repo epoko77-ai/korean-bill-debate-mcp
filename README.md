@@ -1,14 +1,68 @@
 # Korean Bill & Debate MCP
 
-> **대한민국 국회를 질문으로 탐색하고, 공식 기록으로 검증하세요.**
+> **흩어진 국회 기록을, 법안 하나로 연결했습니다.**
 >
-> 법안의 발의부터 현재 상태, 위원회·소위원회 심사, 전문위원 검토, 의원과 정부의 실제
-> 발언까지. 흩어진 국회 기록을 하나의 조사 흐름으로 연결합니다.
+> 법안 내용과 처리상태부터 소위원회 회의록, 전문위원 검토보고서, 의원과 정부의 실제
+> 발언까지 하나의 조사 흐름으로 이어서 확인합니다.
 
-`v0.6.0` · 한국어 중심 · 사용자 본인의 열린국회 API 키 · 실시간 조회 · 로컬 캐시 · Apache-2.0
+`v0.6.1` · 한국어 중심 · 사용자 본인의 열린국회 API 키 · 실시간 조회 · 로컬 캐시 · Apache-2.0
 
 [English](README.en.md) · [MCP 연결](docs/mcp-clients.md) ·
 [데이터 출처](docs/data-sources.md) · [아키텍처](docs/architecture.md)
+
+## 3분이면 사용하는 AI에 연결할 수 있습니다
+
+이 MCP는 별도 프로그램을 배울 필요가 없습니다. 한 번 연결한 뒤 Claude·Codex·Gemini에
+평소처럼 질문하면 필요한 국회 공식 기록을 도구가 찾아옵니다.
+
+### 1. 준비물을 설치합니다
+
+열린국회에서 [본인의 Open API 키](https://open.assembly.go.kr/portal/openapi/openApiNaListPage.do)를
+발급받고 `uv`와 Poppler를 설치합니다.
+
+```bash
+# macOS
+brew install uv poppler
+
+# Ubuntu/Debian
+sudo apt-get install poppler-utils
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### 2. GitHub 릴리스를 설치합니다
+
+```bash
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.6.1
+```
+
+### 3. 사용하는 앱 하나만 골라 실행합니다
+
+| 사용하는 AI | 한 번만 실행할 명령 | 연결 방식 |
+|---|---|---|
+| Claude Desktop | `kbd setup --client claude-desktop` | 로컬, 자동 설정 |
+| Claude Code | `kbd setup --client claude-code` | 로컬, 자동 등록 |
+| Codex | `kbd setup --client codex` | 로컬, 자동 등록 |
+| Gemini CLI | `kbd setup --client gemini` | 로컬, 자동 등록 |
+| ChatGPT 웹·Claude 웹 | 공개 HTTPS MCP URL 필요 | 기본 배포에서는 아직 미지원 |
+
+설정 마법사가 API 키를 가려서 입력받고, 실제 열린국회 요청으로 키를 확인한 뒤 선택한 AI에
+MCP를 등록합니다. 키와 내려받은 국회 자료는 사용자의 컴퓨터에만 보관됩니다.
+
+### 4. 앱을 다시 열고 바로 질문합니다
+
+```text
+2219564번 의안의 내용과 최신 처리상태, 소위원회 회의록,
+전문위원 검토보고서와 관련 의원·정부 발언을 공식 원문과 함께 연결해줘.
+```
+
+도구 목록에 `explore_issue`, `search_bills`, `get_bill_status`, `search_speeches` 등이 보이면
+연결이 끝난 것입니다. 앱별 화면 경로와 수동 설정은 **[MCP 연결 가이드](docs/mcp-clients.md)**에
+단계별로 정리했습니다.
+
+> ChatGPT와 Claude 웹의 커스텀 커넥터는 사용자의 컴퓨터에서 로컬 명령을 실행하지 않고
+> 공개 인터넷의 원격 MCP 서버에 접속합니다. 이 프로젝트는 사용자의 열린국회 키와 개인
+> 로컬 캐시를 기본으로 하므로 공용 원격 URL을 제공하지 않습니다. 존재하지 않는 URL을
+> 입력할 필요가 없습니다.
 
 ![질문 하나로 법안부터 실제 발언과 앞뒤 맥락까지 추적하는 데모](assets/demo.gif)
 
@@ -134,10 +188,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 MCP를 등록합니다.
 
 ```bash
-uvx korean-bill-debate-mcp setup --client claude-code
-uvx korean-bill-debate-mcp setup --client codex
-uvx korean-bill-debate-mcp setup --client gemini
-uvx korean-bill-debate-mcp setup --client claude-desktop
+kbd setup --client claude-code
+kbd setup --client codex
+kbd setup --client gemini
+kbd setup --client claude-desktop
 ```
 
 키는 기본적으로 다음 파일에 사용자 전용 권한(`0600`)으로 저장됩니다.

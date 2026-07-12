@@ -9,13 +9,21 @@
 키를 명령행 인자로 쓰면 셸 기록에 남을 수 있으므로 설정 마법사의 가려진 입력이나 MCP
 설정의 환경변수를 사용하세요.
 
+## 설치
+
+PyPI 배포 전에는 검증된 GitHub 릴리스를 직접 설치합니다.
+
+```bash
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.6.1
+```
+
 ## 자동 설정
 
 ```bash
-uvx korean-bill-debate-mcp setup --client claude-code
-uvx korean-bill-debate-mcp setup --client codex
-uvx korean-bill-debate-mcp setup --client gemini
-uvx korean-bill-debate-mcp setup --client claude-desktop
+kbd setup --client claude-code
+kbd setup --client codex
+kbd setup --client gemini
+kbd setup --client claude-desktop
 ```
 
 마법사는 API 키를 실제 열린국회 요청으로 검증하고 다음 로컬 파일에 `0600` 권한으로
@@ -32,7 +40,7 @@ uvx korean-bill-debate-mcp setup --client claude-desktop
 ```bash
 claude mcp add --scope user korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx korean-bill-debate-mcp mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.6.1 kbd mcp
 claude mcp get korean-bill-debate
 ```
 
@@ -43,7 +51,7 @@ Claude Code에서 `/mcp`를 실행해 8개 도구를 확인합니다.
 ```bash
 codex mcp add korean-bill-debate \
   --env ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx korean-bill-debate-mcp mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.6.1 kbd mcp
 codex mcp get korean-bill-debate
 codex mcp list
 ```
@@ -55,7 +63,7 @@ Codex 안에서는 `/mcp`로 연결 상태를 확인합니다.
 ```bash
 gemini mcp add korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx korean-bill-debate-mcp mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.6.1 kbd mcp
 gemini mcp list
 ```
 

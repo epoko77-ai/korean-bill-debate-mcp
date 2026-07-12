@@ -14,7 +14,10 @@ from kasm.adapters.korea.bills import BILL_DATASET
 from kasm.adapters.korea.client import AssemblyOpenApiClient
 
 SERVER_NAME = "korean-bill-debate"
-SERVER_COMMAND = ["uvx", "--from", "korean-bill-debate-mcp", "kbd", "mcp"]
+SERVER_SOURCE = (
+    "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.6.1"
+)
+SERVER_COMMAND = ["uvx", "--from", SERVER_SOURCE, "kbd", "mcp"]
 
 
 def run_setup(

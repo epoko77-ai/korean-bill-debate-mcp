@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1] - 2026-07-12
+
+### Fixed
+
+- Replaced unavailable PyPI-based setup commands with a verified GitHub release install path.
+- Registered local MCP clients against the pinned public `v0.6.1` source.
+- Moved client connection and first-question instructions to the top of both READMEs.
+- Removed unpublished registry metadata that pointed to a nonexistent PyPI package.
+
 ## [0.6.0] - 2026-07-12
 
 ### Added
