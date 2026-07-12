@@ -1,10 +1,12 @@
 # Korean Bill & Debate MCP
 
-**Don't stop at the bill title. See who pushed it, who challenged it, and how the government
-answered.**
+**Status tells you where a bill is. Subcommittee minutes and committee expert reports reveal the
+forces that may move it next.**
 
-One question connects current status, committees and subcommittees, lawmakers' actual words, and
-the surrounding Q&A to official National Assembly sources.
+One question surfaces the two sources legislative insiders look for first: the record of actual
+subcommittee negotiation and the committee expert's legal and implementation review. It connects
+them to current status, government answers, lawmakers' actual words, and surrounding Q&A in
+official National Assembly sources.
 
 ![Demo tracing a question from bills to actual remarks and surrounding context](assets/demo.gif)
 
