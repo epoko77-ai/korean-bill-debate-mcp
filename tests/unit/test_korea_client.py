@@ -59,3 +59,30 @@ def test_no_data_response_is_an_empty_success() -> None:
     page = client.fetch_page("dataset")
     assert page.total_count == 0
     assert page.rows == ()
+
+
+def test_request_scoped_api_key_provider_overrides_placeholder() -> None:
+    dataset = "dataset"
+    payload = json.dumps(
+        {
+            dataset: [
+                {"head": [{"list_total_count": 0}, {"RESULT": {"CODE": "INFO-000"}}]},
+                {"row": []},
+            ]
+        }
+    ).encode()
+    requests = []
+
+    def opener(request, **_kwargs):
+        requests.append(request.full_url)
+        return Response(payload)
+
+    client = AssemblyOpenApiClient(
+        "placeholder",
+        api_key_provider=lambda: "personal-key",
+        opener=opener,
+    )
+    client.fetch_page(dataset)
+
+    assert "personal-key" in requests[0]
+    assert "placeholder" not in requests[0]

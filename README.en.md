@@ -1,6 +1,6 @@
 # Korean Bill & Debate MCP
 
-Current version: `v0.6.1`
+Current version: `v0.7.0`
 
 **Connect scattered Assembly records around a single bill.**
 
@@ -23,7 +23,29 @@ subcommittee negotiation records and committee expert review reports.
 You do not need to learn a separate research interface. Connect the MCP once, then ask Claude,
 Codex, or Gemini a normal question and let the tools retrieve the official Assembly evidence.
 
-### 1. Install the prerequisites
+### Option 1: Use it on Claude.ai or ChatGPT web — no installation
+
+Open the connection page first:
+
+**https://korean-bill-debate-mcp.vercel.app**
+
+1. Enter your personal Open Assembly API key.
+2. Select **Create personal MCP link**.
+3. Copy the complete `https://.../mcp?token=...` URL.
+4. Paste that URL into your web app's custom MCP server field.
+
+Claude: **Settings → Connectors → Add custom connector**, then enable it from the chat `+` menu.
+
+ChatGPT: **Settings → Apps → Advanced settings → Developer mode → Create app**, then select the
+created app from the chat `+` menu. Availability depends on your plan and workspace policy.
+
+> A bare `/mcp` URL will not connect. Use the complete personal URL created from your own key. The
+> service does not store the raw key in a database or file. Treat the generated URL like a password
+> because anyone holding it can consume your Open Assembly API quota.
+
+### Option 2: Install locally for Claude Desktop, Claude Code, Codex, or Gemini CLI
+
+#### 1. Install the prerequisites
 
 Issue your personal [Open Assembly API key](https://open.assembly.go.kr/portal/openapi/openApiNaListPage.do),
 then install `uv` and Poppler (`pdftotext`).
@@ -37,13 +59,13 @@ sudo apt-get install poppler-utils
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 2. Install the pinned GitHub release
+#### 2. Install the pinned GitHub release
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.6.1
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0
 ```
 
-### 3. Run one command for the client you use
+#### 3. Run one command for the client you use
 
 | AI client | One-time command | Connection |
 |---|---|---|
@@ -51,13 +73,12 @@ uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.
 | Claude Code | `kbd setup --client claude-code` | Local, automatic |
 | Codex | `kbd setup --client codex` | Local, automatic |
 | Gemini CLI | `kbd setup --client gemini` | Local, automatic |
-| ChatGPT web / Claude web | Requires a public HTTPS MCP URL | Not in the stock local release |
 
 The setup wizard hides and validates your API key, stores it with user-only permissions, and
 registers the MCP with the selected client. Your key and downloaded Assembly records stay on your
 computer.
 
-### 4. Restart the client and ask
+#### 4. Restart the client and ask
 
 ```text
 For bill 2219564, connect its text and current status to relevant subcommittee minutes,
@@ -67,10 +88,6 @@ expert review reports, and statements by lawmakers and government officials. Cit
 If the tool list includes `explore_issue`, `search_bills`, `get_bill_status`, and
 `search_speeches`, setup is complete. See the [client-by-client guide](docs/mcp-clients.md) for UI
 paths, manual configuration, verification, and troubleshooting.
-
-> ChatGPT and Claude web custom connectors connect to a remote server on the public internet; they
-> cannot start this local `uvx` process. The stock release intentionally uses each person's API key
-> and private local cache, so it does not advertise a shared public connector URL.
 
 ![Demo tracing a question from bills to actual remarks and surrounding context](assets/demo.gif)
 

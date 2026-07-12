@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.uv-cache
+.hf-cache
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.kasm-cache
+assets
+benchmarks
+dist
+docs
+scripts
+tests
+*.sqlite3
+*.faiss

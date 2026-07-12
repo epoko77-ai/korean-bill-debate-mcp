@@ -15,7 +15,7 @@ from kasm.adapters.korea.client import AssemblyOpenApiClient
 
 SERVER_NAME = "korean-bill-debate"
 SERVER_SOURCE = (
-    "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.6.1"
+    "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0"
 )
 SERVER_COMMAND = ["uvx", "--from", SERVER_SOURCE, "kbd", "mcp"]
 

@@ -2,12 +2,14 @@ import asyncio
 from datetime import UTC, date, datetime
 
 import httpx
+from cryptography.fernet import Fernet
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from kasm.core.models import Bill, Meeting, Speech
 from kasm.indexing.build import build_vector_index
 from kasm.indexing.embeddings import HashEmbeddingProvider
+from kasm.mcp.remote_auth import RemoteTokenAuth
 from kasm.storage.database import Database
 from kasm.storage.repositories import BillRepository, MeetingRepository, SpeechRepository
 
@@ -89,6 +91,7 @@ def test_explicit_offline_cache_app_health(tmp_path, monkeypatch) -> None:
                 "speeches": 1,
                 "bills": 1,
                 "semantic_index": False,
+                "remote_user_key": False,
             }
             async with streamable_http_client(
                 "http://127.0.0.1/mcp", http_client=client
@@ -150,6 +153,41 @@ def test_explicit_offline_cache_can_use_a_hybrid_index(tmp_path, monkeypatch) ->
     assert result[0]["speech_id"] == "speech"
     assert result[0]["official_source"].startswith("https://record.assembly.go.kr/")
     assert result[0]["context_before"] is None
+
+
+def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypatch) -> None:
+    secret = Fernet.generate_key().decode()
+    monkeypatch.setenv("KBD_REMOTE_TOKEN_SECRET", secret)
+    monkeypatch.setenv("KBD_DATA_DIR", str(tmp_path / "remote"))
+    monkeypatch.delenv("ASSEMBLY_OPEN_API_KEY", raising=False)
+    from kasm.mcp.deployment import create_asgi_app
+
+    async def exercise() -> None:
+        application = create_asgi_app()
+        starlette = application.app.app
+        transport = httpx.ASGITransport(app=application)
+        async with (
+            starlette.router.lifespan_context(starlette),
+            httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client,
+        ):
+            setup = await client.get("/")
+            assert "본인의 열린국회 API 키" in setup.text
+            issued = await client.post("/connect", data={"api_key": "personal-key"})
+            assert "/mcp?token=" in issued.text
+            assert "personal-key" not in issued.text
+            unauthenticated = await client.post("/mcp")
+            assert unauthenticated.status_code == 401
+
+            token = RemoteTokenAuth(None, secret).issue("personal-key")
+            async with streamable_http_client(
+                f"http://127.0.0.1/mcp?token={token}", http_client=client
+            ) as streams:
+                read_stream, write_stream, _ = streams
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    assert len((await session.list_tools()).tools) == 8
+
+    asyncio.run(exercise())
 
 
 def test_deployed_services_reject_empty_prepared_database(tmp_path) -> None:

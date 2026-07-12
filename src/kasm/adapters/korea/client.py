@@ -38,6 +38,7 @@ class AssemblyOpenApiClient:
         self,
         api_key: str | None = None,
         *,
+        api_key_provider: Callable[[], str | None] | None = None,
         cache_dir: str | Path | None = None,
         timeout: float = 30.0,
         cache_ttl_seconds: float = 900.0,
@@ -46,6 +47,7 @@ class AssemblyOpenApiClient:
         self.api_key = (
             api_key or os.getenv("ASSEMBLY_OPEN_API_KEY") or _dotenv_key() or _stored_key()
         )
+        self._api_key_provider = api_key_provider
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.timeout = timeout
         self.cache_ttl_seconds = cache_ttl_seconds
@@ -60,7 +62,8 @@ class AssemblyOpenApiClient:
         parameters: Mapping[str, str | int] | None = None,
         refresh: bool = False,
     ) -> ApiPage:
-        if not self.api_key:
+        api_key = self._api_key_provider() if self._api_key_provider else self.api_key
+        if not api_key:
             raise AssemblyApiError(
                 "ASSEMBLY_OPEN_API_KEY is required; issue a key at open.assembly.go.kr"
             )
@@ -69,7 +72,7 @@ class AssemblyOpenApiClient:
         if page < 1 or not 1 <= page_size <= 1000:
             raise ValueError("page must be positive and page_size must be between 1 and 1000")
         query: dict[str, str | int] = {
-            "KEY": self.api_key,
+            "KEY": api_key,
             "Type": "json",
             "pIndex": page,
             "pSize": page_size,
@@ -98,7 +101,7 @@ class AssemblyOpenApiClient:
                 with self._opener(request, timeout=self.timeout) as response:
                     raw = response.read()
             except OSError as exc:
-                safe_error = str(exc).replace(self.api_key, "***")
+                safe_error = str(exc).replace(api_key, "***")
                 raise AssemblyApiError(f"Open Assembly request failed: {safe_error}") from exc
             if cache_path:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)

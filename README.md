@@ -5,7 +5,7 @@
 > 법안 내용과 처리상태부터 소위원회 회의록, 전문위원 검토보고서, 의원과 정부의 실제
 > 발언까지 하나의 조사 흐름으로 이어서 확인합니다.
 
-`v0.6.1` · 한국어 중심 · 사용자 본인의 열린국회 API 키 · 실시간 조회 · 로컬 캐시 · Apache-2.0
+`v0.7.0` · 한국어 중심 · 사용자 본인의 열린국회 API 키 · 실시간 조회 · Apache-2.0
 
 [English](README.en.md) · [MCP 연결](docs/mcp-clients.md) ·
 [데이터 출처](docs/data-sources.md) · [아키텍처](docs/architecture.md)
@@ -15,7 +15,42 @@
 이 MCP는 별도 프로그램을 배울 필요가 없습니다. 한 번 연결한 뒤 Claude·Codex·Gemini에
 평소처럼 질문하면 필요한 국회 공식 기록을 도구가 찾아옵니다.
 
-### 1. 준비물을 설치합니다
+### 방법 1: Claude.ai·ChatGPT 웹에서 바로 사용 — 설치 없음
+
+먼저 아래 연결 페이지를 브라우저에서 엽니다.
+
+**https://korean-bill-debate-mcp.vercel.app**
+
+1. 본인의 열린국회 API 키를 입력합니다.
+2. **개인 MCP 링크 만들기**를 누릅니다.
+3. 완성된 `https://.../mcp?token=...` 주소 전체를 복사합니다.
+4. 사용하는 웹 앱의 커스텀 MCP 서버 URL에 붙여 넣습니다.
+
+#### Claude.ai
+
+1. Claude에 로그인합니다.
+2. **설정 → 커넥터 → 커스텀 커넥터 추가**로 이동합니다.
+3. 이름은 `Korean Bill & Debate`, URL은 연결 페이지에서 발급받은 개인 MCP 링크를
+   입력합니다.
+4. 추가한 뒤 채팅의 `+ → 커넥터`에서 활성화합니다.
+
+#### ChatGPT
+
+1. ChatGPT에 로그인합니다.
+2. **설정 → 앱 → 고급 설정**에서 개발자 모드를 활성화합니다.
+3. **앱 만들기**를 선택합니다.
+4. 이름은 `Korean Bill & Debate`, 서버 URL은 연결 페이지에서 발급받은 개인 MCP 링크를
+   입력합니다.
+5. 만든 앱을 연결하고 채팅의 `+` 메뉴에서 선택합니다.
+
+> 키 없는 `/mcp` 주소만 붙여 넣으면 연결되지 않습니다. 반드시 연결 페이지에서 본인의 키로
+> 만든 **개인 MCP 링크 전체**를 사용하세요. 키 원문은 서버의 DB나 파일에 저장하지 않지만,
+> 발급된 링크는 사용자의 API 할당량을 사용할 수 있으므로 비밀번호처럼 보관해야 합니다.
+> ChatGPT의 커스텀 MCP 제공 범위와 메뉴는 요금제·워크스페이스 정책에 따라 다를 수 있습니다.
+
+### 방법 2: Claude Desktop·Claude Code·Codex·Gemini CLI에 로컬 설치
+
+#### 1. 준비물을 설치합니다
 
 열린국회에서 [본인의 Open API 키](https://open.assembly.go.kr/portal/openapi/openApiNaListPage.do)를
 발급받고 `uv`와 Poppler를 설치합니다.
@@ -29,13 +64,13 @@ sudo apt-get install poppler-utils
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 2. GitHub 릴리스를 설치합니다
+#### 2. GitHub 릴리스를 설치합니다
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.6.1
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0
 ```
 
-### 3. 사용하는 앱 하나만 골라 실행합니다
+#### 3. 사용하는 앱 하나만 골라 실행합니다
 
 | 사용하는 AI | 한 번만 실행할 명령 | 연결 방식 |
 |---|---|---|
@@ -43,12 +78,11 @@ uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.
 | Claude Code | `kbd setup --client claude-code` | 로컬, 자동 등록 |
 | Codex | `kbd setup --client codex` | 로컬, 자동 등록 |
 | Gemini CLI | `kbd setup --client gemini` | 로컬, 자동 등록 |
-| ChatGPT 웹·Claude 웹 | 공개 HTTPS MCP URL 필요 | 기본 배포에서는 아직 미지원 |
 
 설정 마법사가 API 키를 가려서 입력받고, 실제 열린국회 요청으로 키를 확인한 뒤 선택한 AI에
 MCP를 등록합니다. 키와 내려받은 국회 자료는 사용자의 컴퓨터에만 보관됩니다.
 
-### 4. 앱을 다시 열고 바로 질문합니다
+#### 4. 앱을 다시 열고 바로 질문합니다
 
 ```text
 2219564번 의안의 내용과 최신 처리상태, 소위원회 회의록,
@@ -58,11 +92,6 @@ MCP를 등록합니다. 키와 내려받은 국회 자료는 사용자의 컴퓨
 도구 목록에 `explore_issue`, `search_bills`, `get_bill_status`, `search_speeches` 등이 보이면
 연결이 끝난 것입니다. 앱별 화면 경로와 수동 설정은 **[MCP 연결 가이드](docs/mcp-clients.md)**에
 단계별로 정리했습니다.
-
-> ChatGPT와 Claude 웹의 커스텀 커넥터는 사용자의 컴퓨터에서 로컬 명령을 실행하지 않고
-> 공개 인터넷의 원격 MCP 서버에 접속합니다. 이 프로젝트는 사용자의 열린국회 키와 개인
-> 로컬 캐시를 기본으로 하므로 공용 원격 URL을 제공하지 않습니다. 존재하지 않는 URL을
-> 입력할 필요가 없습니다.
 
 ![질문 하나로 법안부터 실제 발언과 앞뒤 맥락까지 추적하는 데모](assets/demo.gif)
 

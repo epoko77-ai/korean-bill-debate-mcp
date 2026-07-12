@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import os
+import urllib.parse
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
+from kasm.adapters.korea.client import AssemblyOpenApiClient
 from kasm.app import create_auto_services
+from kasm.live import create_live_services
 
 from .middleware import FixedWindowRateLimit
+from .remote_auth import RemoteTokenAuth, request_api_key, result_page, setup_page
 from .server import create_server
 
 
@@ -17,12 +22,25 @@ def create_asgi_app() -> Any:
     try:
         from mcp.server.transport_security import TransportSecuritySettings
         from starlette.applications import Starlette
-        from starlette.responses import JSONResponse
+        from starlette.requests import Request
+        from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
         from starlette.routing import Mount, Route
     except ImportError as exc:  # pragma: no cover - deploy extra
         raise RuntimeError("install the deploy extra to run the public HTTP service") from exc
 
-    services = create_auto_services()
+    remote_secret = os.getenv("KBD_REMOTE_TOKEN_SECRET")
+    token_codec: RemoteTokenAuth | None = None
+    if remote_secret:
+        data_dir = Path(os.getenv("KBD_DATA_DIR", "/tmp/kbd-remote"))
+        client = AssemblyOpenApiClient(
+            "request-scoped-key",
+            api_key_provider=request_api_key,
+            cache_dir=data_dir / "api-cache",
+        )
+        services = create_live_services(client=client, data_dir=data_dir)
+        token_codec = RemoteTokenAuth(None, remote_secret)
+    else:
+        services = create_auto_services()
     allowed_hosts = [
         item.strip()
         for item in os.getenv(
@@ -70,8 +88,29 @@ def create_asgi_app() -> Any:
                 "service": "korean-bill-debate-mcp",
                 **counts,
                 "semantic_index": hybrid is not None,
+                "remote_user_key": token_codec is not None,
             }
         )
+
+    async def home(_request: Request) -> HTMLResponse:
+        if token_codec is None:
+            return HTMLResponse(setup_page(error="Remote user-key mode is not configured"), 503)
+        return HTMLResponse(setup_page(), headers={"Cache-Control": "no-store"})
+
+    async def connect(request: Request) -> HTMLResponse | RedirectResponse:
+        if token_codec is None:
+            return HTMLResponse(setup_page(error="Remote user-key mode is not configured"), 503)
+        if request.method == "GET":
+            return RedirectResponse("/", status_code=303)
+        form = await request.form()
+        api_key = str(form.get("api_key") or "").strip()
+        try:
+            token = token_codec.issue(api_key)
+        except ValueError as exc:
+            return HTMLResponse(setup_page(error=str(exc)), 400)
+        base = str(request.base_url).rstrip("/")
+        mcp_url = f"{base}/mcp?{urllib.parse.urlencode({'token': token})}"
+        return HTMLResponse(result_page(mcp_url), headers={"Cache-Control": "no-store"})
 
     @asynccontextmanager
     async def lifespan(_application: Any) -> AsyncIterator[None]:
@@ -79,11 +118,19 @@ def create_asgi_app() -> Any:
             yield
 
     application = Starlette(
-        routes=[Route("/healthz", health), Mount("/", app=mcp_app)],
+        routes=[
+            Route("/", home),
+            Route("/connect", connect, methods=["GET", "POST"]),
+            Route("/healthz", health),
+            Mount("/", app=mcp_app),
+        ],
         lifespan=lifespan,
     )
     limit = int(os.getenv("KASM_RATE_LIMIT_PER_MINUTE", "120"))
-    return FixedWindowRateLimit(application, limit)
+    guarded: Any = FixedWindowRateLimit(application, limit)
+    if token_codec is not None:
+        guarded = RemoteTokenAuth(guarded, remote_secret or "")
+    return guarded
 
 
 app = create_asgi_app()

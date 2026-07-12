@@ -18,3 +18,4 @@ build/
 .kasm-cache/
 .env
 benchmarks/utility-evaluation.json
+.vercel
