@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import html
+import json
 import urllib.parse
 from contextvars import ContextVar
 from typing import Any
@@ -59,8 +60,10 @@ class RemoteTokenAuth:
         try:
             api_key = self.reveal(token)
         except ValueError:
+            _log_mcp_access(scope, authenticated=False, path_authenticated=bool(path_token))
             await _json_error(send, 401, "A valid personal connection token is required")
             return
+        _log_mcp_access(scope, authenticated=True, path_authenticated=bool(path_token))
         clean_scope = dict(scope)
         if path_token:
             clean_scope["path"] = "/mcp"
@@ -89,6 +92,28 @@ async def _json_error(send: Any, status: int, message: str) -> None:
         }
     )
     await send({"type": "http.response.body", "body": body})
+
+
+def _log_mcp_access(
+    scope: dict[str, Any], *, authenticated: bool, path_authenticated: bool
+) -> None:
+    """Emit connector diagnostics without logging a path, token, query, or API key."""
+    headers = {
+        bytes(name).decode("latin-1").lower(): bytes(value).decode("latin-1")
+        for name, value in scope.get("headers", [])
+    }
+    print(
+        json.dumps(
+            {
+                "event": "mcp_access",
+                "authenticated": authenticated,
+                "path_authenticated": path_authenticated,
+                "user_agent": headers.get("user-agent", "")[:160],
+            },
+            ensure_ascii=True,
+        ),
+        flush=True,
+    )
 
 
 def setup_page(*, action: str = "/connect", error: str | None = None) -> str:
