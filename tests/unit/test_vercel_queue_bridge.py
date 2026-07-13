@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 
@@ -62,3 +63,11 @@ def test_vercel_upload_excludes_local_credentials_and_build_state() -> None:
 
     assert {".env", ".env.*", ".vercel", "node_modules", "build", "dist"} <= patterns
     assert "!.env.example" in patterns
+
+
+def test_vercel_python_sdk_is_a_base_runtime_dependency() -> None:
+    root = Path(__file__).resolve().parents[2]
+    project = tomllib.loads((root / "pyproject.toml").read_text())
+    dependencies = project["project"]["dependencies"]
+
+    assert any(value.startswith("vercel>=0.6") for value in dependencies)

@@ -58,7 +58,13 @@ class MemoryTokenStorage:
 def _structured(result: Any, operation: str) -> dict[str, Any]:
     value = result.structuredContent
     if result.isError or not isinstance(value, dict):
-        raise RuntimeError(f"{operation} returned an MCP error")
+        detail = " | ".join(
+            str(getattr(item, "text", item)) for item in (result.content or [])
+        )
+        raise RuntimeError(
+            f"{operation} returned an MCP error"
+            + (f": {detail[:2000]}" if detail else "")
+        )
     return value
 
 

@@ -649,20 +649,19 @@ dependencies = [
     { name = "cryptography" },
     { name = "mcp" },
     { name = "pypdf" },
+    { name = "vercel" },
 ]
 
 [package.optional-dependencies]
 deploy = [
     { name = "mcp" },
     { name = "uvicorn" },
-    { name = "vercel" },
 ]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
-    { name = "vercel" },
 ]
 semantic = [
     { name = "faiss-cpu" },
@@ -684,8 +683,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "sentence-transformers", marker = "extra == 'semantic'", specifier = ">=3" },
     { name = "uvicorn", marker = "extra == 'deploy'", specifier = ">=0.30" },
-    { name = "vercel", marker = "extra == 'deploy'", specifier = ">=0.6,<0.7" },
-    { name = "vercel", marker = "extra == 'dev'", specifier = ">=0.6,<0.7" },
+    { name = "vercel", specifier = ">=0.6,<0.7" },
 ]
 provides-extras = ["mcp", "semantic", "deploy", "dev"]
 
