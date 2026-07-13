@@ -1,6 +1,6 @@
 # Korean Bill & Debate MCP
 
-Current version: `v0.7.0`
+Current version: `v0.7.1`
 
 **Connect scattered Assembly records around a single bill.**
 
@@ -50,7 +50,8 @@ created app from the chat `+` menu. Availability depends on your plan and worksp
 #### 1. Install the prerequisites
 
 Issue your personal [Open Assembly API key](https://open.assembly.go.kr/portal/openapi/openApiNaListPage.do),
-then install `uv` and Poppler (`pdftotext`).
+then install `uv`. Poppler (`pdftotext`) is recommended for faster PDF extraction; the built-in
+Python extractor is used when Poppler is unavailable.
 
 ```bash
 # macOS
@@ -64,7 +65,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #### 2. Install the pinned GitHub release
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1
 ```
 
 #### 3. Run one command for the client you use
@@ -79,6 +80,9 @@ uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.
 The setup wizard hides and validates your API key, stores it with user-only permissions, and
 registers the MCP with the selected client. Your key and downloaded Assembly records stay on your
 computer.
+
+Confirm that the result contains `"installed": true`. The command exits with an error when the
+client executable is missing or registration fails.
 
 #### 4. Restart the client and ask
 

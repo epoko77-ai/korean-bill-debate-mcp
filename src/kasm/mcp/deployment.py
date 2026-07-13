@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from kasm.adapters.korea.bills import BILL_DATASET
 from kasm.adapters.korea.client import AssemblyOpenApiClient
 from kasm.app import create_auto_services
 from kasm.live import create_live_services
@@ -22,6 +23,7 @@ def create_asgi_app() -> Any:
     try:
         from mcp.server.transport_security import TransportSecuritySettings
         from starlette.applications import Starlette
+        from starlette.concurrency import run_in_threadpool
         from starlette.requests import Request
         from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
         from starlette.routing import Mount, Route
@@ -37,7 +39,11 @@ def create_asgi_app() -> Any:
             api_key_provider=request_api_key,
             cache_dir=data_dir / "api-cache",
         )
-        services = create_live_services(client=client, data_dir=data_dir)
+        services = create_live_services(
+            client=client,
+            data_dir=data_dir,
+            max_minutes_per_request=int(os.getenv("KBD_REMOTE_MAX_MINUTES_PER_REQUEST", "1")),
+        )
         token_codec = RemoteTokenAuth(None, remote_secret)
     else:
         services = create_auto_services()
@@ -105,8 +111,9 @@ def create_asgi_app() -> Any:
         form = await request.form()
         api_key = str(form.get("api_key") or "").strip()
         try:
+            await run_in_threadpool(_validate_remote_key, api_key)
             token = token_codec.issue(api_key)
-        except ValueError as exc:
+        except (RuntimeError, ValueError) as exc:
             return HTMLResponse(setup_page(error=str(exc)), 400)
         base = str(request.base_url).rstrip("/")
         mcp_url = f"{base}/mcp?{urllib.parse.urlencode({'token': token})}"
@@ -131,6 +138,22 @@ def create_asgi_app() -> Any:
     if token_codec is not None:
         guarded = RemoteTokenAuth(guarded, remote_secret or "")
     return guarded
+
+def _validate_remote_key(api_key: str) -> None:
+    """Reject invalid keys before issuing a password-equivalent MCP URL."""
+    if not api_key or len(api_key) > 256:
+        raise ValueError("열린국회 API 키를 확인해 주세요.")
+    try:
+        AssemblyOpenApiClient(api_key, cache_ttl_seconds=0).fetch_page(
+            BILL_DATASET,
+            page_size=1,
+            parameters={"AGE": 22},
+            refresh=True,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "열린국회 API 키가 유효하지 않거나 공식 API에 연결할 수 없습니다."
+        ) from exc
 
 
 app = create_asgi_app()

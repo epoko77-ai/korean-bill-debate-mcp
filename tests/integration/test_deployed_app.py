@@ -160,6 +160,7 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
     monkeypatch.setenv("KBD_REMOTE_TOKEN_SECRET", secret)
     monkeypatch.setenv("KBD_DATA_DIR", str(tmp_path / "remote"))
     monkeypatch.delenv("ASSEMBLY_OPEN_API_KEY", raising=False)
+    monkeypatch.setattr("kasm.mcp.deployment._validate_remote_key", lambda _key: None)
     from kasm.mcp.deployment import create_asgi_app
 
     async def exercise() -> None:
@@ -186,6 +187,29 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
                     assert len((await session.list_tools()).tools) == 8
+
+    asyncio.run(exercise())
+
+
+def test_remote_connection_rejects_invalid_key_before_issuing_link(tmp_path, monkeypatch) -> None:
+    secret = Fernet.generate_key().decode()
+    monkeypatch.setenv("KBD_REMOTE_TOKEN_SECRET", secret)
+    monkeypatch.setenv("KBD_DATA_DIR", str(tmp_path / "remote-invalid"))
+
+    def reject(_key: str) -> None:
+        raise RuntimeError("열린국회 API 키가 유효하지 않습니다.")
+
+    monkeypatch.setattr("kasm.mcp.deployment._validate_remote_key", reject)
+    from kasm.mcp.deployment import create_asgi_app
+
+    async def exercise() -> None:
+        application = create_asgi_app()
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            response = await client.post("/connect", data={"api_key": "invalid"})
+            assert response.status_code == 400
+            assert "유효하지 않습니다" in response.text
+            assert "/mcp?token=" not in response.text
 
     asyncio.run(exercise())
 

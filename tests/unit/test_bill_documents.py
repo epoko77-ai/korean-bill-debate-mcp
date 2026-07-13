@@ -74,6 +74,24 @@ def test_fetches_and_extracts_only_official_bill_document_pdf(tmp_path: Path) ->
         fetcher.fetch("https://example.com/review.pdf")
 
 
+def test_bill_document_uses_python_extraction_without_poppler(tmp_path: Path) -> None:
+    def missing_runner(*_args, **_kwargs):
+        raise FileNotFoundError("pdftotext")
+
+    fetcher = BillDocumentFetcher(
+        tmp_path,
+        opener=lambda *_args, **_kwargs: Response(b"%PDF-1.4 review"),
+        runner=missing_runner,
+        fallback_extractor=lambda _path: "전문위원은 법체계 정합성을 검토했다",
+    )
+
+    result = fetcher.fetch(
+        "https://likms.assembly.go.kr/filegate/servlet/FileGate?bookId=review&type=1"
+    )
+
+    assert "전문위원" in result.text
+
+
 def test_review_report_text_finds_and_enriches_bill() -> None:
     now = datetime.now(UTC)
     bill = Bill(

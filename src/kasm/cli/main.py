@@ -217,7 +217,8 @@ def main(
             print(f"kbd: {exc}", file=sys.stderr)
             return 2
         _print(setup_result)
-        return 0
+        registration = setup_result.get("registration", {})
+        return 0 if registration.get("installed") is True else 2
     if args.command == "sync-bills":
         from kasm.adapters.korea.bills import ingest_bill_rows
         from kasm.adapters.korea.client import AssemblyOpenApiClient

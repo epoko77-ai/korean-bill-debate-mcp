@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .pdf_text import FallbackExtractor, extract_pdf_text
+
 ALLOWED_MINUTES_HOST = "record.assembly.go.kr"
 
 
@@ -30,11 +32,13 @@ class MinutesFetcher:
         timeout: float = 60.0,
         opener: Callable[..., object] = urllib.request.urlopen,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        fallback_extractor: FallbackExtractor | None = None,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.timeout = timeout
         self._opener = opener
         self._runner = runner
+        self._fallback_extractor = fallback_extractor
 
     def fetch(self, source_url: str, *, refresh: bool = False) -> FetchedMinutes:
         if urlsplit(source_url).hostname != ALLOWED_MINUTES_HOST:
@@ -62,17 +66,12 @@ class MinutesFetcher:
         raw = pdf_path.read_bytes()
         source_hash = hashlib.sha256(raw).hexdigest()
         if refresh or not text_path.exists():
-            try:
-                self._runner(
-                    ["pdftotext", "-layout", str(pdf_path), str(text_path)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except FileNotFoundError as exc:
-                raise RuntimeError("pdftotext is required to extract official minutes") from exc
-            except subprocess.CalledProcessError as exc:
-                raise RuntimeError(f"pdftotext failed: {exc.stderr.strip()}") from exc
+            extract_pdf_text(
+                pdf_path,
+                text_path,
+                runner=self._runner,
+                fallback_extractor=self._fallback_extractor,
+            )
         return FetchedMinutes(
             source_url=source_url,
             source_hash=source_hash,

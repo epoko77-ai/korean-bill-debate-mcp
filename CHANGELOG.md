@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.1] - 2026-07-13
+
+### Fixed
+
+- Added a pure-Python PDF extraction fallback so hosted serverless MCP requests can parse official
+  minutes and committee expert review reports without a system Poppler binary.
+- Made `kbd setup` return a failure exit code when the selected client is missing or MCP
+  registration fails instead of reporting command success.
+- Validate each Open Assembly API key before issuing a personal hosted MCP link.
+- Bound hosted requests to one relevant minutes PDF by default so a cold serverless request stays
+  within the production execution window.
+
+### Added
+
+- Regression coverage for Poppler-free PDF extraction, failed client registration, and invalid
+  hosted API keys.
+
 ## [0.7.0] - 2026-07-12
 
 ### Added

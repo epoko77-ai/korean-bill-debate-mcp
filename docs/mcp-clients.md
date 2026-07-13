@@ -18,7 +18,7 @@
 ## 로컬 설치 공통 준비
 
 1. 열린국회에서 본인 API 키를 발급받습니다.
-2. `uv`와 Poppler(`pdftotext`)를 설치합니다.
+2. `uv`를 설치합니다. Poppler(`pdftotext`)는 선택사항이지만 설치하면 PDF 처리가 더 빠릅니다.
 3. 아래 자동 설정 또는 수동 설정 중 하나를 사용합니다.
 
 키를 명령행 인자로 쓰면 셸 기록에 남을 수 있으므로 설정 마법사의 가려진 입력이나 MCP
@@ -29,7 +29,7 @@
 PyPI 배포 전에는 검증된 GitHub 릴리스를 직접 설치합니다.
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1
 ```
 
 ## 자동 설정
@@ -55,7 +55,7 @@ kbd setup --client claude-desktop
 ```bash
 claude mcp add --scope user korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1 kbd mcp
 claude mcp get korean-bill-debate
 ```
 
@@ -66,7 +66,7 @@ Claude Code에서 `/mcp`를 실행해 8개 도구를 확인합니다.
 ```bash
 codex mcp add korean-bill-debate \
   --env ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1 kbd mcp
 codex mcp get korean-bill-debate
 codex mcp list
 ```
@@ -78,7 +78,7 @@ Codex 안에서는 `/mcp`로 연결 상태를 확인합니다.
 ```bash
 gemini mcp add korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1 kbd mcp
 gemini mcp list
 ```
 
@@ -95,7 +95,7 @@ Gemini CLI 안에서는 `/mcp list`를 사용합니다.
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0",
+        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1",
         "kbd",
         "mcp"
       ],
@@ -138,8 +138,8 @@ get_speech, get_speech_context, list_committees, list_meetings
 
 - **키 누락**: `ASSEMBLY_OPEN_API_KEY is required`가 나오면 setup을 다시 실행합니다.
 - **키 오류**: setup의 검증 단계에서 열린국회 오류 코드를 그대로 확인합니다.
-- **`pdftotext` 없음**: macOS는 `brew install poppler`, Ubuntu는
-  `sudo apt-get install poppler-utils`를 실행합니다.
+- **PDF 처리가 느림**: 내장 Python 추출기로도 동작하지만 macOS는 `brew install poppler`,
+  Ubuntu는 `sudo apt-get install poppler-utils`를 실행하면 더 빠릅니다.
 - **첫 질문이 느림**: 관련 회의록 PDF를 처음 내려받아 파싱하는 과정입니다.
 - **검색 범위 부족**: 질문에 법안명·위원회·연도나 월을 추가하면 공식 회의 후보를 더 정확히
   좁힐 수 있습니다.

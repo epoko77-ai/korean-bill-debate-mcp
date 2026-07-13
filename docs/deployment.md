@@ -7,7 +7,7 @@ query cache on the user's machine.
 
 ```bash
 export ASSEMBLY_OPEN_API_KEY='YOUR_KEY'
-uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.0 kbd mcp
+uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1 kbd mcp
 ```
 
 ## Hosted user-keyed Streamable HTTP

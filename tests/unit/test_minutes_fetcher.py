@@ -42,6 +42,22 @@ def test_fetches_only_official_pdf_and_extracts_text(tmp_path: Path) -> None:
     assert requests[0].headers["Referer"] == "https://open.assembly.go.kr/"
 
 
+def test_falls_back_to_python_extraction_when_poppler_is_missing(tmp_path: Path) -> None:
+    def missing_runner(*_args, **_kwargs):
+        raise FileNotFoundError("pdftotext")
+
+    fetcher = MinutesFetcher(
+        tmp_path,
+        opener=lambda *_args, **_kwargs: Response(b"%PDF-1.4 minutes"),
+        runner=missing_runner,
+        fallback_extractor=lambda _path: "위원의 질문과 정부의 답변",
+    )
+
+    result = fetcher.fetch("https://record.assembly.go.kr/minutes.pdf")
+
+    assert "정부의 답변" in result.text
+
+
 def test_rejects_non_official_or_non_pdf_sources(tmp_path: Path) -> None:
     fetcher = MinutesFetcher(tmp_path, opener=lambda *_args, **_kwargs: Response(b"html"))
     with pytest.raises(ValueError):
