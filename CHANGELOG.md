@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Add MCP-standard OAuth 2.1 discovery, dynamic client registration, PKCE authorization, access
+  tokens, and refresh tokens for Claude.ai and ChatGPT. Both now connect through the stable public
+  `/mcp` URL instead of relying on a path capability that could register without exposing tools.
 - Treat every seven-digit bill number in a natural-language question as an exact identifier and
   reject unrelated rows returned by fuzzy search or an upstream API response.
 - Stop the web workspace before LLM synthesis when an explicit bill number cannot be verified,
@@ -13,8 +16,8 @@
 - Increase answer budgets to 8,000 tokens by default and reject provider responses stopped at
   their token limit. Continue incomplete answers for up to three provider calls and combine every
   completed section, allowing long-form results without presenting a cut-off answer as complete.
-- Issue Claude-compatible personal MCP capability URLs with authentication in a stable path instead
-  of a query parameter, while continuing to accept previously issued query-token URLs.
+- Keep backward-compatible personal MCP capability URLs in a stable path instead of a query
+  parameter, while continuing to accept previously issued query-token URLs for legacy clients.
 - Expand hosted research to as many as 20 relevant minutes PDFs and 50 matching speeches, include
   substantially longer expert-review excerpts, and scan every month from an explicitly requested
   bill's proposal through the present for chronological research.

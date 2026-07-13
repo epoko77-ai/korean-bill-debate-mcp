@@ -150,38 +150,39 @@ supplementary investigation authority. Include surrounding Q&A and official sour
 ### 방법 1: Claude.ai·ChatGPT 웹에서 바로 사용 — 설치 없음
 
 먼저 [열린국회정보 Open API](https://open.assembly.go.kr/portal/openapi/openApiNaListPage.do)에서
-본인의 키를 발급받고 [Korean Bill & Debate MCP 연결 페이지](https://korean-bill-debate-mcp.vercel.app)를
-브라우저에서 엽니다.
+본인의 키를 발급받습니다. Claude.ai와 ChatGPT 모두 아래 공용 MCP 주소로 연결합니다.
 
-1. 본인의 열린국회 API 키를 입력합니다.
-2. **개인 MCP 링크 만들기**를 누릅니다.
-3. 완성된 `https://.../mcp/t/...` 주소 전체를 복사합니다.
-4. 사용하는 웹 앱의 커스텀 MCP 서버 URL에 붙여 넣습니다.
+```text
+https://korean-bill-debate-mcp.vercel.app/mcp
+```
 
 #### Claude.ai
 
 1. **설정 → 커넥터 → 커스텀 커넥터 추가**로 이동합니다.
-2. 이름은 `Korean Bill & Debate`, URL은 발급받은 개인 MCP 링크를 입력합니다.
-3. 채팅의 `+ → 커넥터`에서 활성화합니다.
+2. 이름은 `Korean Bill & Debate`, URL은 위 공용 주소를 정확히 입력합니다.
+3. Claude가 연결 승인을 요청하면 열린 화면에 **본인의 열린국회 API 키**를 입력합니다.
+4. 연결 후 새 채팅을 열고 `+ → 커넥터`에서 활성화합니다. 도구 접근 설정이 보이면
+   **항상 사용 가능(Always available)**으로 선택합니다.
+
+Claude에는 `/mcp/t/...` 개인 링크를 넣지 마세요. Claude가 표준 OAuth로 서버를 발견하고,
+승인 화면에서 받은 키를 암호화된 접근 토큰으로 바꿉니다. 키 원문은 서버의 DB나 파일에
+저장하지 않습니다.
 
 #### ChatGPT
 
-1. **설정 → 앱 → 고급 설정**에서 개발자 모드를 활성화합니다.
-2. **앱 만들기**를 선택합니다.
-3. 이름은 `Korean Bill & Debate`, 서버 URL은 발급받은 개인 MCP 링크를 입력합니다.
-4. 만든 앱을 연결하고 채팅의 `+` 메뉴에서 선택합니다.
+1. **설정 → 보안 및 로그인**에서 개발자 모드를 활성화합니다.
+2. **설정 → 플러그인**에서 `+`를 눌러 개발자 모드 앱을 만듭니다.
+3. 이름은 `Korean Bill & Debate`, MCP 서버 URL은 위 공용 주소를 입력합니다.
+4. 연결 승인 화면에 **본인의 열린국회 API 키**를 입력합니다.
+5. 새 채팅의 `+ → 더 보기`에서 만든 앱을 선택합니다.
 
 > **연결됨 표시만으로는 이 대화에서 활성화된 것이 아닙니다.** 새 채팅을 열고 입력창 아래
 > `+` 또는 **도구** 메뉴에서 `Korean Bill & Debate`를 선택한 뒤 질문하세요. AI가 “이
 > 대화에서는 MCP가 호출 가능한 도구로 잡히지 않는다”고 말하면 이 단계가 빠진 것입니다.
 
-> 0.9.2 이전 연결 페이지에서 발급한 `?token=...` 링크를 Claude.ai에 등록했다면, 연결
-> 페이지에서 `/mcp/t/...` 형식의 링크를 새로 발급해 커스텀 커넥터를 다시 등록하세요. URL
-> 쿼리에 인증값을 넣지 않아 Claude의 후속 MCP 요청에서도 같은 개인 연결 경로가 유지됩니다.
-
-> 키 없는 `/mcp` 주소만 붙여 넣으면 연결되지 않습니다. 반드시 연결 페이지에서 본인의 키로
-> 만든 **개인 MCP 링크 전체**를 사용하세요. 키 원문은 서버의 DB나 파일에 저장하지 않지만,
-> 발급된 링크는 사용자의 API 할당량을 사용할 수 있으므로 비밀번호처럼 보관해야 합니다.
+> 기존 `?token=...` 또는 `/mcp/t/...` 주소를 Claude.ai나 ChatGPT에 등록했다면 해당 연결을
+> 삭제하고 위의 공용 `/mcp` 주소로 다시 등록하세요. 개인 링크는 OAuth를 지원하지 않는
+> 클라이언트와의 하위 호환을 위해 계속 지원하지만 비밀번호처럼 보관해야 합니다.
 
 ### 방법 2: Claude Desktop·Claude Code·Codex·Gemini CLI에 로컬 설치
 

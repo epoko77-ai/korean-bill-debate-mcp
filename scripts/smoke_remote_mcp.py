@@ -20,10 +20,14 @@ async def exercise() -> dict[str, object]:
     base_url = os.getenv(
         "KBD_REMOTE_BASE_URL", "https://korean-bill-debate-mcp.vercel.app"
     ).rstrip("/")
+    origin = os.getenv("KBD_SMOKE_ORIGIN", "").strip()
     api_key = os.environ.get("ASSEMBLY_OPEN_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("ASSEMBLY_OPEN_API_KEY is required")
-    async with httpx.AsyncClient(timeout=150, follow_redirects=True) as client:
+    headers = {"Origin": origin} if origin else None
+    async with httpx.AsyncClient(
+        timeout=150, follow_redirects=True, headers=headers
+    ) as client:
         response = await client.post(f"{base_url}/connect", data={"api_key": api_key})
         response.raise_for_status()
         match = _URL_FIELD.search(response.text)
@@ -38,9 +42,11 @@ async def exercise() -> dict[str, object]:
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 tools = (await session.list_tools()).tools
-                bill_result = await session.call_tool(
-                    "get_bill_status", {"bill_id_or_no": "2219564"}
-                )
+                bill_result = None
+                if os.getenv("KBD_SMOKE_SKIP_BILL") != "1":
+                    bill_result = await session.call_tool(
+                        "get_bill_status", {"bill_id_or_no": "2219564"}
+                    )
     names = [tool.name for tool in tools]
     expected = {
         "search_speeches",
@@ -54,15 +60,18 @@ async def exercise() -> dict[str, object]:
     }
     if set(names) != expected:
         raise RuntimeError("deployed MCP tool list is incomplete")
-    bill = bill_result.structuredContent
-    if bill_result.isError or not isinstance(bill, dict) or bill.get("bill_no") != "2219564":
+    bill = bill_result.structuredContent if bill_result is not None else None
+    if bill_result is not None and (
+        bill_result.isError or not isinstance(bill, dict) or bill.get("bill_no") != "2219564"
+    ):
         raise RuntimeError("deployed MCP did not return the exact requested bill")
     return {
         "base_url": base_url,
+        "origin": origin or None,
         "tool_count": len(names),
         "tools": names,
-        "verified_bill_no": bill["bill_no"],
-        "verified_bill_name": bill.get("name"),
+        "verified_bill_no": bill["bill_no"] if isinstance(bill, dict) else None,
+        "verified_bill_name": bill.get("name") if isinstance(bill, dict) else None,
         "passed": True,
     }
 

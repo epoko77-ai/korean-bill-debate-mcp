@@ -20,10 +20,15 @@ host performs the language-model work.
 
 ### Hosted MCP connection
 
-The connection page receives the user's Open Assembly key in an HTTPS POST solely to validate it
-and issue a Fernet-encrypted MCP connection token. The raw key is not written to a database or
-file. The hosted process decrypts the token for one authenticated MCP request and uses the key only
-to query official Assembly services.
+Claude.ai and ChatGPT use standard OAuth discovery, dynamic client registration, PKCE
+authorization, and short-lived bearer access tokens. The HTTPS approval page receives the user's Open Assembly key
+solely to validate it and place it inside an encrypted access credential. The raw key is not written
+to a database or file. The hosted process decrypts the credential for one authenticated MCP request
+and uses the key only to query official Assembly services. Refresh credentials are also encrypted
+bearer credentials and must be protected by both the client and operator.
+
+For clients that cannot complete this OAuth flow, the connection page can issue a legacy
+Fernet-encrypted path capability after validating the same user key.
 
 The generated `/mcp/t/...` URL is a password-equivalent bearer credential. Anyone who has the
 complete URL can consume that user's Open Assembly quota. Users must not publish, screenshot, or

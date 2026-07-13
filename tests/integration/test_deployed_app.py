@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import urllib.parse
 from datetime import UTC, date, datetime
 
 import httpx
@@ -190,7 +193,9 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
         ):
             setup = await client.get("/")
             assert "본인의 열린국회 API 키" in setup.text
-            assert "Create a web MCP connection" in setup.text
+            assert "Claude.ai·ChatGPT 연결 — 주소 하나로 시작" in setup.text
+            assert "https://korean-bill-debate-mcp.vercel.app/mcp" in setup.text
+            assert "Legacy personal MCP URL" in setup.text
             assert "Get an API key from Open Assembly" in setup.text
             assert "/workspace" in setup.text
             workspace = await client.get("/workspace")
@@ -218,10 +223,103 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
             assert "/mcp/t/" in issued.text
             assert "personal-key" not in issued.text
             assert "Your personal MCP URL is ready" in issued.text
+            assert "Claude.ai와 ChatGPT에는 이 개인 링크를 넣지 마세요" in issued.text
             assert "등록만 하면 끝이 아닙니다" in issued.text
             assert "+ 또는 도구 메뉴" in issued.text
             unauthenticated = await client.post("/mcp")
             assert unauthenticated.status_code == 401
+            assert "oauth-protected-resource/mcp" in unauthenticated.headers["www-authenticate"]
+            assert 'scope="mcp:tools"' in unauthenticated.headers["www-authenticate"]
+
+            resource_metadata = await client.get(
+                "/.well-known/oauth-protected-resource/mcp"
+            )
+            assert resource_metadata.json()["resource"] == "http://127.0.0.1/mcp"
+            authorization_metadata = await client.get(
+                "/.well-known/oauth-authorization-server"
+            )
+            assert authorization_metadata.json()["registration_endpoint"].endswith(
+                "/oauth/register"
+            )
+            registered = await client.post(
+                "/oauth/register",
+                json={
+                    "client_name": "Claude",
+                    "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+                },
+            )
+            assert registered.status_code == 201
+            rejected_registration = await client.post(
+                "/oauth/register",
+                json={
+                    "client_name": "Unsafe client",
+                    "redirect_uris": ["http://attacker.example/callback"],
+                },
+            )
+            assert rejected_registration.status_code == 400
+            client_id = registered.json()["client_id"]
+            verifier = "v" * 64
+            challenge = base64.urlsafe_b64encode(
+                hashlib.sha256(verifier.encode()).digest()
+            ).rstrip(b"=").decode()
+            authorization_values = {
+                "client_id": client_id,
+                "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                "response_type": "code",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "scope": "mcp:tools",
+                "resource": "http://127.0.0.1/mcp",
+                "state": "test-state",
+            }
+            consent = await client.get("/oauth/authorize", params=authorization_values)
+            assert consent.status_code == 200
+            assert "본인의 열린국회 API 키" in consent.text
+            authorized = await client.post(
+                "/oauth/authorize",
+                data={**authorization_values, "api_key": "personal-key"},
+            )
+            assert authorized.status_code == 303
+            callback = urllib.parse.urlsplit(authorized.headers["location"])
+            callback_values = urllib.parse.parse_qs(callback.query)
+            assert callback_values["state"] == ["test-state"]
+            exchanged = await client.post(
+                "/oauth/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": callback_values["code"][0],
+                    "client_id": client_id,
+                    "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                    "code_verifier": verifier,
+                    "resource": "http://127.0.0.1/mcp",
+                },
+            )
+            assert exchanged.status_code == 200
+            access_token = exchanged.json()["access_token"]
+            refreshed = await client.post(
+                "/oauth/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": exchanged.json()["refresh_token"],
+                    "client_id": client_id,
+                    "resource": "http://127.0.0.1/mcp",
+                },
+            )
+            assert refreshed.status_code == 200
+            assert refreshed.json()["access_token"] != access_token
+            async with (
+                httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://127.0.0.1",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                ) as oauth_client,
+                streamable_http_client(
+                    "http://127.0.0.1/mcp", http_client=oauth_client
+                ) as streams,
+                ClientSession(streams[0], streams[1]) as session,
+            ):
+                await session.initialize()
+                assert len((await session.list_tools()).tools) == 8
 
             token = RemoteTokenAuth(None, secret).issue("personal-key")
             async with streamable_http_client(

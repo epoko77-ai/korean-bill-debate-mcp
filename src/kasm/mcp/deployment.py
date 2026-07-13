@@ -19,6 +19,7 @@ from kasm.workspace.ui import workspace_page, workspace_script
 
 from .middleware import FixedWindowRateLimit
 from .remote_auth import RemoteTokenAuth, request_api_key, result_page, setup_page
+from .remote_oauth import RemoteOAuth
 from .server import create_server
 
 
@@ -35,6 +36,7 @@ def create_asgi_app() -> Any:
 
     remote_secret = os.getenv("KBD_REMOTE_TOKEN_SECRET")
     token_codec: RemoteTokenAuth | None = None
+    oauth: RemoteOAuth | None = None
     if remote_secret:
         data_dir = Path(os.getenv("KBD_DATA_DIR", "/tmp/kbd-remote"))
         client = AssemblyOpenApiClient(
@@ -48,6 +50,7 @@ def create_asgi_app() -> Any:
             max_minutes_per_request=int(os.getenv("KBD_REMOTE_MAX_MINUTES_PER_REQUEST", "20")),
         )
         token_codec = RemoteTokenAuth(None, remote_secret)
+        oauth = RemoteOAuth(token_codec)
     else:
         services = create_auto_services()
     allowed_hosts = [
@@ -121,6 +124,86 @@ def create_asgi_app() -> Any:
         base = str(request.base_url).rstrip("/")
         mcp_url = f"{base}/mcp/t/{urllib.parse.quote(token, safe='')}"
         return HTMLResponse(result_page(mcp_url), headers=_private_headers())
+
+    def oauth_base(request: Request) -> str:
+        return str(request.base_url).rstrip("/")
+
+    async def protected_resource(request: Request) -> JSONResponse:
+        if oauth is None:
+            return JSONResponse({"error": "OAuth is not configured"}, 503)
+        return JSONResponse(
+            oauth.protected_resource_metadata(oauth_base(request)),
+            headers=_oauth_headers(),
+        )
+
+    async def authorization_metadata(request: Request) -> JSONResponse:
+        if oauth is None:
+            return JSONResponse({"error": "OAuth is not configured"}, 503)
+        return JSONResponse(
+            oauth.authorization_server_metadata(oauth_base(request)),
+            headers=_oauth_headers(),
+        )
+
+    async def oauth_register(request: Request) -> JSONResponse:
+        if oauth is None:
+            return JSONResponse({"error": "OAuth is not configured"}, 503)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("registration metadata must be an object")
+            result = oauth.register(payload)
+        except (ValueError, UnicodeError) as exc:
+            return JSONResponse(
+                {"error": "invalid_client_metadata", "error_description": str(exc)},
+                400,
+                headers=_oauth_headers(),
+            )
+        return JSONResponse(result, 201, headers=_oauth_headers())
+
+    async def oauth_authorize(request: Request) -> HTMLResponse | RedirectResponse:
+        if oauth is None:
+            return HTMLResponse("OAuth is not configured", 503)
+        if request.method == "GET":
+            values = {name: value for name, value in request.query_params.items()}
+            values.setdefault("resource", f"{oauth_base(request)}/mcp")
+            try:
+                if values["resource"] != f"{oauth_base(request)}/mcp":
+                    raise ValueError("resource does not match this MCP server")
+                page = oauth.authorization_page(values)
+            except ValueError as exc:
+                return HTMLResponse(str(exc), 400, headers=_private_headers())
+            return HTMLResponse(page, headers=_private_headers())
+        form = await request.form()
+        values = {name: str(value) for name, value in form.multi_items() if name != "api_key"}
+        values.setdefault("resource", f"{oauth_base(request)}/mcp")
+        api_key = str(form.get("api_key") or "").strip()
+        try:
+            if values["resource"] != f"{oauth_base(request)}/mcp":
+                raise ValueError("resource does not match this MCP server")
+            await run_in_threadpool(_validate_remote_key, api_key)
+            location = oauth.authorize(values, api_key)
+        except (RuntimeError, ValueError) as exc:
+            try:
+                page = oauth.authorization_page(values, error=str(exc))
+            except ValueError:
+                page = str(exc)
+            return HTMLResponse(page, 400, headers=_private_headers())
+        return RedirectResponse(location, status_code=303, headers=_oauth_headers())
+
+    async def oauth_token(request: Request) -> JSONResponse:
+        if oauth is None:
+            return JSONResponse({"error": "OAuth is not configured"}, 503)
+        form = await request.form()
+        values = {name: str(value) for name, value in form.multi_items()}
+        try:
+            result = oauth.token(values)
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": "invalid_grant", "error_description": str(exc)},
+                400,
+                headers=_oauth_headers(),
+            )
+        return JSONResponse(result, headers=_oauth_headers())
 
     async def workspace(_request: Request) -> HTMLResponse:
         if token_codec is None:
@@ -200,6 +283,21 @@ def create_asgi_app() -> Any:
         routes=[
             Route("/", home),
             Route("/connect", connect, methods=["GET", "POST"]),
+            Route(
+                "/.well-known/oauth-protected-resource",
+                protected_resource,
+            ),
+            Route(
+                "/.well-known/oauth-protected-resource/mcp",
+                protected_resource,
+            ),
+            Route(
+                "/.well-known/oauth-authorization-server",
+                authorization_metadata,
+            ),
+            Route("/oauth/register", oauth_register, methods=["POST"]),
+            Route("/oauth/authorize", oauth_authorize, methods=["GET", "POST"]),
+            Route("/oauth/token", oauth_token, methods=["POST"]),
             Route("/workspace", workspace),
             Route("/workspace/app.js", workspace_javascript),
             Route("/workspace/research", research, methods=["POST"]),
@@ -213,7 +311,13 @@ def create_asgi_app() -> Any:
     guarded: Any = FixedWindowRateLimit(
         application,
         limit,
-        path_limits={"/workspace/research": workspace_limit, "/mcp": limit},
+        path_limits={
+            "/workspace/research": workspace_limit,
+            "/oauth/register": 30,
+            "/oauth/authorize": 30,
+            "/oauth/token": 60,
+            "/mcp": limit,
+        },
     )
     if token_codec is not None:
         guarded = RemoteTokenAuth(guarded, remote_secret or "")
@@ -236,6 +340,15 @@ def _private_headers(*, workspace: bool = False) -> dict[str, str]:
             "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
         ),
     }
+
+
+def _oauth_headers() -> dict[str, str]:
+    return {
+        "Cache-Control": "no-store",
+        "Pragma": "no-cache",
+        "X-Content-Type-Options": "nosniff",
+    }
+
 
 def _validate_remote_key(api_key: str) -> None:
     """Reject invalid keys before issuing a password-equivalent MCP URL."""

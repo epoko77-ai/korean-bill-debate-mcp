@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import html
 import json
+import os
+import time
 import urllib.parse
 from contextvars import ContextVar
 from typing import Any
@@ -34,11 +36,41 @@ class RemoteTokenAuth:
             raise ValueError("Open Assembly API key must be between 1 and 256 characters")
         return self.cipher.encrypt(normalized.encode()).decode()
 
+    def issue_payload(self, purpose: str, values: dict[str, Any]) -> str:
+        payload = json.dumps(
+            {"purpose": purpose, **values}, ensure_ascii=False, separators=(",", ":")
+        )
+        return self.cipher.encrypt(payload.encode()).decode()
+
+    def reveal_payload(
+        self, token: str, purpose: str, *, ttl_seconds: int
+    ) -> dict[str, Any]:
+        try:
+            value = self.cipher.decrypt(token.encode(), ttl=ttl_seconds).decode()
+            payload = json.loads(value)
+        except (InvalidToken, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid connection token") from exc
+        if not isinstance(payload, dict) or payload.get("purpose") != purpose:
+            raise ValueError("invalid connection token")
+        return payload
+
     def reveal(self, token: str) -> str:
         try:
             value = self.cipher.decrypt(token.encode()).decode()
         except (InvalidToken, UnicodeError) as exc:
             raise ValueError("invalid connection token") from exc
+        if value.startswith("{"):
+            try:
+                payload = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("invalid connection token") from exc
+            if (
+                not isinstance(payload, dict)
+                or payload.get("purpose") != "access"
+                or float(payload.get("expires_at") or 0) < time.time()
+            ):
+                raise ValueError("invalid connection token")
+            value = str(payload.get("api_key") or "")
         if not value or len(value) > 256:
             raise ValueError("invalid connection token")
         return value
@@ -56,12 +88,41 @@ class RemoteTokenAuth:
             path_token = urllib.parse.unquote(path.removeprefix(_TOKEN_PATH_PREFIX))
             if not path_token or "/" in path_token:
                 path_token = ""
-        token = path_token or next((value for name, value in pairs if name == "token"), "")
+        headers = {
+            bytes(name).decode("latin-1").lower(): bytes(value).decode("latin-1")
+            for name, value in scope.get("headers", [])
+        }
+        authorization = headers.get("authorization", "")
+        bearer_token = (
+            authorization.removeprefix("Bearer ").strip()
+            if authorization.startswith("Bearer ")
+            else ""
+        )
+        token = (
+            bearer_token
+            or path_token
+            or next((value for name, value in pairs if name == "token"), "")
+        )
         try:
             api_key = self.reveal(token)
         except ValueError:
             _log_mcp_access(scope, authenticated=False, path_authenticated=bool(path_token))
-            await _json_error(send, 401, "A valid personal connection token is required")
+            base = _public_base(scope)
+            await _json_error(
+                send,
+                401,
+                "OAuth authorization or a valid personal connection token is required",
+                headers=[
+                    (
+                        b"www-authenticate",
+                        (
+                            'Bearer realm="Korean Bill & Debate MCP", '
+                            f'resource_metadata="{base}/.well-known/'
+                            'oauth-protected-resource/mcp", scope="mcp:tools"'
+                        ).encode(),
+                    )
+                ],
+            )
             return
         _log_mcp_access(scope, authenticated=True, path_authenticated=bool(path_token))
         clean_scope = dict(scope)
@@ -78,7 +139,13 @@ class RemoteTokenAuth:
             _request_api_key.reset(context_token)
 
 
-async def _json_error(send: Any, status: int, message: str) -> None:
+async def _json_error(
+    send: Any,
+    status: int,
+    message: str,
+    *,
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> None:
     body = ("{\"error\":\"" + message + "\"}").encode()
     await send(
         {
@@ -88,10 +155,24 @@ async def _json_error(send: Any, status: int, message: str) -> None:
                 (b"content-type", b"application/json"),
                 (b"cache-control", b"no-store"),
                 (b"content-length", str(len(body)).encode()),
+                *(headers or []),
             ],
         }
     )
     await send({"type": "http.response.body", "body": body})
+
+
+def _public_base(scope: dict[str, Any]) -> str:
+    configured = os.getenv("KBD_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if configured:
+        return configured
+    headers = {
+        bytes(name).decode("latin-1").lower(): bytes(value).decode("latin-1")
+        for name, value in scope.get("headers", [])
+    }
+    host = headers.get("x-forwarded-host") or headers.get("host") or "localhost"
+    scheme = headers.get("x-forwarded-proto") or str(scope.get("scheme") or "https")
+    return f"{scheme}://{host}"
 
 
 def _log_mcp_access(
@@ -131,14 +212,20 @@ a{{color:#f0cc83}}
 </style></head><body><main><h1>흩어진 국회 기록을,<br>법안 하나로 연결합니다.</h1>
 <p class="english">Connect scattered National Assembly records around a single bill.</p>
 <p><a href="/workspace">설치 없이 바로 조사하기 — 입법조사 워크스페이스 alpha →</a></p>
-<div class="card"><h2>웹 앱용 MCP 연결 링크 만들기<br><span class="english">Create a web MCP connection</span></h2>
-<p>본인의 열린국회 API 키를 입력하면 ChatGPT·Claude에 붙여 넣을 개인 연결 링크를 만듭니다.<br>
-<span class="english">Enter your personal Open Assembly API key to create a private URL for ChatGPT or Claude.</span></p>
-<p><a href="https://open.assembly.go.kr/portal/openapi/openApiNaListPage.do">열린국회에서 API 키 발급 / Get an API key from Open Assembly</a>
-<br><small>공식 발급 사이트의 화면과 원문 데이터는 한국어로 제공됩니다. / The official issuance site and source records are in Korean.</small></p>
+<p><a href="https://open.assembly.go.kr/portal/openapi/openApiNaListPage.do">열린국회에서 API 키 발급 / Get an API key from Open Assembly</a><br>
+<small>공식 발급 사이트의 화면과 원문 데이터는 한국어로 제공됩니다. / The official issuance site and source records are in Korean.</small></p>
+<div class="card"><h2>Claude.ai·ChatGPT 연결 — 주소 하나로 시작</h2>
+<p>사용하는 AI의 <strong>커스텀 커넥터·앱 추가</strong> 화면에 아래 주소를 입력하세요.
+연결 승인 화면이 열리면 그때 본인의 열린국회 API 키를 입력합니다.</p>
+<p><code>https://korean-bill-debate-mcp.vercel.app/mcp</code></p>
+<p><small>개인 링크가 아니라 위 공용 주소를 사용해야 표준 OAuth 연결이 시작됩니다.<br>
+For Claude.ai or ChatGPT, add the public URL above and complete OAuth approval.</small></p></div>
+<br><div class="card"><h2>호환용 개인 MCP 링크<br><span class="english">Legacy personal MCP URL</span></h2>
+<p>OAuth를 지원하지 않는 다른 클라이언트에서만 사용합니다. Claude.ai와 ChatGPT에는 위 공용
+주소를 사용하세요.<br><span class="english">Only use this with clients that cannot complete OAuth.</span></p>
 {message}<form method="post" action="{html.escape(action)}">
 <label>열린국회 API 키 / Open Assembly API key<input name="api_key" type="password" required autocomplete="off"></label>
-<button type="submit">개인 MCP 링크 만들기 / Create personal MCP link</button></form>
+<button type="submit">호환용 링크 만들기 / Create legacy link</button></form>
 <p><small>키 원문은 데이터베이스나 파일에 저장하지 않습니다. 암호화된 연결 토큰을 발급하고,
 요청 순간에만 사용자의 키로 열린국회 공식 API를 호출합니다.<br>
 The raw key is not stored in a database or file. It is used only while requesting official records.</small></p></div></main></body></html>"""
@@ -152,14 +239,14 @@ body{{margin:0;background:#061a31;color:#f7f2e8;font:16px/1.6 system-ui,sans-ser
 main{{max-width:760px;margin:8vh auto;padding:36px}}.card{{background:#0b2945;border:1px solid #2b5a71;border-radius:20px;padding:28px}}
 textarea{{box-sizing:border-box;width:100%;min-height:130px;padding:14px;font:14px/1.5 ui-monospace,monospace}}
 h1{{font-size:40px}}strong{{color:#f0cc83}}.english{{color:#b8c8d4}}</style></head><body><main><h1>개인 MCP 링크가 준비됐습니다.<br><span class="english">Your personal MCP URL is ready.</span></h1>
-<div class="card"><p>아래 주소 전체를 복사해 ChatGPT 또는 Claude의 커스텀 MCP 서버 URL에 붙여 넣으세요.<br>
-<span class="english">Copy the complete URL into the custom MCP server field in ChatGPT or Claude.</span></p>
+<div class="card"><p>아래 주소는 OAuth를 지원하지 않는 호환 클라이언트에서만 사용하세요.<br>
+<span class="english">Use this URL only with a legacy client that cannot complete OAuth.</span></p>
 <textarea readonly onclick="this.select()">{escaped}</textarea>
 <p><strong>이 링크는 비밀번호처럼 보관하세요. / Treat this URL like a password.</strong><br>
 링크를 아는 사람은 사용자의 열린국회 API 할당량을 사용할 수 있습니다.<br>
 <span class="english">Anyone holding it can consume your Open Assembly API quota.</span></p>
-<p>ChatGPT: 설정(Settings) → 앱(Apps) → 고급 설정(Advanced settings) → 앱 만들기(Create app)<br>
-Claude: 설정(Settings) → 커넥터(Connectors) → 커스텀 커넥터 추가(Add custom connector)</p>
+<p><strong>Claude.ai와 ChatGPT에는 이 개인 링크를 넣지 마세요.</strong> 두 서비스 모두
+<code>https://korean-bill-debate-mcp.vercel.app/mcp</code>를 등록하고 OAuth 승인을 완료해야 합니다.</p>
 <p><strong>등록만 하면 끝이 아닙니다.</strong><br>
 새 채팅을 열고 입력창 아래의 <strong>+ 또는 도구 메뉴</strong>에서 방금 만든
 <strong>Korean Bill &amp; Debate</strong> 앱·커넥터를 선택하세요. 선택한 뒤 질문해야 의안 원문과

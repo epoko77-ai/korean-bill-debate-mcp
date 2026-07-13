@@ -60,22 +60,29 @@ Codex, or Gemini a normal question and let the tools retrieve the official Assem
 
 ### Option 1: Use it on Claude.ai or ChatGPT web — no installation
 
-Open the [Korean Bill & Debate MCP connection page](https://korean-bill-debate-mcp.vercel.app)
-first.
+Issue your personal [Open Assembly API key](https://open.assembly.go.kr/portal/openapi/openApiNaListPage.do)
+first. Claude.ai and ChatGPT both connect to the same public MCP endpoint:
 
-1. Enter your personal Open Assembly API key.
-2. Select **Create personal MCP link**.
-3. Copy the complete `https://.../mcp/t/...` URL.
-4. Paste that URL into your web app's custom MCP server field.
+```text
+https://korean-bill-debate-mcp.vercel.app/mcp
+```
 
-Claude: **Settings → Connectors → Add custom connector**, then enable it from the chat `+` menu.
+For Claude.ai, open **Settings → Connectors → Add custom connector**, name it
+`Korean Bill & Debate`, and enter the public endpoint above.
 
-ChatGPT: **Settings → Apps → Advanced settings → Developer mode → Create app**, then select the
-created app from the chat `+` menu. Availability depends on your plan and workspace policy.
+Complete the OAuth approval screen with your own Open Assembly key. Then open a new chat, enable
+the connector from the `+` menu, and choose **Always available** when Tool access is shown. Do not
+give Claude a `/mcp/t/...` personal URL. The OAuth flow encrypts the key into access credentials;
+the raw key is not stored in a database or file.
 
-> A bare `/mcp` URL will not connect. Use the complete personal URL created from your own key. The
-> service does not store the raw key in a database or file. Treat the generated URL like a password
-> because anyone holding it can consume your Open Assembly API quota.
+For ChatGPT, enable Developer mode under **Settings → Security and login**, then create a
+developer-mode app under **Settings → Plugins**. Use the same public endpoint above, complete OAuth
+with your Open Assembly key, and select the app from `+ → More` in a new chat. Availability can
+still depend on workspace policy.
+
+> If Claude or ChatGPT was configured with an older `?token=...` or `/mcp/t/...` URL, delete that
+> connection and add the public `/mcp` URL above. Personal URLs remain available only for clients
+> that cannot complete OAuth and must be treated like passwords.
 
 ### Option 2: Install locally for Claude Desktop, Claude Code, Codex, or Gemini CLI
 

@@ -630,8 +630,8 @@ semantic = [
 [package.metadata]
 requires-dist = [
     { name = "faiss-cpu", marker = "extra == 'semantic'", specifier = ">=1.8" },
-    { name = "mcp", specifier = ">=1.10" },
-    { name = "mcp", marker = "extra == 'deploy'", specifier = ">=1.10" },
+    { name = "mcp", specifier = ">=1.10,<2" },
+    { name = "mcp", marker = "extra == 'deploy'", specifier = ">=1.10,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14" },
     { name = "numpy", marker = "extra == 'semantic'", specifier = ">=2" },
     { name = "pypdf", specifier = ">=6,<7" },
