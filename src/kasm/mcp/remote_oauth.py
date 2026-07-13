@@ -136,7 +136,11 @@ MCP 요청 순간에만 사용합니다.</small></p></div></main></body></html>"
         query = {"code": code}
         if validated.get("state"):
             query["state"] = validated["state"]
-        return str(validated["redirect_uri"]) + "?" + urllib.parse.urlencode(query)
+        redirect = urllib.parse.urlsplit(str(validated["redirect_uri"]))
+        existing = urllib.parse.parse_qsl(redirect.query, keep_blank_values=True)
+        return urllib.parse.urlunsplit(
+            redirect._replace(query=urllib.parse.urlencode([*existing, *query.items()]))
+        )
 
     def token(self, values: dict[str, str]) -> dict[str, Any]:
         grant_type = values.get("grant_type", "")

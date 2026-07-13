@@ -275,6 +275,10 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
             consent = await client.get("/oauth/authorize", params=authorization_values)
             assert consent.status_code == 200
             assert "본인의 열린국회 API 키" in consent.text
+            assert (
+                "form-action 'self' https://claude.ai"
+                in consent.headers["content-security-policy"]
+            )
             authorized = await client.post(
                 "/oauth/authorize",
                 data={**authorization_values, "api_key": "personal-key"},

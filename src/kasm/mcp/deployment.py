@@ -172,7 +172,12 @@ def create_asgi_app() -> Any:
                 page = oauth.authorization_page(values)
             except ValueError as exc:
                 return HTMLResponse(str(exc), 400, headers=_private_headers())
-            return HTMLResponse(page, headers=_private_headers())
+            return HTMLResponse(
+                page,
+                headers=_private_headers(
+                    oauth_redirect_origin=_redirect_origin(values.get("redirect_uri", ""))
+                ),
+            )
         form = await request.form()
         values = {name: str(value) for name, value in form.multi_items() if name != "api_key"}
         values.setdefault("resource", f"{oauth_base(request)}/mcp")
@@ -187,7 +192,13 @@ def create_asgi_app() -> Any:
                 page = oauth.authorization_page(values, error=str(exc))
             except ValueError:
                 page = str(exc)
-            return HTMLResponse(page, 400, headers=_private_headers())
+            return HTMLResponse(
+                page,
+                400,
+                headers=_private_headers(
+                    oauth_redirect_origin=_redirect_origin(values.get("redirect_uri", ""))
+                ),
+            )
         return RedirectResponse(location, status_code=303, headers=_oauth_headers())
 
     async def oauth_token(request: Request) -> JSONResponse:
@@ -324,8 +335,13 @@ def create_asgi_app() -> Any:
     return guarded
 
 
-def _private_headers(*, workspace: bool = False) -> dict[str, str]:
+def _private_headers(
+    *, workspace: bool = False, oauth_redirect_origin: str = ""
+) -> dict[str, str]:
     script_source = "'self'" if workspace else "'none'"
+    form_action = "'self'"
+    if oauth_redirect_origin:
+        form_action += f" {oauth_redirect_origin}"
     return {
         "Cache-Control": "no-store, max-age=0",
         "Pragma": "no-cache",
@@ -337,7 +353,7 @@ def _private_headers(*, workspace: bool = False) -> dict[str, str]:
             "default-src 'none'; "
             f"script-src {script_source}; "
             "style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; "
-            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+            f"base-uri 'none'; form-action {form_action}; frame-ancestors 'none'"
         ),
     }
 
@@ -348,6 +364,16 @@ def _oauth_headers() -> dict[str, str]:
         "Pragma": "no-cache",
         "X-Content-Type-Options": "nosniff",
     }
+
+
+def _redirect_origin(uri: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(uri)
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _validate_remote_key(api_key: str) -> None:
