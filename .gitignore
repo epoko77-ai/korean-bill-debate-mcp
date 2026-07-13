@@ -17,7 +17,8 @@ node_modules/
 *.sqlite3
 *.faiss
 .kasm-cache/
-.env
+.env*
+!.env.example
 benchmarks/utility-evaluation.json
 .vercel
 .DS_Store
