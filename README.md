@@ -5,7 +5,7 @@
 > 법안 내용과 처리상태부터 소위원회 회의록, 전문위원 검토보고서, 의원과 정부의 실제
 > 발언까지 하나의 조사 흐름으로 이어서 확인합니다.
 
-`v0.9.0` · MCP + 웹 입법조사 워크스페이스 · 사용자 본인의 API 키 · 실시간 조회 · Apache-2.0
+`v0.9.1` · MCP + 웹 입법조사 워크스페이스 · 사용자 본인의 API 키 · 실시간 조회 · Apache-2.0
 
 [English](README.en.md) · [MCP 연결](docs/mcp-clients.md) ·
 [데이터 출처](docs/data-sources.md) · [아키텍처](docs/architecture.md)
@@ -183,7 +183,7 @@ supplementary investigation authority. Include surrounding Q&A and official sour
 2. 릴리스를 설치합니다.
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.0
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.1
 ```
 
 3. 사용하는 앱 하나만 골라 실행합니다.

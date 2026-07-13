@@ -51,6 +51,8 @@ def test_anthropic_synthesis_uses_messages_api(monkeypatch) -> None:
     captured = {}
 
     def opener(request, timeout):
+        if "/v1/models" in request.full_url:
+            return FakeResponse({"data": [{"id": "test-claude-model"}]})
         captured["url"] = request.full_url
         captured["headers"] = dict(request.header_items())
         captured["body"] = json.loads(request.data)
@@ -67,6 +69,50 @@ def test_anthropic_synthesis_uses_messages_api(monkeypatch) -> None:
     assert captured["headers"]["X-api-key"] == "private-anthropic-key"
     assert captured["headers"]["Anthropic-version"] == "2023-06-01"
     assert "private-anthropic-key" not in json.dumps(captured["body"])
+
+
+def test_anthropic_chooses_an_available_sonnet_model(monkeypatch) -> None:
+    monkeypatch.setenv("KBD_ANTHROPIC_MODEL", "unavailable-preferred-model")
+    sent = {}
+
+    def opener(request, timeout):
+        del timeout
+        if "/v1/models" in request.full_url:
+            return FakeResponse(
+                {"data": [{"id": "claude-sonnet-account-model"}, {"id": "claude-haiku"}]}
+            )
+        sent.update(json.loads(request.data))
+        return FakeResponse({"content": [{"type": "text", "text": "자동 선택 성공"}]})
+
+    answer, model = synthesize(
+        "anthropic", "private-anthropic-key", "질문", {}, opener=opener
+    )
+
+    assert answer == "자동 선택 성공"
+    assert model == "claude-sonnet-account-model"
+    assert sent["model"] == "claude-sonnet-account-model"
+
+
+def test_anthropic_credit_error_is_actionable_and_safe() -> None:
+    secret = "must-never-appear"
+
+    def opener(request, timeout):
+        del timeout
+        raise urllib.error.HTTPError(
+            request.full_url,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(
+                b'{"error":{"type":"invalid_request_error",'
+                b'"message":"Your credit balance is too low. Purchase credits in Billing."}}'
+            ),
+        )
+
+    with pytest.raises(LlmError, match="크레딧 잔액") as error:
+        synthesize("anthropic", secret, "질문", {}, opener=opener)
+
+    assert secret not in str(error.value)
 
 
 def test_provider_auth_error_never_echoes_key() -> None:

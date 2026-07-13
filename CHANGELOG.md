@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.1] - 2026-07-13
+
+### Fixed
+
+- Discover the Claude models available to each Anthropic API key and automatically choose an
+  accessible Sonnet or Haiku model instead of assuming one fixed model ID.
+- Distinguish Anthropic credit-balance, model-access, key-permission, rate-limit, and request-format
+  errors without exposing raw provider responses or credentials.
+
 ## [0.9.0] - 2026-07-13
 
 ### Added

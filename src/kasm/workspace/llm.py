@@ -50,7 +50,7 @@ def synthesize(
         return _openai(normalized_key, model, prompt, opener), model
     if normalized_provider == "anthropic":
         model = os.getenv("KBD_ANTHROPIC_MODEL", "claude-sonnet-4-6")
-        return _anthropic(normalized_key, model, prompt, opener), model
+        return _anthropic(normalized_key, model, prompt, opener)
     raise LlmError("지원하지 않는 LLM 제공자입니다.")
 
 
@@ -105,7 +105,11 @@ def _openai(api_key: str, model: str, prompt: str, opener: JsonOpener) -> str:
     return answer
 
 
-def _anthropic(api_key: str, model: str, prompt: str, opener: JsonOpener) -> str:
+def _anthropic(
+    api_key: str, preferred_model: str, prompt: str, opener: JsonOpener
+) -> tuple[str, str]:
+    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+    model = _available_anthropic_model(api_key, preferred_model, opener)
     payload = {
         "model": model,
         "max_tokens": 2200,
@@ -115,7 +119,7 @@ def _anthropic(api_key: str, model: str, prompt: str, opener: JsonOpener) -> str
     data = _post_json(
         "https://api.anthropic.com/v1/messages",
         payload,
-        {"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        headers,
         "Anthropic",
         opener,
     )
@@ -129,7 +133,35 @@ def _anthropic(api_key: str, model: str, prompt: str, opener: JsonOpener) -> str
     answer = "\n".join(texts).strip()
     if not answer:
         raise LlmError("Anthropic이 빈 응답을 반환했습니다. 잠시 후 다시 시도해 주세요.")
-    return answer
+    return answer, model
+
+
+def _available_anthropic_model(
+    api_key: str, preferred_model: str, opener: JsonOpener
+) -> str:
+    """Choose a model that the current Anthropic key can actually access."""
+    data = _get_json(
+        "https://api.anthropic.com/v1/models?limit=100",
+        {"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        "Anthropic",
+        opener,
+    )
+    raw_models = data.get("data")
+    models: list[Any] = raw_models if isinstance(raw_models, list) else []
+    model_ids = [
+        str(item.get("id"))
+        for item in models
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    if preferred_model in model_ids:
+        return preferred_model
+    for family in ("sonnet", "haiku"):
+        candidate = next((model_id for model_id in model_ids if family in model_id), None)
+        if candidate:
+            return candidate
+    raise LlmError(
+        "이 Anthropic API 키에서 사용할 수 있는 Claude Sonnet/Haiku 모델을 찾지 못했습니다."
+    )
 
 
 def _post_json(
@@ -145,25 +177,29 @@ def _post_json(
         headers={"Content-Type": "application/json", **headers},
         method="POST",
     )
+    return _read_json(request, provider_name, opener)
+
+
+def _get_json(
+    url: str,
+    headers: dict[str, str],
+    provider_name: str,
+    opener: JsonOpener,
+) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    return _read_json(request, provider_name, opener)
+
+
+def _read_json(
+    request: urllib.request.Request,
+    provider_name: str,
+    opener: JsonOpener,
+) -> dict[str, Any]:
     try:
         with opener(request, timeout=150) as response:
             parsed = json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:
-        if exc.code in {401, 403}:
-            raise LlmError(
-                f"{provider_name} API 키 또는 프로젝트 권한을 확인해 주세요."
-            ) from exc
-        if exc.code == 400:
-            raise LlmError(
-                f"{provider_name} 모델 설정 또는 요청 형식을 확인해 주세요."
-            ) from exc
-        if exc.code in {402, 429}:
-            raise LlmError(
-                f"{provider_name} 사용 한도 또는 결제 상태를 확인해 주세요. (HTTP {exc.code})"
-            ) from exc
-        raise LlmError(
-            f"{provider_name} 요청에 실패했습니다. 잠시 후 다시 시도해 주세요. (HTTP {exc.code})"
-        ) from exc
+        raise _safe_http_error(provider_name, exc) from exc
     except (OSError, TimeoutError) as exc:
         raise LlmError(f"{provider_name} API에 연결할 수 없습니다.") from exc
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -171,3 +207,42 @@ def _post_json(
     if not isinstance(parsed, dict):
         raise LlmError(f"{provider_name} 응답 형식이 올바르지 않습니다.")
     return parsed
+
+
+def _safe_http_error(provider_name: str, error: urllib.error.HTTPError) -> LlmError:
+    """Classify provider failures without returning the provider's raw body."""
+    detail = ""
+    try:
+        payload = json.loads(error.read(8192).decode())
+        if isinstance(payload, dict):
+            raw_error = payload.get("error")
+            if isinstance(raw_error, dict):
+                detail = str(raw_error.get("message") or "")
+            elif isinstance(raw_error, str):
+                detail = raw_error
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        detail = ""
+    folded = detail.casefold()
+    if any(term in folded for term in ("credit balance", "purchase credits", "billing")):
+        return LlmError(
+            f"{provider_name} API 크레딧 잔액이 부족합니다. "
+            "제공자 콘솔의 결제 상태를 확인해 주세요."
+        )
+    if "model" in folded and any(
+        term in folded for term in ("not found", "does not exist", "access", "available")
+    ):
+        return LlmError(
+            f"{provider_name} 계정에서 사용할 수 있는 모델을 찾지 못했습니다."
+        )
+    if error.code in {401, 403}:
+        return LlmError(f"{provider_name} API 키 또는 프로젝트 권한을 확인해 주세요.")
+    if error.code == 400:
+        return LlmError(f"{provider_name} 요청 형식을 확인해 주세요.")
+    if error.code in {402, 429}:
+        return LlmError(
+            f"{provider_name} 사용 한도 또는 결제 상태를 확인해 주세요. (HTTP {error.code})"
+        )
+    return LlmError(
+        f"{provider_name} 요청에 실패했습니다. 잠시 후 다시 시도해 주세요. "
+        f"(HTTP {error.code})"
+    )
