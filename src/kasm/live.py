@@ -7,7 +7,7 @@ import os
 import re
 import urllib.parse
 from collections.abc import Callable, Iterable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,8 @@ from kasm.storage.database import Database
 from kasm.storage.repositories import BillDocumentRepository, MeetingRepository
 
 _DATE_MONTH = re.compile(r"(?P<year>20\d{2})[.\-/년 ]+\s*(?P<month>1[0-2]|0?[1-9])")
+_HISTORY_TERMS = ("과거부터", "처음부터", "현재까지", "지금까지", "전체 경과", "시계열")
+_ASSEMBLY_START_MONTH = {22: "2024-05"}
 _STOPWORDS = {
     "대한",
     "관련",
@@ -58,7 +60,7 @@ class LiveAssemblyServices:
         document_client: BillDocumentsClient | None = None,
         document_fetcher: BillDocumentFetcher | None = None,
         assembly_term: int = 22,
-        max_minutes_per_request: int = 8,
+        max_minutes_per_request: int = 20,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.database = database
@@ -149,6 +151,18 @@ class LiveAssemblyServices:
                 if value and len(value.replace("-", "")) >= 6:
                     compact = value.replace("-", "").replace(".", "")
                     months.add(f"{compact[:4]}-{compact[4:6]}")
+        if extract_bill_numbers(query) or any(term in query for term in _HISTORY_TERMS):
+            proposal_months = [
+                compact[:4] + "-" + compact[4:6]
+                for bill in bills
+                if (compact := re.sub(r"\D", "", _value(bill, "PROPOSE_DT") or ""))
+                and len(compact) >= 6
+            ]
+            start_month = min(
+                proposal_months
+                or [_ASSEMBLY_START_MONTH.get(self.assembly_term, f"{self._now().year}-01")]
+            )
+            months.update(_month_span(start_month, self._now().date()))
         self._refresh_meetings(
             query=query,
             committee=committee,
@@ -263,7 +277,8 @@ class LiveAssemblyServices:
     ) -> None:
         rows: list[dict[str, Any]] = []
         api_calls = 0
-        for month in sorted(months)[-8:]:
+        queried_months = sorted(months)
+        for month in queried_months:
             for source in (MeetingSource.COMMITTEE, MeetingSource.PLENARY):
                 parameters: dict[str, str | int] = {
                     "DAE_NUM": self.assembly_term,
@@ -304,6 +319,7 @@ class LiveAssemblyServices:
                 "meeting_candidates": len(candidates),
                 "minutes_ingested": 0,
                 "minutes_failures": 0,
+                "months_queried": queried_months,
             }
             return
         ingested = 0
@@ -323,6 +339,7 @@ class LiveAssemblyServices:
             "minutes_ingested": ingested,
             "minutes_failures": failures,
             "minutes_limit": self.max_minutes_per_request,
+            "months_queried": queried_months,
         }
 
     def _months_for_query(
@@ -347,7 +364,7 @@ def create_live_services(
     api_key: str | None = None,
     data_dir: str | Path | None = None,
     client: AssemblyOpenApiClient | None = None,
-    max_minutes_per_request: int = 8,
+    max_minutes_per_request: int = 20,
 ) -> ServiceContext:
     """Create the default user-keyed live service and its private local cache."""
     root = Path(
@@ -383,6 +400,24 @@ def _bill_queries(query: str) -> list[str]:
         *sorted(terms, key=len, reverse=True),
     ]
     return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _month_span(start_month: str, end_date: date) -> set[str]:
+    try:
+        year, month = (int(part) for part in start_month.split("-", 1))
+        cursor = date(year, month, 1)
+    except (TypeError, ValueError):
+        return set()
+    end = end_date.replace(day=1)
+    months: set[str] = set()
+    while cursor <= end:
+        months.add(cursor.strftime("%Y-%m"))
+        cursor = (
+            date(cursor.year + 1, 1, 1)
+            if cursor.month == 12
+            else date(cursor.year, cursor.month + 1, 1)
+        )
+    return months
 
 
 def _bill_external_id(row: dict[str, Any]) -> str | None:

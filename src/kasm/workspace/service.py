@@ -57,10 +57,10 @@ def run_workspace_research(
                 api_key=assembly_key,
                 data_dir=data_dir,
                 max_minutes_per_request=int(
-                    os.getenv("KBD_WORKSPACE_MAX_MINUTES_PER_REQUEST", "1")
+                    os.getenv("KBD_WORKSPACE_MAX_MINUTES_PER_REQUEST", "20")
                 ),
             )
-            research = KasmTools(services).explore_issue(query, limit=12)
+            research = KasmTools(services).explore_issue(query, limit=50)
             validation = research.get("bill_number_validation")
             if isinstance(validation, dict) and validation.get("exact_match") is not True:
                 raise WorkspaceError(

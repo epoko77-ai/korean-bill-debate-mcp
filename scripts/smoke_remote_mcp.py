@@ -7,6 +7,7 @@ import html
 import json
 import os
 import re
+import urllib.parse
 
 import httpx
 from mcp import ClientSession
@@ -29,6 +30,9 @@ async def exercise() -> dict[str, object]:
         if match is None:
             raise RuntimeError("deployment did not issue a personal MCP URL")
         personal_url = html.unescape(match.group("url"))
+        parsed = urllib.parse.urlsplit(personal_url)
+        if not parsed.path.startswith("/mcp/t/") or parsed.query:
+            raise RuntimeError("deployment did not issue a path-authenticated MCP URL")
         async with streamable_http_client(personal_url, http_client=client) as streams:
             read_stream, write_stream, _ = streams
             async with ClientSession(read_stream, write_stream) as session:

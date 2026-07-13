@@ -564,7 +564,7 @@ class LocalServices:
         return row
 
 
-def _document_excerpt(text: str, query: str | None, *, width: int = 700) -> str:
+def _document_excerpt(text: str, query: str | None, *, width: int = 12000) -> str:
     compact = " ".join(text.split())
     if len(compact) <= width:
         return compact

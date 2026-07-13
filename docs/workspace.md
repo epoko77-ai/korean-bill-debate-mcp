@@ -37,8 +37,10 @@ Open `http://127.0.0.1:8000/workspace`. The keys entered in the page are sent on
 | `KBD_OPENAI_MODEL` | `gpt-5.4-mini` | OpenAI Responses API model |
 | `KBD_ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Preferred model; falls back to an accessible Sonnet/Haiku |
 | `KBD_WORKSPACE_RATE_LIMIT_PER_MINUTE` | `6` | Per-process research request limit per IP |
-| `KBD_WORKSPACE_MAX_MINUTES_PER_REQUEST` | `1` | Maximum minutes PDFs parsed in one run |
-| `KBD_WORKSPACE_MAX_EVIDENCE_CHARS` | `60000` | Maximum serialized evidence sent to the LLM |
+| `KBD_WORKSPACE_MAX_MINUTES_PER_REQUEST` | `20` | Maximum relevant minutes PDFs parsed in one run |
+| `KBD_OPENAI_MAX_OUTPUT_TOKENS` | `8000` | Output tokens per answer chunk |
+| `KBD_ANTHROPIC_MAX_OUTPUT_TOKENS` | `8000` | Output tokens per answer chunk |
+| `KBD_WORKSPACE_MAX_ANSWER_CHUNKS` | `3` | Automatic continuation chunks for long answers |
 | `KBD_WORKSPACE_TEMP_DIR` | `/tmp` | Parent directory for request-scoped caches |
 
 Provider model defaults are operator-controlled so a public UI cannot be used to select an

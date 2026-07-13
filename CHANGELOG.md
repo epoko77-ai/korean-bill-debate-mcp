@@ -8,12 +8,16 @@
   reject unrelated rows returned by fuzzy search or an upstream API response.
 - Stop the web workspace before LLM synthesis when an explicit bill number cannot be verified,
   instead of substituting a different bill or review report.
-- Preserve valid, priority-ordered evidence JSON under the provider input limit, keeping bill
-  identity and expert review reports ahead of duplicate discussion context.
-- Increase answer budgets and reject provider responses stopped at their token limit so the UI
-  never presents a mid-sentence partial answer as complete.
+- Forward the complete collected research evidence to the user's model without application-level
+  character truncation or compaction.
+- Increase answer budgets to 8,000 tokens by default and reject provider responses stopped at
+  their token limit. Continue incomplete answers for up to three provider calls and combine every
+  completed section, allowing long-form results without presenting a cut-off answer as complete.
 - Issue Claude-compatible personal MCP capability URLs with authentication in a stable path instead
   of a query parameter, while continuing to accept previously issued query-token URLs.
+- Expand hosted research to as many as 20 relevant minutes PDFs and 50 matching speeches, include
+  substantially longer expert-review excerpts, and scan every month from an explicitly requested
+  bill's proposal through the present for chronological research.
 
 ## [0.9.1] - 2026-07-13
 

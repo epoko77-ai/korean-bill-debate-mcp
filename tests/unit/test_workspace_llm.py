@@ -43,7 +43,7 @@ def test_openai_synthesis_uses_responses_api_without_storage(monkeypatch) -> Non
     assert captured["url"] == "https://api.openai.com/v1/responses"
     assert captured["headers"]["Authorization"] == "Bearer private-openai-key"
     assert captured["body"]["store"] is False
-    assert captured["body"]["max_output_tokens"] == 4800
+    assert captured["body"]["max_output_tokens"] == 8000
     assert "private-openai-key" not in json.dumps(captured["body"])
 
 
@@ -69,7 +69,7 @@ def test_anthropic_synthesis_uses_messages_api(monkeypatch) -> None:
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["headers"]["X-api-key"] == "private-anthropic-key"
     assert captured["headers"]["Anthropic-version"] == "2023-06-01"
-    assert captured["body"]["max_tokens"] == 4096
+    assert captured["body"]["max_tokens"] == 8000
     assert "private-anthropic-key" not in json.dumps(captured["body"])
 
 
@@ -142,8 +142,7 @@ def test_unknown_provider_is_rejected_before_network() -> None:
         synthesize("unknown", "key", "질문", {})
 
 
-def test_large_evidence_is_compacted_as_valid_bounded_json(monkeypatch) -> None:
-    monkeypatch.setenv("KBD_WORKSPACE_MAX_EVIDENCE_CHARS", "2000")
+def test_large_evidence_is_forwarded_without_compaction() -> None:
     evidence = {
         "bill_number_validation": {
             "requested": ["2219564"],
@@ -173,38 +172,73 @@ def test_large_evidence_is_compacted_as_valid_bounded_json(monkeypatch) -> None:
     serialized = prompt.split("<official_research_data>\n", 1)[1].split(
         "\n</official_research_data>", 1
     )[0]
-    compact = json.loads(serialized)
+    forwarded = json.loads(serialized)
 
-    assert len(serialized) <= 2000
-    assert compact["bill_number_validation"]["exact_match"] is True
-    assert compact["bills"][0]["bill_no"] == "2219564"
+    assert forwarded == evidence
+    assert len(forwarded["bills"][0]["documents"][0]["text_excerpt"]) > 10000
 
 
-def test_openai_partial_answer_is_not_returned() -> None:
+def test_evidence_fields_are_not_compacted() -> None:
+    evidence = {
+        "bills": [{"bill_no": "2219564", "custom_field": "원본 필드 유지"}],
+        "speeches": [{"text": "상세 발언", "matched_terms": ["보완수사권"]}],
+    }
+
+    prompt = _evidence_prompt("질문", evidence)
+    serialized = prompt.split("<official_research_data>\n", 1)[1].split(
+        "\n</official_research_data>", 1
+    )[0]
+
+    assert json.loads(serialized) == evidence
+    assert "evidence_compacted" not in serialized
+
+
+def test_openai_answer_continues_after_output_limit() -> None:
+    calls = 0
+
     def opener(request, timeout):
+        nonlocal calls
         del request, timeout
-        return FakeResponse(
-            {
-                "output_text": "전문위원 검토사항에서 잘린 답변",
-                "incomplete_details": {"reason": "max_output_tokens"},
-            }
-        )
+        calls += 1
+        if calls == 1:
+            return FakeResponse(
+                {
+                    "output_text": "전문위원 검토사항 첫 부분",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                }
+            )
+        return FakeResponse({"output_text": "나머지 검토와 공식 원문"})
 
-    with pytest.raises(LlmError, match="부분 답변은 표시하지 않았습니다"):
-        synthesize("openai", "private-key", "질문", {}, opener=opener)
+    answer, _model = synthesize("openai", "private-key", "질문", {}, opener=opener)
+
+    assert answer == "전문위원 검토사항 첫 부분\n\n나머지 검토와 공식 원문"
+    assert calls == 2
 
 
-def test_anthropic_partial_answer_is_not_returned() -> None:
+def test_anthropic_answer_continues_after_output_limit() -> None:
+    message_calls = 0
+
     def opener(request, timeout):
+        nonlocal message_calls
         del timeout
         if "/v1/models" in request.full_url:
             return FakeResponse({"data": [{"id": "claude-sonnet-test"}]})
+        message_calls += 1
+        if message_calls == 2:
+            return FakeResponse(
+                {
+                    "content": [{"type": "text", "text": "나머지 검토와 공식 원문"}],
+                    "stop_reason": "end_turn",
+                }
+            )
         return FakeResponse(
             {
-                "content": [{"type": "text", "text": "전문위원 검토사항에서 잘린 답변"}],
+                "content": [{"type": "text", "text": "전문위원 검토사항 첫 부분"}],
                 "stop_reason": "max_tokens",
             }
         )
 
-    with pytest.raises(LlmError, match="부분 답변은 표시하지 않았습니다"):
-        synthesize("anthropic", "private-key", "질문", {}, opener=opener)
+    answer, _model = synthesize("anthropic", "private-key", "질문", {}, opener=opener)
+
+    assert answer == "전문위원 검토사항 첫 부분\n\n나머지 검토와 공식 원문"
+    assert message_calls == 2

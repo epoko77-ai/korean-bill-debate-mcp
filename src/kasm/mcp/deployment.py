@@ -45,7 +45,7 @@ def create_asgi_app() -> Any:
         services = create_live_services(
             client=client,
             data_dir=data_dir,
-            max_minutes_per_request=int(os.getenv("KBD_REMOTE_MAX_MINUTES_PER_REQUEST", "1")),
+            max_minutes_per_request=int(os.getenv("KBD_REMOTE_MAX_MINUTES_PER_REQUEST", "20")),
         )
         token_codec = RemoteTokenAuth(None, remote_secret)
     else:
