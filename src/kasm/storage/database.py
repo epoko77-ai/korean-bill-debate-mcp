@@ -10,7 +10,10 @@ from pathlib import Path
 class Database:
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
-        self.connection = sqlite3.connect(self.path)
+        # Hosted MCP tools run in a serialized worker thread so blocking
+        # network/PDF work cannot stall the ASGI event loop.  The connection is
+        # shared with that worker; serialization is enforced by the MCP server.
+        self.connection = sqlite3.connect(self.path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
 

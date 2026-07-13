@@ -1,6 +1,25 @@
 # Architecture
 
-The default runtime is live-first and user-keyed.
+`v0.10.0` has three user-keyed surfaces with deliberately different execution boundaries.
+
+```text
+Hosted durable MCP
+  → OAuth or legacy personal token → request-scoped Open Assembly key
+  → start_research → durable queue → isolated metadata/document workers
+  → immutable job, coverage, overview, evidence-index, and source-text artifacts
+  → status → complete map → core/selected text → optional exhaustive traversal
+
+Local stdio MCP
+  → user environment or private credentials file
+  → live Open Assembly lookup + private SQLite cache
+  → eight compatibility tools
+
+Web workspace alpha
+  → Open Assembly key + LLM key in one HTTPS request
+  → synchronous live research → provider synthesis → source cards
+```
+
+The local compatibility runtime remains live-first and user-keyed.
 
 ```text
 MCP client
@@ -25,7 +44,7 @@ each request hydrates it from live official candidates before lexical search and
 Optional semantic indexing may accelerate a cache that has grown over time, but it is not required for
 correctness or initial use.
 
-Issue research is staged to keep official traffic bounded:
+Legacy/local issue research is staged to keep official traffic bounded:
 
 1. Expand high-signal statute and policy terms.
 2. Search official bill discovery and refresh status for top candidates.
@@ -42,11 +61,10 @@ coverage beyond the meetings it inspected.
 
 ## Hosted MCP and workspace boundaries
 
-The hosted MCP and the `v0.9` workspace share the live research pipeline but not their credential
-flow.
+The hosted MCP and workspace do not share a credential or execution lifecycle.
 
 ```text
-Hosted MCP: Open Assembly key → encrypted bearer URL → request-scoped live research → MCP evidence
+Hosted MCP: Open Assembly key → OAuth/token capability → queue + workers → durable MCP evidence
 
 Workspace:  Open Assembly key ─→ request-scoped live research ─┐
             LLM key ─────────────────────── provider synthesis ├→ answer + official source cards
@@ -57,7 +75,8 @@ Workspace research uses a new temporary directory for every HTTP request and rem
 synthesis. The Assembly key never enters the LLM request, and the LLM key never enters the Assembly
 client. The browser does not persist either key in cookies or web storage.
 
-This request-scoped architecture is the alpha security boundary, not the final scaling model. A
-durable queue and isolated workers are required for cancellation, retries, global rate limits, and
-reusing public-document caches without cross-tenant private state. See
-[the workspace design](workspace.md) and [roadmap](roadmap.md).
+The durable queue, immutable run artifacts, and isolated document workers now exist for hosted MCP.
+The workspace still uses the earlier single-request alpha boundary and does not inherit background
+retries or durable progress. Distributed ingress limits, cancellation, legacy artifact migration,
+and production corpus/deployment validation remain before platform stability. See [the workspace
+design](workspace.md) and [roadmap](roadmap.md).

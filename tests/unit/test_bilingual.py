@@ -36,12 +36,69 @@ def test_unmapped_english_query_is_not_silently_mistranslated() -> None:
     assert prepared.translation_mode == "untranslated"
 
 
+def test_mixed_query_preserves_korean_scope_and_expands_ai() -> None:
+    query = "2026년 1월 1일부터 현재까지 최근 AI 입법"
+
+    prepared = prepare_query(query)
+
+    assert prepared.original == query
+    assert prepared.language == "ko"
+    assert prepared.translation_mode == "built_in_glossary"
+    assert prepared.search_query == f"{query} 인공지능"
+    assert prepared.expansion_reasons == ("equivalent_alias:AI→인공지능",)
+    assert prepared.metadata()["terminology_version"]
+
+
+def test_mixed_query_deduplicates_existing_korean_concept() -> None:
+    query = "최근 인공지능(AI) 입법"
+
+    prepared = prepare_query(query)
+
+    assert prepared.search_query == query
+    assert prepared.translation_mode == "none"
+    assert prepared.search_query.count("인공지능") == 1
+
+
+def test_mixed_query_preserves_an_existing_bilingual_term() -> None:
+    prepared = prepare_query("소버린 AI")
+
+    assert prepared.search_query == "소버린 AI"
+    assert prepared.translation_mode == "none"
+
+
+def test_mixed_query_expansion_is_stable_and_deduplicated() -> None:
+    query = "최근 AI AI bills와 subcommittee minutes 확인"
+
+    first = prepare_query(query)
+    second = prepare_query(query)
+
+    assert first == second
+    assert first.search_query == f"{query} 인공지능 소위원회 회의록 법안"
+    assert first.search_query.count("인공지능") == 1
+    assert first.search_query.count("소위원회 회의록") == 1
+
+
+def test_rejects_oversized_original_query() -> None:
+    with pytest.raises(ValueError, match="query"):
+        prepare_query("가" * 501 + " AI")
+
+
 def test_translates_official_english_committee_names() -> None:
     assert (
         korean_committee("Legislation and Judiciary Committee") == "법제사법위원회"
     )
     assert korean_committee("National Policy Committee") == "정무위원회"
     assert korean_committee("과학기술정보방송통신위원회") == "과학기술정보방송통신위원회"
+    assert korean_committee("법사위") == "법사위"
+
+
+def test_ai_basic_act_uses_the_reviewed_specific_concept() -> None:
+    prepared = prepare_query("Show recent AI Basic Act bills")
+
+    assert prepared.search_query == "인공지능 기본법 법안"
+    assert prepared.expansion_reasons[0] == (
+        "equivalent_alias:AI Basic Act→인공지능 기본법"
+    )
 
 
 def test_preserves_exact_bill_number_from_english_request() -> None:

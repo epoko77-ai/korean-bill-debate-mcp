@@ -1,6 +1,6 @@
 # Korean Bill & Debate MCP
 
-Current version: `v0.9.3`
+Current version: `v0.10.0`
 
 [한국어](README.md) · [MCP setup guide](docs/mcp-clients.md) ·
 [Data sources](docs/data-sources.md) · [Architecture](docs/architecture.md)
@@ -23,9 +23,9 @@ subcommittee negotiation records and committee expert review reports.
 
 ![One bill connected to its text, status, subcommittee minutes, expert review, and lawmakers' Q&A](assets/english-thumbnail-v1.png)
 
-The `v0.9` no-account web workspace is currently a Korean-language alpha. English users should keep
-using the MCP connection below while the Korean workspace workflow and credential boundary are
-validated.
+The no-account web workspace is still a Korean-language, single-request alpha. The durable
+background workflow in `v0.10.0` is available through the MCP surface first. English users should
+use the MCP connection below while the workspace workflow and credential boundary are validated.
 
 ## Ask in English, verify the Korean official record
 
@@ -67,22 +67,34 @@ first. Claude.ai and ChatGPT both connect to the same public MCP endpoint:
 https://korean-bill-debate-mcp.vercel.app/mcp
 ```
 
-For Claude.ai, open **Settings → Connectors → Add custom connector**, name it
-`Korean Bill & Debate`, and enter the public endpoint above.
+For Claude Pro, Max, Team, or Enterprise, open **Settings → Connectors → Add custom connector**,
+name it `Korean Bill & Debate`, and enter the public endpoint above. Team and Enterprise owners may
+need to enable an organization connector first. See [Anthropic's current custom-connector guide](https://support.anthropic.com/en/articles/11175166-about-custom-integrations-using-remote-mcp).
 
-Complete the OAuth approval screen with your own Open Assembly key. Then open a new chat, enable
-the connector from the `+` menu, and choose **Always available** when Tool access is shown. Do not
-give Claude a `/mcp/t/...` personal URL. The OAuth flow encrypts the key into access credentials;
-the raw key is not stored in a database or file.
+Complete the OAuth approval screen with your own Open Assembly key. Then open a new chat and enable
+the connector and its tools under **Search and tools**. Do not give Claude a `/mcp/t/...` personal
+URL. The OAuth flow encrypts the key into access credentials; the raw key is not stored in a
+database or file.
 
-For ChatGPT, enable Developer mode under **Settings → Security and login**, then create a
-developer-mode app under **Settings → Plugins**. Use the same public endpoint above, complete OAuth
-with your Open Assembly key, and select the app from `+ → More` in a new chat. Availability can
-still depend on workspace policy.
+OpenAI currently documents full MCP apps for ChatGPT Business, Enterprise, and Edu on the web;
+Pro users can also connect read/fetch MCPs in developer mode. Every tool on this server advertises
+the MCP read-only annotation. An admin enables developer mode where required; authorized users can
+turn it on under **Settings → Apps → Advanced settings**, then use **Settings → Apps → Create** to
+add the public endpoint. Click **Scan Tools**, complete OAuth with your Open Assembly key, wait for
+the 13-tool scan, create the app, and select it from `+ → More` or an `@` mention in a new chat.
+Availability depends on workspace policy. See [OpenAI's current
+developer-mode guide](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta).
+
+After the server adds tools, use the app's **Refresh** action and review the changed actions;
+ChatGPT may keep the previously approved tool snapshot instead of enabling new tools automatically.
 
 > If Claude or ChatGPT was configured with an older `?token=...` or `/mcp/t/...` URL, delete that
 > connection and add the public `/mcp` URL above. Personal URLs remain available only for clients
 > that cannot complete OAuth and must be treated like passwords.
+
+The public `/mcp` endpoint starts standard OAuth and asks for the key on its approval page. The
+legacy `/connect` form instead validates the key against Open Assembly before issuing an encrypted
+`/mcp/t/...` URL. Do not use that legacy URL with Claude.ai or ChatGPT.
 
 ### Option 2: Install locally for Claude Desktop, Claude Code, Codex, or Gemini CLI
 
@@ -104,7 +116,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #### 2. Install the pinned GitHub release
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.3
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.10.0
 ```
 
 #### 3. Run one command for the client you use
@@ -120,6 +132,11 @@ The setup wizard hides and validates your API key, stores it with user-only perm
 registers the MCP with the selected client. Your key and downloaded Assembly records stay on your
 computer.
 
+Key resolution is `--api-key`, then `ASSEMBLY_OPEN_API_KEY`, then a masked interactive prompt. A
+non-interactive process with no key fails immediately instead of hanging. The default credential
+file is used unless `--credentials-file` is supplied; a custom file's absolute path is passed to
+the registered MCP process.
+
 Confirm that the result contains `"installed": true`. The command exits with an error when the
 client executable is missing or registration fails.
 
@@ -130,9 +147,11 @@ For bill 2219564, connect its text and current status to relevant subcommittee m
 expert review reports, and statements by lawmakers and government officials. Cite official sources.
 ```
 
-If the tool list includes `explore_issue`, `search_bills`, `get_bill_status`, and
-`search_speeches`, setup is complete. See the [client-by-client guide](docs/mcp-clients.md) for UI
-paths, manual configuration, verification, and troubleshooting.
+The local live-cache compatibility server exposes eight tools. A fully configured durable hosted
+deployment exposes those eight plus `start_research`, `get_research_status`,
+`get_research_overview`, `get_research_page`, and `get_evidence_document`—13 tools in total. See
+the [client-by-client guide](docs/mcp-clients.md) for exact names, UI paths, manual configuration,
+verification, and troubleshooting.
 
 Both web and local modes use each user's own Open Assembly API key. The hosted connection does not
 store the raw key in a database or file. Local mode downloads only relevant official records and
@@ -149,6 +168,24 @@ natural-language question
   → answer-ready evidence with official URLs and source locators
 ```
 
+For broad research, `v0.10.0` returns a `research_id` immediately, then guides the client through
+status polling, a complete paginated bill/meeting/document map, prioritized core sources, and any
+additional sources selected by the user. Only an explicit exhaustive request walks the entire
+evidence index with `exhaustive=true` and every long source range. Long text is not replaced by a
+truncated preview: it is routed by exact ID, size, hash, URL, and locator.
+
 In local mode, SQLite is a private cache rather than a bundled source database. Hosted instances use
 ephemeral cache storage. Current bill status is refreshed from the official status API. See the
 [Korean README](README.md) and [client guide](docs/mcp-clients.md).
+
+### Current `v0.10.0` limits
+
+The optional revision-bound corpus path exists in code, but a complete official-record corpus has
+not yet been built, deployed, and operationally verified for the public service. If the configured
+revision cannot prove the requested universe, coverage remains `partial` with explicit gaps; this
+release does not claim a complete historical full-text index.
+
+Claude.ai OAuth has automated integration coverage. A real ChatGPT web-account OAuth callback and
+the 13-tool production surface still require post-deployment smoke testing. The instructions above
+match the server's standard OAuth implementation and OpenAI's current official UI guidance, not a
+claim that the public ChatGPT connection has already passed that live test.

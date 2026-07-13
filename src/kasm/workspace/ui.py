@@ -69,6 +69,7 @@ _PAGE = """<!doctype html>
     .metric{background:#ece6da;border-radius:11px;padding:14px}.metric b{font-size:22px;display:block}.metric span{font-size:12px;color:var(--muted)}
     .sources{display:grid;grid-template-columns:1fr 1fr;gap:10px}.source{background:#fff;border:1px solid var(--line);border-radius:11px;padding:14px;text-decoration:none}
     .source:hover{border-color:#52788b}.tag{font-size:11px;color:#4d6c7a;font-weight:900}.source b{display:block;margin:3px 0}.source small{color:var(--muted)}
+    .source .source-disclosure{display:block;margin-top:6px;color:#8a5a35;font-size:11px}
     .error{display:none;background:#fff0ed;border:1px solid #e0a39b;color:var(--danger);border-radius:11px;padding:13px;margin:12px 0}.error.active{display:block}
     footer{max-width:1180px;margin:0 auto 50px;padding:25px;border-top:1px solid var(--line);display:flex;justify-content:space-between;color:var(--muted);font-size:13px}
     @media(max-width:850px){.hero-inner,.workspace{grid-template-columns:1fr}.promise{display:none}.steps{grid-template-columns:1fr}.step{border-right:0;border-bottom:1px solid var(--line)}
@@ -78,7 +79,7 @@ _PAGE = """<!doctype html>
 </head>
 <body>
   <header class="hero">
-    <nav><a class="brand" href="/">Korean Bill &amp; Debate <small>v0.9 alpha</small></a>
+    <nav><a class="brand" href="/">Korean Bill &amp; Debate <small>v0.10 alpha</small></a>
       <div class="navlinks"><a href="/">MCP 연결</a><a href="https://github.com/epoko77-ai/korean-bill-debate-mcp">GitHub</a></div></nav>
     <div class="hero-inner"><div><div class="eyebrow">국회 입법조사 워크스페이스</div>
       <h1>법안 하나를 물으면,<br>심사 기록이 한 흐름으로.</h1>
@@ -182,14 +183,33 @@ _SCRIPT = r"""(() => {
     $('metrics').replaceChildren(...values.map(([label, value]) => { const box = document.createElement('div'); box.className='metric'; const b=document.createElement('b'); b.textContent=String(value); const span=document.createElement('span'); span.textContent=label; box.append(b,span); return box; }));
   }
   function renderSources(sources) {
-    const cards = (sources || []).map((source) => { const a=document.createElement('a'); a.className='source'; a.href=source.url; a.target='_blank'; a.rel='noreferrer'; const tag=document.createElement('div'); tag.className='tag'; tag.textContent=source.type; const title=document.createElement('b'); title.textContent=source.title || '국회 공식 원문'; const detail=document.createElement('small'); detail.textContent=source.detail || source.url; a.append(tag,title,detail); return a; });
+    const cards = (sources || []).map((source) => {
+      const presentation = source.presentation || {};
+      const a=document.createElement('a'); a.className='source'; a.href=source.url; a.target='_blank'; a.rel='noreferrer';
+      const tag=document.createElement('div'); tag.className='tag'; tag.textContent=source.type;
+      const title=document.createElement('b'); title.textContent=presentation.title || source.title || '국회 공식 원문';
+      const detail=document.createElement('small'); detail.textContent=presentation.detail || source.detail || source.url;
+      a.append(tag,title,detail);
+      if (presentation.title_truncated || presentation.detail_truncated) {
+        const portions=[];
+        if (presentation.title_truncated) portions.push(`제목 ${presentation.title_displayed_characters}/${presentation.title_original_characters}자`);
+        if (presentation.detail_truncated) portions.push(`설명 ${presentation.detail_displayed_characters}/${presentation.detail_original_characters}자`);
+        const disclosure=document.createElement('span'); disclosure.className='source-disclosure';
+        disclosure.textContent=`카드 표시 축약 · ${portions.join(', ')} · 전체 문구는 JSON 다운로드와 공식 원문에서 확인`;
+        a.append(disclosure);
+      }
+      return a;
+    });
     if (!cards.length) { const empty=document.createElement('p'); empty.textContent='이번 조사에서 연결된 공식 원문이 없습니다. 질문 범위를 더 구체화해 다시 시도해 주세요.'; cards.push(empty); }
     $('sources').replaceChildren(...cards);
   }
   function renderResponse(data) {
     lastResult = data; $('answer').replaceChildren(); appendLinkedText($('answer'), data.answer || '답변이 없습니다.');
     renderMetrics(data.evidence || {}); renderSources((data.evidence || {}).sources || []);
-    $('result-meta').textContent = `${data.provider} · ${data.model} · ${data.elapsed_seconds}초`;
+    const delivery=data.answer_delivery || {}; const hard=delivery.workspace_hard_limits || {};
+    const completion=delivery.status === 'complete' && delivery.partial === false ? ' · 답변 완결' : '';
+    const boundary=hard.output_tokens_per_chunk && hard.chunks ? ` · 워크스페이스 상한 ${Number(hard.output_tokens_per_chunk).toLocaleString()}토큰×${hard.chunks}회(모델 한도 우선)` : '';
+    $('result-meta').textContent = `${data.provider} · ${data.model} · ${data.elapsed_seconds}초${completion}${boundary}`;
     result.classList.add('active'); result.scrollIntoView({behavior:'smooth', block:'start'});
   }
   form.addEventListener('submit', async (event) => {

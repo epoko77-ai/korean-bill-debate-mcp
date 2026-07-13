@@ -13,11 +13,23 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
+from kasm import __version__
+
 from .pdf_text import FallbackExtractor, extract_pdf_text
 
 BILL_DETAIL_HOST = "likms.assembly.go.kr"
+BILL_DETAIL_URL = f"https://{BILL_DETAIL_HOST}/bill/billDetail.do"
 BILL_INFO_URL = f"https://{BILL_DETAIL_HOST}/bill/bi/bill/detail/billInfo.do"
+BILL_DOCUMENT_ARCHIVE_URL = (
+    f"https://{BILL_DETAIL_HOST}/bill/bi/bill/detail/downloadDtlZip.do"
+)
 _BILL_ID = re.compile(r"[A-Za-z0-9_]+")
+_BILL_NO = re.compile(r"\d{7}")
+_USER_AGENT = f"Mozilla/5.0 (compatible; KASM/{__version__})"
+
+
+class BillDocumentIdentityError(RuntimeError):
+    """The official detail response did not prove the requested bill identity."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +63,8 @@ class _ReviewReportParser(HTMLParser):
         if "검토보고서" not in title or "PDF" not in title.upper() or not href:
             return
         official_url = urljoin(BILL_INFO_URL, href.replace("&amp;", "&"))
-        if urlsplit(official_url).hostname != BILL_DETAIL_HOST:
+        parsed = urlsplit(official_url)
+        if parsed.scheme != "https" or parsed.hostname != BILL_DETAIL_HOST:
             return
         self.links.append(
             BillDocumentLink(
@@ -61,6 +74,26 @@ class _ReviewReportParser(HTMLParser):
                 official_url=official_url,
             )
         )
+
+
+class _BillIdentityParser(HTMLParser):
+    """Read the authoritative hidden identifiers from a bill detail page."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bill_ids: list[str] = []
+        self.bill_numbers: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.casefold() != "input":
+            return
+        values = {key.casefold(): value or "" for key, value in attrs}
+        field = (values.get("id") or values.get("name") or "").casefold()
+        value = values.get("value", "").strip()
+        if field == "billid" and value:
+            self.bill_ids.append(value)
+        elif field == "billno" and value:
+            self.bill_numbers.append(value)
 
 
 class BillDocumentsClient:
@@ -76,10 +109,58 @@ class BillDocumentsClient:
         self._opener = opener
 
     def review_reports(self, bill_id: str, bill_no: str) -> tuple[BillDocumentLink, ...]:
+        """Return every exact official review-report PDF for one verified bill."""
+
+        self.verify_bill_identity(bill_id, bill_no)
+        return self._review_reports(bill_id, bill_no)
+
+    def documents(
+        self,
+        bill_id: str,
+        bill_no: str,
+        *,
+        include_bill_text: bool = True,
+        include_review_reports: bool = True,
+    ) -> tuple[BillDocumentLink, ...]:
+        """Return the original bill text plus every review report for one bill.
+
+        The official detail page does not expose a stable direct link for the
+        original PDF.  Its public UI POSTs the verified ``billId`` to the
+        official bulk-document endpoint.  The returned source URL therefore
+        carries the exact identifier pair; the document worker re-verifies the
+        pair and accepts exactly one ``{billNo}_..._의안원문.pdf`` archive member.
+        """
+
+        self.verify_bill_identity(bill_id, bill_no)
+        source_query = urllib.parse.urlencode(
+            {
+                "billId": bill_id,
+                "billNo": bill_no,
+                "billKindCd": "법률안",
+                "dwFileGbn": "B",
+            }
+        )
+        items: list[BillDocumentLink] = []
+        if include_bill_text:
+            items.append(
+                BillDocumentLink(
+                    document_type="bill_text",
+                    title="의안원문",
+                    file_format="pdf",
+                    official_url=f"{BILL_DOCUMENT_ARCHIVE_URL}?{source_query}",
+                )
+            )
+        if include_review_reports:
+            items.extend(self._review_reports(bill_id, bill_no))
+        return tuple(items)
+
+    def _review_reports(
+        self, bill_id: str, bill_no: str
+    ) -> tuple[BillDocumentLink, ...]:
         if not _BILL_ID.fullmatch(bill_id):
             raise ValueError("bill_id must contain only letters, numbers, and underscores")
-        if not bill_no.isdigit():
-            raise ValueError("bill_no must contain only digits")
+        if not _BILL_NO.fullmatch(bill_no):
+            raise ValueError("bill_no must contain exactly seven digits")
         body = urllib.parse.urlencode(
             {"billId": bill_id, "billNo": bill_no, "billKindCd": "법률안"}
         ).encode()
@@ -87,7 +168,7 @@ class BillDocumentsClient:
             BILL_INFO_URL,
             data=body,
             headers={
-                "User-Agent": "Mozilla/5.0 (compatible; KASM/0.6)",
+                "User-Agent": _USER_AGENT,
                 "Referer": f"https://{BILL_DETAIL_HOST}/bill/billDetail.do?billId={bill_id}",
                 "Content-Type": "application/x-www-form-urlencoded",
             },
@@ -101,6 +182,40 @@ class BillDocumentsClient:
         parser = _ReviewReportParser()
         parser.feed(raw.decode("utf-8", errors="replace"))
         return tuple(dict.fromkeys(parser.links))
+
+    def verify_bill_identity(self, bill_id: str, bill_no: str) -> None:
+        """Fail closed before accepting links from the billId-only index.
+
+        The review-report endpoint ignores ``billNo`` and selects documents by
+        ``billId`` alone.  The full official detail page, however, publishes
+        both values together as hidden form fields.  Require that exact pair
+        before the fragment response can be associated with a bill.
+        """
+
+        if not _BILL_ID.fullmatch(bill_id):
+            raise ValueError("bill_id must contain only letters, numbers, and underscores")
+        if not _BILL_NO.fullmatch(bill_no):
+            raise ValueError("bill_no must contain exactly seven digits")
+        assembly_term = bill_no[:2]
+        query = urllib.parse.urlencode(
+            {"billId": bill_id, "ageFrom": assembly_term, "ageTo": assembly_term}
+        )
+        request = urllib.request.Request(
+            f"{BILL_DETAIL_URL}?{query}",
+            headers={"User-Agent": _USER_AGENT},
+        )
+        try:
+            with self._opener(request, timeout=self.timeout) as response:  # type: ignore[attr-defined]
+                raw = response.read()
+        except OSError as exc:
+            raise RuntimeError(f"official bill identity request failed: {exc}") from exc
+
+        parser = _BillIdentityParser()
+        parser.feed(raw.decode("utf-8", errors="replace"))
+        if set(parser.bill_ids) != {bill_id} or set(parser.bill_numbers) != {bill_no}:
+            raise BillDocumentIdentityError(
+                "official bill detail did not verify the requested bill identity"
+            )
 
 
 class BillDocumentFetcher:
@@ -133,7 +248,7 @@ class BillDocumentFetcher:
             request = urllib.request.Request(
                 source_url,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; KASM/0.6)",
+                    "User-Agent": _USER_AGENT,
                     "Referer": f"https://{BILL_DETAIL_HOST}/bill/",
                 },
             )

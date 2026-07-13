@@ -1,3 +1,4 @@
 mcp>=1.28,<2
 cryptography>=45
 pypdf>=6,<7
+vercel>=0.6,<0.7

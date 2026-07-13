@@ -1,0 +1,304 @@
+from __future__ import annotations
+
+from datetime import date
+
+import pytest
+
+from kasm.research.relevance import (
+    RelevanceCriteria,
+    evaluate_candidate,
+    rank_candidates,
+)
+
+
+def test_exact_bill_number_is_a_hard_match_including_aggregated_agendas() -> None:
+    criteria = RelevanceCriteria.from_query("2219564번 의안 원문과 회의록")
+    exact_bill = {
+        "id": "exact-bill",
+        "bill_no": "2219564",
+        "name": "형사소송법 일부개정법률안",
+    }
+    exact_agenda = {
+        "id": "exact-agenda",
+        "agenda_items": [
+            {"bill_no": "2219564", "title": "형사소송법 일부개정법률안"}
+        ],
+    }
+    tempting_wrong_bill = {
+        "id": "wrong",
+        "bill_no": "2219565",
+        "name": "2219564번 의안과 유사한 형사소송법 개정안",
+    }
+
+    ranked = rank_candidates(
+        [tempting_wrong_bill, exact_agenda, exact_bill], criteria
+    )
+
+    assert {result.candidate_id for result in ranked} == {"exact-bill", "exact-agenda"}
+    assert all(result.score >= 100 for result in ranked)
+    assert all("bill_no_exact:2219564" in result.match_reasons for result in ranked)
+    assert evaluate_candidate(tempting_wrong_bill, criteria).rejection_reasons == (
+        "bill_no_mismatch",
+    )
+
+
+def test_supplementary_investigation_excludes_maritime_and_civil_false_positives() -> None:
+    criteria = RelevanceCriteria.from_query(
+        "2026년 1월 1일부터 현재까지 보완수사권 관련 법안·회의록",
+        statute_terms=("형사소송법",),
+        committees=("법제사법위원회",),
+        date_from=date(2026, 1, 1),
+        date_to=date(2026, 7, 13),
+    )
+    connected_agenda = {
+        "id": "criminal-agenda",
+        "committee": "법사위",
+        "date": "2026-06-18",
+        "agenda_items": [
+            {
+                "bill_no": "2219564",
+                "title": "형사소송법 일부개정법률안(보완수사요구권 정비)",
+            }
+        ],
+        "agenda_text": "검사의 보완수사권과 정부 답변 심사",
+    }
+    criminal_bill = {
+        "id": "criminal-bill",
+        "bill_no": "2219564",
+        "name": "형사소송법 일부개정법률안",
+        "summary": "검사의 보완수사 범위를 정비한다.",
+        "committee_name_ko": "법제사법위원회",
+        "proposed_date": "2026-05-10",
+    }
+    maritime = {
+        "id": "maritime",
+        "name": "해양사고의 조사 및 심판에 관한 법률 일부개정법률안",
+        "summary": "해양사고 조사 권한을 보완한다.",
+        "committee": "농림축산식품해양수산위원회",
+        "date": "2026-04-01",
+    }
+    civil = {
+        "id": "civil",
+        "name": "민법 일부개정법률안",
+        "summary": "권리 보호를 보완하고 사실 조사를 실시한다.",
+        "committee": "법제사법위원회",
+        "date": "2026-05-01",
+    }
+    old_exact_text = {
+        "id": "old",
+        "name": "형사소송법 일부개정법률안",
+        "summary": "보완수사권 정비",
+        "committee": "법제사법위원회",
+        "date": "2025-12-31",
+    }
+
+    ranked = rank_candidates(
+        [maritime, civil, criminal_bill, old_exact_text, connected_agenda], criteria
+    )
+
+    assert [result.candidate_id for result in ranked] == [
+        "criminal-agenda",
+        "criminal-bill",
+    ]
+    assert ranked[0].match_reasons == (
+        "committee_exact:법제사법위원회",
+        "date_in_range:2026-06-18",
+        "statute:형사소송법@agenda",
+        "issue:보완수사권@agenda",
+        "related_issue:보완수사요구권@agenda",
+    )
+    assert evaluate_candidate(maritime, criteria).rejection_reasons == (
+        "committee_mismatch",
+    )
+    assert evaluate_candidate(civil, criteria).rejection_reasons == (
+        "below_minimum_score",
+    )
+    assert evaluate_candidate(old_exact_text, criteria).rejection_reasons == (
+        "date_out_of_range",
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "최근 AI 입법",
+        "recent artificial intelligence legislation",
+        "최근 인공지능 법안",
+    ),
+)
+def test_ai_inputs_normalize_to_the_same_specific_issue(query: str) -> None:
+    criteria = RelevanceCriteria.from_query(query)
+    candidates = [
+        {"id": "maritime", "name": "해양사고 조사법 일부개정법률안"},
+        {"id": "ai", "name": "인공지능 기본법 일부개정법률안"},
+    ]
+
+    ranked = rank_candidates(candidates, criteria)
+
+    assert criteria.issue_terms == ("인공지능",)
+    assert [result.candidate_id for result in ranked] == ["ai"]
+    assert ranked[0].match_reasons == ("issue:인공지능@title",)
+
+
+def test_related_issue_is_discoverable_but_scored_below_an_equivalent() -> None:
+    criteria = RelevanceCriteria.from_query("보완수사권 관련 법안")
+    exact = {"id": "exact", "name": "보완수사권 정비 법안"}
+    related = {"id": "related", "name": "보완수사요구권 정비 법안"}
+
+    ranked = rank_candidates([related, exact], criteria)
+
+    assert criteria.issue_terms == ("보완수사권",)
+    assert criteria.related_issue_terms == ("보완수사요구권",)
+    assert [result.candidate_id for result in ranked] == ["exact", "related"]
+    assert ranked[0].match_reasons == ("issue:보완수사권@title",)
+    assert ranked[1].match_reasons == ("related_issue:보완수사요구권@title",)
+    assert ranked[0].score > ranked[1].score
+    assert criteria.expansion_reasons == (
+        "canonical_match:supplementary_investigation_authority",
+        "related_concept:보완수사권→보완수사요구권",
+        "related_concept:보완수사권→형사소송법",
+    )
+
+
+def test_generic_research_words_alone_fail_closed() -> None:
+    criteria = RelevanceCriteria.from_query(
+        "최근 국회 법안 회의록 관련 내용을 확인해줘",
+        issue_terms=("법안", "회의록", "최근"),
+    )
+    candidate = {
+        "id": "generic",
+        "title": "최근 국회 법안 회의록",
+        "summary": "관련 내용을 확인한 조사 결과",
+    }
+
+    result = evaluate_candidate(candidate, criteria)
+
+    assert result.score == 0
+    assert result.relevant is False
+    assert result.match_reasons == ()
+    assert result.rejection_reasons == ("no_meaningful_terms",)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_terms", "matching_title", "unrelated_title"),
+    (
+        (
+            "딥페이크 관련 법안과 회의록",
+            {"딥페이크"},
+            "딥페이크 성범죄 방지법 일부개정법률안",
+            "해양사고 조사법 일부개정법률안",
+        ),
+        (
+            "플랫폼 노동 종사자 보호 입법",
+            {"플랫폼노동종사자", "플랫폼", "노동", "종사자"},
+            "플랫폼 노동 종사자 보호법안",
+            "원양어선 선원 보호법안",
+        ),
+        (
+            "장애인 이동권 보장 법안",
+            {"장애인이동권", "장애인", "이동권"},
+            "장애인 이동권 보장을 위한 교통약자법 개정안",
+            "산업단지 교통 개선법안",
+        ),
+        (
+            "기후 적응과 에너지 전환 관련 국회 논의",
+            {"기후적응에너지", "기후", "적응", "에너지", "전환"},
+            "기후 적응 및 에너지 전환 지원법안",
+            "학교급식 지원법안",
+        ),
+        (
+            "감염병 병상 확보 대책 법안",
+            {"감염병병상", "감염병", "병상"},
+            "감염병 병상 확보 지원법안",
+            "중소기업 수출 지원법안",
+        ),
+    ),
+)
+def test_unfamiliar_korean_policy_topics_do_not_depend_on_curated_registry(
+    query: str,
+    expected_terms: set[str],
+    matching_title: str,
+    unrelated_title: str,
+) -> None:
+    criteria = RelevanceCriteria.from_query(query)
+
+    matching = evaluate_candidate({"id": "matching", "name": matching_title}, criteria)
+    unrelated = evaluate_candidate(
+        {"id": "unrelated", "name": unrelated_title}, criteria
+    )
+
+    assert expected_terms.issubset(set(criteria.issue_terms))
+    assert matching.relevant is True
+    assert unrelated.relevant is False
+    assert unrelated.rejection_reasons == ("below_minimum_score",)
+    assert criteria.query == query
+
+
+def test_topic_free_structured_scope_is_exhaustive_inside_hard_filters() -> None:
+    criteria = RelevanceCriteria.from_query(
+        "올해 법제사법위원회 회의록 전체",
+        committees=("법제사법위원회",),
+        date_from=date(2026, 1, 1),
+        date_to=date(2026, 7, 13),
+    )
+
+    result = evaluate_candidate(
+        {
+            "id": "meeting",
+            "committee": "법사위",
+            "date": "2026-06-18",
+            "title": "제4차 법안심사제1소위원회",
+        },
+        criteria,
+    )
+
+    assert criteria.issue_terms == ()
+    assert result.relevant is True
+    assert result.score == criteria.minimum_score
+    assert result.match_reasons == (
+        "committee_exact:법제사법위원회",
+        "date_in_range:2026-06-18",
+        "structured_scope_only",
+    )
+
+
+def test_rank_order_is_deterministic_for_equal_scores() -> None:
+    criteria = RelevanceCriteria.from_query("AI 법안")
+    older = {
+        "id": "older",
+        "name": "인공지능 산업법",
+        "date": "2026-01-01",
+    }
+    newer_b = {
+        "id": "newer-b",
+        "name": "인공지능 안전법",
+        "date": "2026-06-01",
+    }
+    newer_a = {
+        "id": "newer-a",
+        "name": "인공지능 책임법",
+        "date": "2026-06-01",
+    }
+
+    forward = rank_candidates([newer_b, older, newer_a], criteria)
+    reverse = rank_candidates([newer_a, older, newer_b], criteria)
+
+    assert [result.candidate_id for result in forward] == [
+        "newer-a",
+        "newer-b",
+        "older",
+    ]
+    assert [result.candidate_id for result in reverse] == [
+        "newer-a",
+        "newer-b",
+        "older",
+    ]
+
+
+def test_literal_query_concepts_are_never_silently_cut_after_thirty_two() -> None:
+    terms = [f"특수의제{chr(0xAC00 + index)}영역" for index in range(40)]
+
+    criteria = RelevanceCriteria.from_query(" ".join(terms))
+
+    assert set(terms).issubset(set(criteria.issue_terms))
+    assert len(criteria.issue_terms) > 32

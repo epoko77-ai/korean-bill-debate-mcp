@@ -14,6 +14,10 @@ def test_open_assembly_transcript_is_saved_and_searchable() -> None:
         "DEPT_CD": "ICT",
         "CONFER_NUM": "3",
         "PDF_LINK_URL": "https://record.assembly.go.kr/meeting/official-1",
+        "agenda_items": [
+            {"bill_no": "2200001", "title": "인공지능 기본법안"},
+            {"bill_no": "2200002", "title": "인공지능 산업 진흥법안"},
+        ],
     }
     transcript = """1. 인공지능 정책
 ○위원장 홍길동  회의를 시작합니다.
@@ -26,6 +30,14 @@ def test_open_assembly_transcript_is_saved_and_searchable() -> None:
         )
         assert result.speeches_saved == 3
         assert result.failures == ()
+        assert result.agendas_saved == 2
+        agendas = database.connection.execute(
+            "SELECT bill_no, title FROM meeting_agendas ORDER BY sequence"
+        ).fetchall()
+        assert [tuple(row) for row in agendas] == [
+            ("2200001", "인공지능 기본법안"),
+            ("2200002", "인공지능 산업 진흥법안"),
+        ]
         found = LocalServices(database).search("소버린 AI")
         assert found[0]["speaker"] == "김미래"
         assert found[0]["official_source"].startswith("https://record.assembly.go.kr/")

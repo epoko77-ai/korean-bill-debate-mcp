@@ -38,7 +38,12 @@ async def exercise() -> dict[str, object]:
     if len(tools) != 8:
         raise RuntimeError("installed MCP tool list is incomplete")
     if bill_result.isError or not isinstance(bill, dict) or bill.get("bill_no") != "2219564":
-        raise RuntimeError("installed MCP did not return the exact requested bill")
+        detail = "\n".join(
+            str(getattr(item, "text", item)) for item in bill_result.content
+        )
+        raise RuntimeError(
+            "installed MCP did not return the exact requested bill: " + detail
+        )
     return {
         "server": initialized.serverInfo.name,
         "tool_count": len(tools),

@@ -14,6 +14,8 @@ from typing import Any
 from .remote_auth import RemoteTokenAuth
 
 _SCOPE = "mcp:tools"
+_OFFLINE_SCOPE = "offline_access"
+_SUPPORTED_SCOPES = (_SCOPE, _OFFLINE_SCOPE)
 
 
 class RemoteOAuth:
@@ -28,7 +30,7 @@ class RemoteOAuth:
             "resource": f"{base}/mcp",
             "authorization_servers": [base],
             "bearer_methods_supported": ["header"],
-            "scopes_supported": [_SCOPE],
+            "scopes_supported": list(_SUPPORTED_SCOPES),
             "resource_documentation": base,
         }
 
@@ -39,7 +41,7 @@ class RemoteOAuth:
             "authorization_endpoint": f"{base}/oauth/authorize",
             "token_endpoint": f"{base}/oauth/token",
             "registration_endpoint": f"{base}/oauth/register",
-            "scopes_supported": [_SCOPE],
+            "scopes_supported": list(_SUPPORTED_SCOPES),
             "response_types_supported": ["code"],
             "response_modes_supported": ["query"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
@@ -85,15 +87,22 @@ class RemoteOAuth:
         if len(state) > 2048:
             raise ValueError("state is too long")
         resource = values.get("resource", "")
-        scope = values.get("scope") or _SCOPE
-        if _SCOPE not in scope.split():
+        requested_scopes = values.get("scope", "").split() or [_SCOPE]
+        if _SCOPE not in requested_scopes:
             raise ValueError("mcp:tools scope is required")
+        unsupported = set(requested_scopes).difference(_SUPPORTED_SCOPES)
+        if unsupported:
+            raise ValueError("unsupported OAuth scope")
+        # Keep a deterministic order in codes and tokens.  ChatGPT can request
+        # ``offline_access`` to preserve a long-lived connector; the token
+        # endpoint returns a fresh refresh credential on every exchange.
+        scope = " ".join(item for item in _SUPPORTED_SCOPES if item in requested_scopes)
         return {
             **values,
             "client_name": str(client.get("client_name") or "AI client"),
             "redirect_uri": redirect_uri,
             "resource": resource,
-            "scope": _SCOPE,
+            "scope": scope,
         }
 
     def authorization_page(self, values: dict[str, str], *, error: str = "") -> str:

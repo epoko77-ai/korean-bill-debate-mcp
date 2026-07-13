@@ -58,8 +58,8 @@ class LexicalSearch:
         terms = query_terms(query)
         if not terms:
             return []
-        if not 1 <= candidate_limit <= 1000:
-            raise ValueError("candidate_limit must be between 1 and 1000")
+        if candidate_limit < 1:
+            raise ValueError("candidate_limit must be positive")
         filters = filters or SearchFilters()
         clauses = ["speeches_fts MATCH ?"]
         parameters: list[Any] = [" OR ".join(f'"{term}"' for term in terms)]

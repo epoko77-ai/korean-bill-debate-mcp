@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from kasm.core.relations import infer_question_answer_relations
 from kasm.indexing.embeddings import HashEmbeddingProvider, SentenceTransformersProvider
 from kasm.indexing.vector import ExactVectorIndex, FaissVectorIndex
 from kasm.mcp.tools import ServiceContext
+from kasm.research.relevance import RelevanceCriteria, RelevanceResult, evaluate_candidate
 from kasm.search.filters import SearchFilters
 from kasm.search.hybrid import HybridSearch
 from kasm.search.lexical import LexicalSearch, query_terms
@@ -146,7 +148,10 @@ class LocalServices:
 
     def search(self, query: str, **filters: Any) -> list[dict[str, Any]]:
         terms = query_terms(query)
-        limit = max(1, min(int(filters.get("limit", 10)), 100))
+        # Public tools validate their own small response limit.  Internal
+        # inventory builders deliberately pass the complete cache row count so
+        # the core selection can be accompanied by a lossless candidate map.
+        limit = max(1, int(filters.get("limit", 10)))
         search_filters = SearchFilters(
             **{
                 key: filters[key]
@@ -164,7 +169,12 @@ class LocalServices:
             }
         )
         rows = (
-            self.hybrid.search(query, search_filters, limit=limit)
+            self.hybrid.search(
+                query,
+                search_filters,
+                limit=limit,
+                candidate_limit=limit,
+            )
             if self.hybrid is not None
             else self.lexical.search(query, search_filters, candidate_limit=limit)
         )
@@ -238,7 +248,7 @@ class LocalServices:
                        MIN(date) AS date_from, MAX(date) AS date_to
                 FROM meetings {where}
                 GROUP BY committee_id, committee_name_ko, committee_name_en
-                ORDER BY committee_name_ko LIMIT 500""",
+                ORDER BY committee_name_ko""",
             parameters,
         ).fetchall()
         return [dict(row) for row in rows]
@@ -257,17 +267,24 @@ class LocalServices:
                 parameters.append(filters[key])
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self.database.connection.execute(
-            f"SELECT * FROM meetings {where} ORDER BY date DESC, id LIMIT 1000", parameters
+            f"SELECT * FROM meetings {where} ORDER BY date DESC, id", parameters
         ).fetchall()
         return [dict(row) for row in rows]
 
     def search_bills(self, query: str, **filters: Any) -> list[dict[str, Any]]:
+        include_documents = bool(filters.get("include_documents", True))
         normalized_query = query.strip()
         if normalized_query.isdigit():
             row = self.database.connection.execute(
                 "SELECT * FROM bills WHERE bill_no = ?", (normalized_query,)
             ).fetchone()
-            return [self._bill_payload(dict(row), query=query)] if row else []
+            return [
+                self._bill_payload(
+                    dict(row),
+                    query=query,
+                    include_documents=include_documents,
+                )
+            ] if row else []
         terms = query_terms(query)
         clauses = ["bills_fts MATCH ?"]
         parameters: list[Any] = [" OR ".join(f'"{term}"' for term in terms)]
@@ -282,7 +299,7 @@ class LocalServices:
             clauses.append("COALESCE(TRIM(b.process_result), '') = ''")
         elif status == "processed":
             clauses.append("COALESCE(TRIM(b.process_result), '') <> ''")
-        parameters.append(max(1, min(int(filters.get("limit", 10)), 100)))
+        parameters.append(max(1, int(filters.get("limit", 10))))
         rows = self.database.connection.execute(
             f"""SELECT b.* FROM bills_fts JOIN bills b ON b.rowid = bills_fts.rowid
                 WHERE {" AND ".join(clauses)} ORDER BY bm25(bills_fts), b.proposed_at DESC
@@ -302,7 +319,7 @@ class LocalServices:
             document_clauses.append("COALESCE(TRIM(b.process_result), '') = ''")
         elif status == "processed":
             document_clauses.append("COALESCE(TRIM(b.process_result), '') <> ''")
-        document_parameters.append(max(1, min(int(filters.get("limit", 10)), 100)))
+        document_parameters.append(max(1, int(filters.get("limit", 10))))
         document_rows = self.database.connection.execute(
             f"""SELECT DISTINCT b.* FROM bill_documents_fts
                 JOIN bill_documents d ON d.rowid = bill_documents_fts.rowid
@@ -316,8 +333,15 @@ class LocalServices:
             if row["id"] not in seen:
                 results.append(dict(row))
                 seen.add(row["id"])
-        limit = max(1, min(int(filters.get("limit", 10)), 100))
-        return [self._bill_payload(row, query=query) for row in results[:limit]]
+        limit = max(1, int(filters.get("limit", 10)))
+        return [
+            self._bill_payload(
+                row,
+                query=query,
+                include_documents=include_documents,
+            )
+            for row in results[:limit]
+        ]
 
     def get_bill_status(self, bill_id_or_no: str) -> dict[str, Any] | None:
         row = self.database.connection.execute(
@@ -332,21 +356,34 @@ class LocalServices:
                       l.relation_type, l.confidence, l.evidence
                FROM speech_bill_links l JOIN speeches s ON s.id = l.speech_id
                JOIN meetings m ON m.id = s.meeting_id WHERE l.bill_id = ?
-               ORDER BY l.confidence DESC, m.date DESC LIMIT 20""",
+               ORDER BY l.confidence DESC, m.date DESC, s.id""",
             (result["id"],),
         ).fetchall()
         result["related_speeches"] = [dict(item) for item in related]
+        result["related_speeches_count"] = len(related)
+        result["related_speeches_complete"] = True
         return result
 
-    def explore_issue(self, query: str, limit: int = 20) -> dict[str, Any]:
-        candidate_limit = min(100, limit * 3)
+    def explore_issue(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> dict[str, Any]:
+        limit = max(1, int(limit))
         inferred_committee = infer_issue_committee(query)
-        speeches = self.search(
+        speech_cache_total = self._table_count("speeches")
+        all_speeches = self.search(
             query,
-            limit=candidate_limit,
-            include_context=True,
+            limit=max(1, speech_cache_total),
+            include_context=False,
             committee=inferred_committee,
+            **({"date_from": date_from} if date_from else {}),
+            **({"date_to": date_to} if date_to else {}),
         )
+        ranked_speeches = list(all_speeches)
         if self.hybrid is None:
             stopwords = {
                 "대한",
@@ -372,47 +409,63 @@ class LocalServices:
             required = min(2, len(content_terms))
             focused = [
                 item
-                for item in speeches
+                for item in ranked_speeches
                 if len(content_terms.intersection(item["matched_terms"])) >= required
             ]
-            speeches = (focused if focused else speeches)[:limit]
-        else:
-            speeches = speeches[:limit]
-        bills = self.search_bills(query, limit=limit, committee=inferred_committee)
-        inferred_bill_query = None
-        if not bills:
-            inferred_bill_query = infer_bill_title_query(query)
-            if inferred_bill_query:
-                bills = self.search_bills(
-                    inferred_bill_query, limit=limit, committee=inferred_committee
+            if focused:
+                ranked_speeches = focused
+        speeches = [
+            self._with_adjacent_context(item) for item in ranked_speeches[:limit]
+        ]
+        speech_inventory = [self._speech_inventory_item(item) for item in all_speeches]
+
+        bill_cache_total = self._table_count("bills")
+        all_bills = self.search_bills(
+            query,
+            limit=max(1, bill_cache_total),
+            committee=inferred_committee,
+            include_documents=False,
+        )
+        inferred_bill_query = infer_bill_title_query(query)
+        if inferred_bill_query:
+            inferred_bills = self.search_bills(
+                inferred_bill_query,
+                limit=max(1, bill_cache_total),
+                committee=inferred_committee,
+                include_documents=False,
+            )
+            seen = {str(bill["id"]) for bill in all_bills}
+            all_bills.extend(
+                bill for bill in inferred_bills if str(bill["id"]) not in seen
+            )
+
+        linked_bill_rows = self._linked_bills_for_speeches(
+            [item["speech_id"] for item in all_speeches]
+        )
+        seen_bill_ids = {str(bill["id"]) for bill in all_bills}
+        for row in linked_bill_rows:
+            if str(row["id"]) in seen_bill_ids:
+                continue
+            all_bills.append(
+                self._bill_payload(dict(row), include_documents=False)
+            )
+            seen_bill_ids.add(str(row["id"]))
+        links = self._links_for_bills([str(bill["id"]) for bill in all_bills])
+        bills = self._select_relevant_bills(
+            query,
+            all_bills,
+            all_speeches,
+            links,
+            limit=limit,
+        )
+        eligible_bill_count = sum(
+            bool(
+                (bill.get("selection_relevance") or {}).get(
+                    "eligible_for_synthesis"
                 )
-        speech_ids = [speech["speech_id"] for speech in speeches]
-        if speech_ids:
-            placeholders = ",".join("?" for _ in speech_ids)
-            rows = self.database.connection.execute(
-                f"""SELECT DISTINCT b.*, l.relation_type AS linked_by,
-                           l.confidence AS link_confidence, l.evidence AS link_evidence
-                    FROM speech_bill_links l JOIN bills b ON b.id = l.bill_id
-                    WHERE l.speech_id IN ({placeholders})
-                    ORDER BY l.confidence DESC, b.proposed_at DESC LIMIT ?""",
-                [*speech_ids, limit],
-            ).fetchall()
-            seen = {bill["id"] for bill in bills}
-            for row in rows:
-                if row["id"] in seen:
-                    continue
-                bills.append(self._bill_payload(dict(row)))
-                seen.add(row["id"])
-        bill_ids = [bill["id"] for bill in bills]
-        links: list[dict[str, Any]] = []
-        if bill_ids:
-            placeholders = ",".join("?" for _ in bill_ids)
-            rows = self.database.connection.execute(
-                f"""SELECT * FROM speech_bill_links WHERE bill_id IN ({placeholders})
-                    ORDER BY confidence DESC LIMIT ?""",
-                [*bill_ids, limit * 2],
-            ).fetchall()
-            links = [dict(row) for row in rows]
+            )
+            for bill in all_bills
+        )
         threads = self._discussion_threads(speeches)
         payload = {
             "query": query,
@@ -423,6 +476,45 @@ class LocalServices:
             "discussion_threads": threads,
             "timeline": self._issue_timeline(bills, threads),
             "links": links,
+            "scope_inventory": {
+                "cache_scope": {
+                    "complete": True,
+                    "official_source_complete": False,
+                    "note": (
+                        "현재 로컬 캐시에 저장된 자료에 대한 전건 지도입니다. "
+                        "열린국회 전체 범위의 완전성을 뜻하지 않습니다."
+                    ),
+                },
+                "bill_candidates": {
+                    "complete": True,
+                    "total": len(all_bills),
+                    "items": [self._bill_inventory_item(item) for item in all_bills],
+                },
+                "speech_candidates": {
+                    "complete": True,
+                    "total": len(speech_inventory),
+                    "items": speech_inventory,
+                },
+                "links": {
+                    "complete": True,
+                    "total": len(links),
+                    "items": links,
+                },
+                "selected_for_synthesis": {
+                    "selection_limit": limit,
+                    "bill_count": len(bills),
+                    "eligible_bill_count": eligible_bill_count,
+                    "speech_count": len(speeches),
+                    "discussion_thread_count": len(threads),
+                    "bill_selection_complete": len(bills) == eligible_bill_count,
+                    "speech_selection_complete": len(speeches) == len(speech_inventory),
+                    "note": (
+                        "bills·speeches·discussion_threads는 빠른 핵심 확인용입니다. "
+                        "전체 후보와 관계는 bill_candidates·speech_candidates·links에 "
+                        "있으며, 선택한 원문은 get_bill_status·get_speech로 여세요."
+                    ),
+                },
+            },
             "graph": {
                 "node_types": [
                     "bill",
@@ -444,6 +536,215 @@ class LocalServices:
         }
         payload["quality"] = issue_quality(payload)
         return payload
+
+    def _table_count(self, table: str) -> int:
+        if table not in {"bills", "speeches"}:
+            raise ValueError("unsupported inventory table")
+        return int(
+            self.database.connection.execute(
+                f"SELECT count(*) FROM {table}"
+            ).fetchone()[0]
+        )
+
+    def _linked_bills_for_speeches(
+        self, speech_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for chunk in _chunks(speech_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            fetched = self.database.connection.execute(
+                f"""SELECT b.*, l.relation_type AS linked_by,
+                           l.confidence AS link_confidence, l.evidence AS link_evidence
+                    FROM speech_bill_links l JOIN bills b ON b.id = l.bill_id
+                    WHERE l.speech_id IN ({placeholders})
+                    ORDER BY l.confidence DESC, b.proposed_at DESC, b.id""",
+                chunk,
+            ).fetchall()
+            rows.extend(dict(row) for row in fetched)
+        unique: dict[str, dict[str, Any]] = {}
+        for row in sorted(
+            rows,
+            key=lambda item: (
+                -float(item.get("link_confidence") or 0.0),
+                str(item.get("proposed_at") or ""),
+                str(item["id"]),
+            ),
+        ):
+            unique.setdefault(str(row["id"]), row)
+        return list(unique.values())
+
+    def _links_for_bills(self, bill_ids: list[str]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for chunk in _chunks(bill_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            fetched = self.database.connection.execute(
+                f"""SELECT * FROM speech_bill_links WHERE bill_id IN ({placeholders})
+                    ORDER BY confidence DESC, bill_id, speech_id, relation_type""",
+                chunk,
+            ).fetchall()
+            rows.extend(dict(row) for row in fetched)
+        return sorted(
+            rows,
+            key=lambda item: (
+                -float(item.get("confidence") or 0.0),
+                str(item.get("bill_id") or ""),
+                str(item.get("speech_id") or ""),
+                str(item.get("relation_type") or ""),
+            ),
+        )
+
+    def _select_relevant_bills(
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
+        speeches: list[dict[str, Any]],
+        links: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Choose the strict core while retaining every candidate in the map."""
+
+        criteria = RelevanceCriteria.from_query(query)
+        speech_text = {
+            str(speech.get("speech_id") or ""): str(speech.get("text") or "")
+            for speech in speeches
+        }
+        links_by_bill: dict[str, list[dict[str, Any]]] = {}
+        for link in links:
+            links_by_bill.setdefault(str(link.get("bill_id") or ""), []).append(link)
+        document_texts = self._bill_document_texts(
+            [str(candidate.get("id") or "") for candidate in candidates]
+        )
+
+        evaluated: list[tuple[dict[str, Any], RelevanceResult]] = []
+        for candidate in candidates:
+            bill_id = str(candidate.get("id") or "")
+            supporting_text = [document_texts.get(bill_id, "")]
+            for link in links_by_bill.get(bill_id, []):
+                supporting_text.extend(
+                    (
+                        str(link.get("evidence") or ""),
+                        speech_text.get(str(link.get("speech_id") or ""), ""),
+                    )
+                )
+            scored_candidate = {
+                **candidate,
+                "description": "\n".join(
+                    text for text in supporting_text if text.strip()
+                ),
+            }
+            result = evaluate_candidate(scored_candidate, criteria)
+            evaluated.append((candidate, result))
+
+        accepted = [(candidate, result) for candidate, result in evaluated if result.relevant]
+        canonical_terms = {
+            expansion.term
+            for expansion in criteria.terminology_expansions
+            if not expansion.reason.startswith("related_concept:")
+        }
+        if accepted and canonical_terms:
+            best_tier = min(
+                _bill_relevance_tier(result, canonical_terms, criteria)
+                for _candidate, result in accepted
+            )
+            accepted = [
+                (candidate, result)
+                for candidate, result in accepted
+                if _bill_relevance_tier(result, canonical_terms, criteria) == best_tier
+            ]
+
+        accepted.sort(
+            key=lambda item: (
+                _bill_relevance_tier(item[1], canonical_terms, criteria),
+                -item[1].score,
+                -_bill_proposed_ordinal(item[0].get("proposed_at")),
+                str(item[0].get("bill_no") or ""),
+                str(item[0].get("id") or ""),
+            )
+        )
+        selected = accepted[:limit]
+        eligible_ids = {
+            str(candidate.get("id") or "") for candidate, _result in accepted
+        }
+        selected_ids = {
+            str(candidate.get("id") or "") for candidate, _result in selected
+        }
+        for candidate, result in evaluated:
+            candidate["selection_relevance"] = {
+                "accepted": result.relevant,
+                "eligible_for_synthesis": (
+                    str(candidate.get("id") or "") in eligible_ids
+                ),
+                "selected_for_synthesis": (
+                    str(candidate.get("id") or "") in selected_ids
+                ),
+                "score": result.score,
+                "match_reasons": list(result.match_reasons),
+                "rejection_reasons": list(result.rejection_reasons),
+                "selection_tier": (
+                    _bill_relevance_tier(result, canonical_terms, criteria)
+                    if result.relevant and canonical_terms
+                    else None
+                ),
+            }
+        return [candidate for candidate, _result in selected]
+
+    def _bill_document_texts(self, bill_ids: list[str]) -> dict[str, str]:
+        grouped: dict[str, list[str]] = {}
+        for chunk in _chunks([bill_id for bill_id in bill_ids if bill_id]):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.database.connection.execute(
+                f"""SELECT bill_id, text FROM bill_documents
+                    WHERE bill_id IN ({placeholders}) ORDER BY bill_id, id""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                grouped.setdefault(str(row["bill_id"]), []).append(str(row["text"]))
+        return {bill_id: "\n".join(texts) for bill_id, texts in grouped.items()}
+
+    def _with_adjacent_context(self, item: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(item)
+        context = self.speeches.context(str(item["speech_id"]), before=1, after=1)
+        sequence = int(item["sequence"])
+        before = [speech.text for speech in context if speech.sequence < sequence]
+        after = [speech.text for speech in context if speech.sequence > sequence]
+        enriched["context_before"] = before[-1] if before else None
+        enriched["context_after"] = after[0] if after else None
+        return enriched
+
+    @staticmethod
+    def _speech_inventory_item(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "speech_id": item.get("speech_id"),
+            "speaker": item.get("speaker"),
+            "meeting_id": item.get("meeting_id"),
+            "meeting": item.get("meeting"),
+            "committee": item.get("committee"),
+            "date": item.get("date"),
+            "source_locator": item.get("source_locator"),
+            "official_url": item.get("official_source"),
+            "text_length": len(str(item.get("text") or "")),
+            "matched_terms": item.get("matched_terms") or [],
+        }
+
+    @staticmethod
+    def _bill_inventory_item(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "bill_id": item.get("id"),
+            "bill_no": item.get("bill_no"),
+            "name": item.get("name"),
+            "committee": item.get("committee"),
+            "proposed_at": item.get("proposed_at"),
+            "processed_at": item.get("processed_at"),
+            "process_result": item.get("process_result"),
+            "status": item.get("status"),
+            "official_url": item.get("official_url"),
+            "document_count": item.get("document_count", 0),
+            "linked_by": item.get("linked_by"),
+            "link_confidence": item.get("link_confidence"),
+            "link_evidence": item.get("link_evidence"),
+            "selection_relevance": item.get("selection_relevance"),
+        }
 
     @staticmethod
     def _issue_timeline(
@@ -535,7 +836,13 @@ class LocalServices:
             )
         return threads
 
-    def _bill_payload(self, row: dict[str, Any], *, query: str | None = None) -> dict[str, Any]:
+    def _bill_payload(
+        self,
+        row: dict[str, Any],
+        *,
+        query: str | None = None,
+        include_documents: bool = True,
+    ) -> dict[str, Any]:
         row["status"] = row.get("process_result") or "계류"
         row["is_pending"] = not bool(row.get("process_result"))
         documents = self.database.connection.execute(
@@ -544,6 +851,9 @@ class LocalServices:
                FROM bill_documents WHERE bill_id = ? ORDER BY title, official_url""",
             (row["id"],),
         ).fetchall()
+        row["document_count"] = len(documents)
+        row["documents_included"] = include_documents
+        row["documents_complete"] = include_documents
         row["documents"] = [
             {
                 "document_id": document["id"],
@@ -551,7 +861,12 @@ class LocalServices:
                 "title": document["title"],
                 "file_format": document["file_format"],
                 "official_url": document["official_url"],
-                "text_excerpt": _document_excerpt(document["text"], query),
+                "text": document["text"],
+                "text_length": len(document["text"]),
+                "text_sha256": hashlib.sha256(
+                    document["text"].encode("utf-8")
+                ).hexdigest(),
+                "text_inline_complete": True,
                 "source_hash": document["source_hash"],
                 "retrieved_at": document["retrieved_at"],
                 "citation": {
@@ -560,25 +875,63 @@ class LocalServices:
                 },
             }
             for document in documents
-        ]
+        ] if include_documents else []
         return row
 
 
-def _document_excerpt(text: str, query: str | None, *, width: int = 12000) -> str:
-    compact = " ".join(text.split())
-    if len(compact) <= width:
-        return compact
-    positions = [
-        compact.casefold().find(term.casefold())
-        for term in query_terms(query or "")
-        if len(term) >= 2 and term.casefold() in compact.casefold()
-    ]
-    position = min(positions) if positions else 0
-    start = max(0, position - width // 4)
-    end = min(len(compact), start + width)
-    prefix = "…" if start else ""
-    suffix = "…" if end < len(compact) else ""
-    return f"{prefix}{compact[start:end].strip()}{suffix}"
+def _bill_relevance_tier(
+    result: RelevanceResult,
+    canonical_terms: set[str],
+    criteria: RelevanceCriteria,
+) -> int:
+    """Prefer explicit bill identity before supporting-body keyword spillover."""
+
+    reasons = set(result.match_reasons)
+    related_terms = {
+        *criteria.related_statute_terms,
+        *criteria.related_issue_terms,
+    }
+
+    def matches(terms: set[str], sources: tuple[str, ...]) -> bool:
+        return any(
+            reason.endswith(f"@{source}")
+            and any(
+                reason.startswith(f"{kind}:{term}@")
+                for kind in ("statute", "issue", "related_statute", "related_issue")
+            )
+            for reason in reasons
+            for source in sources
+            for term in terms
+        )
+
+    if matches(canonical_terms, ("title", "agenda")):
+        return 0
+    if matches(related_terms, ("title", "agenda")):
+        return 1
+    if matches(canonical_terms, ("body",)):
+        return 2
+    if matches(related_terms, ("body",)):
+        return 3
+    if any(reason.endswith(("@title", "@agenda")) for reason in reasons):
+        return 4
+    if any(reason.endswith("@body") for reason in reasons):
+        return 5
+    return 6
+
+
+def _bill_proposed_ordinal(value: Any) -> int:
+    if isinstance(value, datetime):
+        return value.date().toordinal()
+    if isinstance(value, date):
+        return value.toordinal()
+    try:
+        return date.fromisoformat(str(value or "")[:10]).toordinal()
+    except ValueError:
+        return 0
+
+
+def _chunks(values: list[str], size: int = 400) -> list[list[str]]:
+    return [values[start : start + size] for start in range(0, len(values), size)]
 
 
 def create_services() -> ServiceContext:

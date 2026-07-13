@@ -29,6 +29,7 @@ def exercise() -> dict[str, object]:
         if not isinstance(validation, dict) or validation.get("exact_match") is not True:
             raise RuntimeError("workspace exact bill validation failed")
         captured["bill_name"] = bills[0].get("name")
+        captured["bill_proposed_at"] = bills[0].get("proposed_at")
         captured["bill_count"] = len(bills)
         captured["speech_count"] = len(research.get("speeches") or [])
         captured["thread_count"] = len(research.get("discussion_threads") or [])

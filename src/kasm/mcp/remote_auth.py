@@ -14,6 +14,8 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from kasm.vercel_context import bind_vercel_oidc_token
+
 _request_api_key: ContextVar[str | None] = ContextVar("kbd_request_api_key", default=None)
 _TOKEN_PATH_PREFIX = "/mcp/t/"
 
@@ -54,7 +56,7 @@ class RemoteTokenAuth:
             raise ValueError("invalid connection token")
         return payload
 
-    def reveal(self, token: str) -> str:
+    def reveal(self, token: str, *, expected_resource: str | None = None) -> str:
         try:
             value = self.cipher.decrypt(token.encode()).decode()
         except (InvalidToken, UnicodeError) as exc:
@@ -68,6 +70,11 @@ class RemoteTokenAuth:
                 not isinstance(payload, dict)
                 or payload.get("purpose") != "access"
                 or float(payload.get("expires_at") or 0) < time.time()
+                or (
+                    expected_resource is not None
+                    and payload.get("resource") != expected_resource
+                )
+                or "mcp:tools" not in str(payload.get("scope") or "").split()
             ):
                 raise ValueError("invalid connection token")
             value = str(payload.get("api_key") or "")
@@ -104,7 +111,10 @@ class RemoteTokenAuth:
             or next((value for name, value in pairs if name == "token"), "")
         )
         try:
-            api_key = self.reveal(token)
+            api_key = self.reveal(
+                token,
+                expected_resource=f"{_public_base(scope)}/mcp",
+            )
         except ValueError:
             _log_mcp_access(scope, authenticated=False, path_authenticated=bool(path_token))
             base = _public_base(scope)
@@ -118,7 +128,8 @@ class RemoteTokenAuth:
                         (
                             'Bearer realm="Korean Bill & Debate MCP", '
                             f'resource_metadata="{base}/.well-known/'
-                            'oauth-protected-resource/mcp", scope="mcp:tools"'
+                            'oauth-protected-resource/mcp", '
+                            'scope="mcp:tools offline_access"'
                         ).encode(),
                     )
                 ],
@@ -134,7 +145,8 @@ class RemoteTokenAuth:
         ).encode()
         context_token = _request_api_key.set(api_key)
         try:
-            await self.app(clean_scope, receive, send)
+            with bind_vercel_oidc_token(headers.get("x-vercel-oidc-token")):
+                await self.app(clean_scope, receive, send)
         finally:
             _request_api_key.reset(context_token)
 

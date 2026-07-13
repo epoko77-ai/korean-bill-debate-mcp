@@ -2,8 +2,8 @@ from datetime import UTC, datetime
 
 from kasm.adapters.korea.bills import bill_from_open_assembly_row
 from kasm.adapters.korea.ingestion import bills_from_agenda
-from kasm.app import create_services
-from kasm.core.models import Meeting
+from kasm.app import LocalServices, create_services
+from kasm.core.models import Bill, Meeting, Speech
 from kasm.mcp.tools import KasmTools, ServiceContext
 
 
@@ -73,6 +73,126 @@ def test_issue_discovers_bill_through_linked_speech_when_query_does_not_match_ti
     assert graph["bills"][0]["linked_by"] == "AGENDA_MATCH"
 
 
+def test_issue_limit_is_core_first_and_complete_cache_map_remains_visible() -> None:
+    graph = KasmTools(create_services()).explore_issue("인공지능", limit=1)
+
+    assert len(graph["speeches"]) == 1
+    inventory = graph["scope_inventory"]
+    assert inventory["speech_candidates"]["complete"] is True
+    assert inventory["speech_candidates"]["total"] == 3
+    assert len(inventory["speech_candidates"]["items"]) == 3
+    assert inventory["selected_for_synthesis"]["selection_limit"] == 1
+    assert inventory["selected_for_synthesis"]["speech_selection_complete"] is False
+    assert inventory["cache_scope"]["official_source_complete"] is False
+
+
+def test_issue_core_does_not_backfill_weak_speeches_to_reach_limit() -> None:
+    graph = KasmTools(create_services()).explore_issue("해외 기반 모델 의존", limit=3)
+
+    assert [speech["speaker"] for speech in graph["speeches"]] == ["김미래"]
+    assert graph["scope_inventory"]["speech_candidates"]["total"] == 2
+    assert graph["scope_inventory"]["selected_for_synthesis"]["speech_count"] == 1
+
+
+def test_broad_issue_keeps_noisy_bill_in_map_but_selects_reviewed_statute() -> None:
+    services = create_services()
+    local = services.catalog
+    assert isinstance(local, LocalServices)
+    retrieved_at = datetime(2026, 7, 14, tzinfo=UTC)
+    local.bills.save(
+        Bill(
+            id="noisy-special-prosecutor-bill",
+            bill_no="2299001",
+            name="검찰 특별수사 폐지 및 지방선거 특별검사법안",
+            assembly_term=22,
+            proposer="가나다의원",
+            committee="법제사법위원회",
+            proposed_at=datetime(2026, 7, 13, tzinfo=UTC).date(),
+            process_result=None,
+            processed_at=None,
+            official_url="https://likms.assembly.go.kr/bill/noisy",
+            source_hash="fixture-noisy",
+            retrieved_at=retrieved_at,
+        )
+    )
+    local.bills.save(
+        Bill(
+            id="criminal-procedure-bill",
+            bill_no="2299002",
+            name="형사소송법 일부개정법률안",
+            assembly_term=22,
+            proposer="라마바의원",
+            committee="법제사법위원회",
+            proposed_at=datetime(2026, 7, 12, tzinfo=UTC).date(),
+            process_result=None,
+            processed_at=None,
+            official_url="https://likms.assembly.go.kr/bill/criminal-procedure",
+            source_hash="fixture-correct",
+            retrieved_at=retrieved_at,
+        )
+    )
+
+    graph = KasmTools(services).explore_issue(
+        "2026년 7월 검찰 보완수사권 폐지 관련 법안과 의원 의견",
+        limit=10,
+    )
+
+    assert [bill["bill_no"] for bill in graph["bills"]] == ["2299002"]
+    candidates = graph["scope_inventory"]["bill_candidates"]["items"]
+    assert {candidate["bill_no"] for candidate in candidates} == {
+        "2299001",
+        "2299002",
+    }
+    by_number = {candidate["bill_no"]: candidate for candidate in candidates}
+    assert by_number["2299002"]["selection_relevance"][
+        "selected_for_synthesis"
+    ] is True
+    assert by_number["2299001"]["selection_relevance"][
+        "selected_for_synthesis"
+    ] is False
+
+
+def test_bill_status_returns_every_linked_speech_without_a_hidden_top_twenty() -> None:
+    services = create_services()
+    local = services.catalog
+    assert isinstance(local, LocalServices)
+    meeting = local.meetings.get("kna:22:committee:2025-03-18:sample-001")
+    assert meeting is not None
+    extra = [
+        Speech(
+            id=f"{meeting.id}:extra-{sequence:04d}",
+            meeting_id=meeting.id,
+            sequence=sequence,
+            speaker_id=None,
+            speaker_name=f"추가발언자{sequence}",
+            speaker_role="국회의원",
+            organization=None,
+            text=f"인공지능 법안 추가 발언 {sequence}",
+            agenda="인공지능",
+            previous_speech_id=None,
+            next_speech_id=None,
+            source_locator=f"synthetic:extra-{sequence}",
+            source_hash="synthetic-demo-v1",
+            parser_version="demo-1",
+        )
+        for sequence in range(4, 29)
+    ]
+    local.speeches.save_many(extra)
+    local.database.connection.executemany(
+        """INSERT INTO speech_bill_links
+           (speech_id, bill_id, relation_type, confidence, evidence)
+           VALUES (?, 'synthetic-bill-ai-001', 'EXPLICIT_MENTION', 1.0, 'test')""",
+        [(speech.id,) for speech in extra],
+    )
+    local.database.connection.commit()
+
+    status = KasmTools(services).get_bill_status("2200001")
+
+    assert status["related_speeches_count"] == 26
+    assert status["related_speeches_complete"] is True
+    assert len(status["related_speeches"]) == 26
+
+
 def test_explicit_bill_number_can_never_be_replaced_by_a_fuzzy_bill() -> None:
     class ConfusedCatalog:
         def explore_issue(self, query: str, limit: int):
@@ -81,8 +201,15 @@ def test_explicit_bill_number_can_never_be_replaced_by_a_fuzzy_bill() -> None:
                 "bills": [
                     {"id": "wrong", "bill_no": "2299999", "name": "전혀 다른 법안"}
                 ],
-                "speeches": [],
-                "discussion_threads": [],
+                "speeches": [
+                    {"speech_id": "wrong-speech", "text": "엉뚱한 법안 발언"}
+                ],
+                "discussion_threads": [
+                    {
+                        "meeting_id": "wrong-meeting",
+                        "matched_speech_ids": ["wrong-speech"],
+                    }
+                ],
                 "links": [{"bill_id": "wrong", "speech_id": "wrong-speech"}],
                 "timeline": [
                     {
@@ -116,9 +243,10 @@ def test_explicit_bill_number_can_never_be_replaced_by_a_fuzzy_bill() -> None:
     assert [bill["bill_no"] for bill in graph["bills"]] == ["2219564"]
     assert graph["bills"][0]["name"] == "형사소송법 일부개정법률안"
     assert graph["links"] == []
+    assert graph["speeches"] == []
+    assert graph["discussion_threads"] == []
     assert graph["timeline"] == []
-    assert graph["bill_number_validation"] == {
-        "requested": ["2219564"],
-        "matched": ["2219564"],
-        "exact_match": True,
-    }
+    assert graph["bill_number_validation"]["requested"] == ["2219564"]
+    assert graph["bill_number_validation"]["matched"] == ["2219564"]
+    assert graph["bill_number_validation"]["exact_match"] is True
+    assert graph["bill_number_validation"]["linked_speech_count"] == 0

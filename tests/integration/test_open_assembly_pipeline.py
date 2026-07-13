@@ -48,8 +48,45 @@ def test_preview_then_transactional_sync(tmp_path: Path) -> None:
 
 def test_distinct_minutes_rows_deduplicates_agenda_rows() -> None:
     rows = [
-        {"PDF_LINK_URL": "https://record.assembly.go.kr/a", "agenda": "1"},
-        {"PDF_LINK_URL": "https://record.assembly.go.kr/a", "agenda": "2"},
-        {"PDF_LINK_URL": "https://record.assembly.go.kr/b", "agenda": "3"},
+        {
+            "PDF_LINK_URL": "https://record.assembly.go.kr/a",
+            "CONF_ID": "meeting-a",
+            "SUB_NAME": "인공지능 기본법안",
+            "BILL_NO": "2200001",
+        },
+        {
+            "PDF_LINK_URL": "https://record.assembly.go.kr/a",
+            "CONF_ID": "meeting-a",
+            "SUB_NAME": "인공지능 산업 진흥법안",
+            "BILL_NO": "2200002",
+        },
+        {
+            "PDF_LINK_URL": "https://record.assembly.go.kr/a",
+            "CONF_ID": "meeting-a",
+            "SUB_NAME": "인공지능 기본법안",
+            "BILL_NO": "2200001",
+        },
+        {
+            "PDF_LINK_URL": "https://record.assembly.go.kr/b",
+            "CONF_ID": "meeting-b",
+            "SUB_NAME": "데이터 기본법안 (의안번호 2200003)",
+        },
     ]
-    assert [row["agenda"] for row in distinct_minutes_rows(rows)] == ["1", "3"]
+    result = distinct_minutes_rows(rows)
+
+    assert [row["CONF_ID"] for row in result] == ["meeting-a", "meeting-b"]
+    assert result[0]["SUB_NAME"] == "인공지능 기본법안"
+    assert result[0]["BILL_NO"] == "2200001"
+    assert result[0]["agenda_items"] == [
+        {"bill_no": "2200001", "title": "인공지능 기본법안"},
+        {"bill_no": "2200002", "title": "인공지능 산업 진흥법안"},
+    ]
+    assert result[0]["agenda_text"] == (
+        "2200001 인공지능 기본법안\n2200002 인공지능 산업 진흥법안"
+    )
+    assert result[1]["agenda_items"] == [
+        {"bill_no": "2200003", "title": "데이터 기본법안 (의안번호 2200003)"}
+    ]
+
+    # The aggregation is non-mutating so raw API rows remain reusable.
+    assert "agenda_items" not in rows[0]

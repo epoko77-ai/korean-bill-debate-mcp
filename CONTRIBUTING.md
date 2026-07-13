@@ -3,10 +3,12 @@
 Use Python 3.12 or 3.13 and `uv`. Keep official data credentials and raw minutes out of commits.
 
 ```bash
-uv sync --extra dev --extra mcp
+uv sync --extra dev --extra deploy --extra mcp
 uv run ruff check .
 uv run mypy
 uv run pytest
+npm ci
+npm run check:queue
 ```
 
 Parser changes must add or update a reviewed fixture, retain source locators, and report rather

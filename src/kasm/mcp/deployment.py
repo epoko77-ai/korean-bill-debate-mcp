@@ -14,6 +14,16 @@ from kasm.adapters.korea.bills import BILL_DATASET
 from kasm.adapters.korea.client import AssemblyOpenApiClient
 from kasm.app import create_auto_services
 from kasm.live import create_live_services
+from kasm.research.runtime import (
+    HostedResearchRuntime,
+    create_hosted_research_runtime,
+)
+from kasm.research.task_dispatch import (
+    INTERNAL_DISPATCH_PATH,
+    ResearchTaskDispatchASGI,
+    ResearchTaskDispatcher,
+    ResearchTaskEngine,
+)
 from kasm.workspace import WorkspaceError, run_workspace_research
 from kasm.workspace.ui import workspace_page, workspace_script
 
@@ -22,8 +32,14 @@ from .remote_auth import RemoteTokenAuth, request_api_key, result_page, setup_pa
 from .remote_oauth import RemoteOAuth
 from .server import create_server
 
+_HOSTED_MCP_CLIENT_ORIGINS = (
+    "https://claude.ai",
+    "https://chatgpt.com",
+    "https://chat.openai.com",
+)
 
-def create_asgi_app() -> Any:
+
+def create_asgi_app(*, research_task_engine: ResearchTaskEngine | None = None) -> Any:
     try:
         from mcp.server.transport_security import TransportSecuritySettings
         from starlette.applications import Starlette
@@ -43,16 +59,21 @@ def create_asgi_app() -> Any:
             "request-scoped-key",
             api_key_provider=request_api_key,
             cache_dir=data_dir / "api-cache",
+            timeout=float(os.getenv("KBD_REMOTE_API_TIMEOUT_SECONDS", "12")),
         )
         services = create_live_services(
             client=client,
             data_dir=data_dir,
-            max_minutes_per_request=int(os.getenv("KBD_REMOTE_MAX_MINUTES_PER_REQUEST", "20")),
+            max_minutes_per_request=int(os.getenv("KBD_REMOTE_MAX_MINUTES_PER_REQUEST", "2")),
+            source_timeout=float(os.getenv("KBD_REMOTE_SOURCE_TIMEOUT_SECONDS", "15")),
         )
         token_codec = RemoteTokenAuth(None, remote_secret)
         oauth = RemoteOAuth(token_codec)
     else:
         services = create_auto_services()
+    research_runtime = _hosted_research_runtime(remote_secret)
+    if research_runtime is not None:
+        services.research = research_runtime.backend
     allowed_hosts = [
         item.strip()
         for item in os.getenv(
@@ -70,6 +91,14 @@ def create_asgi_app() -> Any:
         ).split(",")
         if item.strip()
     ]
+    if token_codec is not None:
+        # The hosted user-key service is explicitly intended for these web MCP
+        # clients.  Preserve operator-supplied origins while preventing an old
+        # environment value from making tool discovery fail before OAuth auth.
+        # Every MCP request still requires a valid bearer/path credential.
+        allowed_origins = list(
+            dict.fromkeys([*allowed_origins, *_HOSTED_MCP_CLIENT_ORIGINS])
+        )
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=allowed_hosts,
@@ -78,6 +107,12 @@ def create_asgi_app() -> Any:
     mcp_app = create_server(
         services, host="0.0.0.0", transport_security=security
     ).streamable_http_app()
+    task_engine: ResearchTaskEngine | None = (
+        research_runtime.engine if research_runtime is not None else research_task_engine
+    )
+    task_dispatch_app = ResearchTaskDispatchASGI(
+        ResearchTaskDispatcher(task_engine) if task_engine is not None else None
+    )
 
     async def health(_request: Any) -> JSONResponse:
         search = services.search
@@ -101,6 +136,15 @@ def create_asgi_app() -> Any:
                 **counts,
                 "semantic_index": hybrid is not None,
                 "remote_user_key": token_codec is not None,
+                # Keep deployment capability explicit.  A partially configured
+                # hosted runtime intentionally falls back to the eight legacy
+                # tools; without these fields that safety fallback is almost
+                # impossible to distinguish from a successful 13-tool rollout.
+                "durable_research": research_runtime is not None,
+                "mcp_tool_count": 13 if research_runtime is not None else 8,
+                "corpus_revision_configured": bool(
+                    os.getenv("KBD_RESEARCH_CORPUS_REVISION", "").strip()
+                ),
             }
         )
 
@@ -312,6 +356,7 @@ def create_asgi_app() -> Any:
             Route("/workspace", workspace),
             Route("/workspace/app.js", workspace_javascript),
             Route("/workspace/research", research, methods=["POST"]),
+            Route(INTERNAL_DISPATCH_PATH, task_dispatch_app, methods=["POST"]),
             Route("/healthz", health),
             Mount("/", app=mcp_app),
         ],
@@ -397,6 +442,37 @@ def _validate_remote_key_shape(api_key: str) -> None:
     """Reject empty or implausibly large credentials without a network round trip."""
     if not api_key or len(api_key) > 256:
         raise ValueError("열린국회 API 키를 확인해 주세요. / Check your Open Assembly API key.")
+
+
+def _hosted_research_runtime(remote_secret: str | None) -> HostedResearchRuntime | None:
+    """Build one request/worker runtime only for a complete hosted configuration.
+
+    Constructors for Blob, Queue, and official-source clients remain lazy, so
+    importing the Vercel entry point performs no network I/O. A partial setup
+    deliberately exposes neither the durable MCP tools nor an active worker.
+    """
+
+    internal_secret = os.getenv("KBD_INTERNAL_TASK_SECRET", "")
+    values = (
+        remote_secret or "",
+        os.getenv("KBD_RESEARCH_CREDENTIAL_SECRET", "") or remote_secret or "",
+        os.getenv("BLOB_READ_WRITE_TOKEN", "")
+        or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN", ""),
+        os.getenv("VERCEL_DEPLOYMENT_ID", ""),
+        os.getenv("VERCEL_URL", ""),
+        internal_secret,
+    )
+    if not all(value.strip() for value in values):
+        return None
+    try:
+        encoded_internal_secret = internal_secret.encode("ascii")
+    except UnicodeEncodeError:
+        return None
+    if not 32 <= len(encoded_internal_secret) <= 512 or any(
+        not 33 <= character <= 126 for character in encoded_internal_secret
+    ):
+        return None
+    return create_hosted_research_runtime(assembly_api_key_provider=request_api_key)
 
 
 app = create_asgi_app()

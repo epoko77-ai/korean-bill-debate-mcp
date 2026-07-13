@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from kasm import __version__
 from kasm.adapters.korea.fetcher import MinutesFetcher
 
 
@@ -40,6 +41,9 @@ def test_fetches_only_official_pdf_and_extracts_text(tmp_path: Path) -> None:
     assert result.text.startswith("○위원장")
     assert result.source_hash
     assert requests[0].headers["Referer"] == "https://open.assembly.go.kr/"
+    assert requests[0].headers["User-agent"] == (
+        f"Mozilla/5.0 (compatible; KASM/{__version__})"
+    )
 
 
 def test_falls_back_to_python_extraction_when_poppler_is_missing(tmp_path: Path) -> None:

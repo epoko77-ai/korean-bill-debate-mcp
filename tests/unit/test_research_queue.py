@@ -1,0 +1,185 @@
+import base64
+import json
+import sys
+import types
+import urllib.request
+
+import pytest
+
+from kasm.research.queue import (
+    LeasedResearchTask,
+    ResearchTask,
+    ResearchTaskStage,
+    VercelResearchTaskQueue,
+    _default_oidc_token,
+    _HttpResponse,
+)
+
+
+def _task(*, capability: str | None = None) -> ResearchTask:
+    return ResearchTask(
+        research_id="research_123",
+        stage=ResearchTaskStage.COLLECT_METADATA,
+        work_id="scope",
+        query_fingerprint="a" * 64,
+        index_revision="index-1",
+        payload=(("assembly_term", 22), ("query", "최근 AI 입법")),
+        credential_capability=capability,
+    )
+
+
+def test_task_public_payload_never_exposes_encrypted_capability() -> None:
+    capability = "g" * 120
+    task = _task(capability=capability)
+
+    assert task.to_queue_payload()["credential_capability"] == capability
+    public = task.public_payload()
+    assert public["has_credential_capability"] is True
+    assert capability not in json.dumps(public)
+    assert "credential_capability" not in public
+
+
+def test_task_round_trip_and_idempotency_ignore_credential_rotation() -> None:
+    first = _task(capability="a" * 120)
+    second = _task(capability="b" * 120)
+
+    assert ResearchTask.from_queue_payload(first.to_queue_payload()) == first
+    assert first.idempotency_key == second.idempotency_key
+
+
+def test_publish_uses_oidc_and_idempotency_without_leaking_token() -> None:
+    requests: list[urllib.request.Request] = []
+
+    def transport(request: urllib.request.Request, timeout: float) -> _HttpResponse:
+        assert timeout == 2.0
+        requests.append(request)
+        return _HttpResponse(201, {}, b'{"messageId":"msg_1"}')
+
+    queue = VercelResearchTaskQueue(
+        region="icn1",
+        oidc_token_provider=lambda: "secret-oidc",
+        deployment_id_provider=lambda: "dpl_current",
+        timeout=2.0,
+        transport=transport,
+    )
+    message_id = queue.publish(_task(), retention_seconds=3600, delay_seconds=15)
+
+    assert message_id == "msg_1"
+    request = requests[0]
+    assert request.full_url == "https://icn1.vercel-queue.com/api/v3/topic/kbd-research"
+    assert request.get_header("Authorization") == "Bearer secret-oidc"
+    assert request.get_header("Vqs-delay-seconds") == "15"
+    assert request.get_header("Vqs-idempotency-key") == _task().idempotency_key
+    assert request.get_header("Vqs-deployment-id") == "dpl_current"
+    assert b"secret-oidc" not in (request.data or b"")
+
+
+def test_queue_omits_deployment_partition_only_when_not_configured() -> None:
+    requests: list[urllib.request.Request] = []
+    queue = VercelResearchTaskQueue(
+        oidc_token_provider=lambda: "oidc",
+        deployment_id_provider=lambda: None,
+        transport=lambda request, _timeout: (
+            requests.append(request) or _HttpResponse(201, {}, b'{"messageId":"msg_1"}')
+        ),
+    )
+
+    queue.publish(_task())
+
+    assert requests[0].get_header("Vqs-deployment-id") is None
+
+
+def test_receive_decodes_ndjson_and_acknowledges_opaque_receipt() -> None:
+    calls: list[tuple[str, str]] = []
+    task_body = json.dumps(_task().to_queue_payload()).encode()
+    line = json.dumps(
+        {
+            "messageId": "msg_1",
+            "receiptHandle": "receipt/opaque+value",
+            "deliveryCount": 2,
+            "body": base64.b64encode(task_body).decode(),
+        }
+    ).encode()
+
+    def transport(request: urllib.request.Request, _timeout: float) -> _HttpResponse:
+        calls.append((request.method, request.full_url))
+        if request.method == "POST":
+            return _HttpResponse(200, {}, line + b"\n")
+        return _HttpResponse(204, {}, b"")
+
+    queue = VercelResearchTaskQueue(
+        oidc_token_provider=lambda: "oidc",
+        transport=transport,
+    )
+    received = queue.receive(max_messages=3, visibility_timeout_seconds=600)
+
+    assert received == (
+        LeasedResearchTask("msg_1", "receipt/opaque+value", 2, _task()),
+    )
+    queue.acknowledge(received[0].receipt_handle)
+    assert calls[1][0] == "DELETE"
+    assert calls[1][1].endswith("/lease/receipt%2Fopaque%2Bvalue")
+
+
+def test_empty_queue_and_deferred_publish_are_explicit() -> None:
+    responses = iter(
+        (
+            _HttpResponse(204, {}, b""),
+            _HttpResponse(202, {}, b""),
+        )
+    )
+    queue = VercelResearchTaskQueue(
+        oidc_token_provider=lambda: "oidc",
+        transport=lambda _request, _timeout: next(responses),
+    )
+
+    assert queue.receive() == ()
+    assert queue.publish(_task()).startswith("deferred:")
+
+
+def test_queue_errors_never_echo_upstream_body_or_token() -> None:
+    queue = VercelResearchTaskQueue(
+        oidc_token_provider=lambda: "super-secret",
+        transport=lambda _request, _timeout: _HttpResponse(
+            401, {}, b"echo super-secret and payload"
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        queue.publish(_task())
+    assert "super-secret" not in str(error.value)
+    assert "payload" not in str(error.value)
+
+
+def test_default_oidc_provider_prefers_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "environment-token")
+
+    assert _default_oidc_token() == "environment-token"
+
+
+def test_default_oidc_provider_uses_official_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
+    package = types.ModuleType("vercel")
+    oidc = types.ModuleType("vercel.oidc")
+    oidc.get_vercel_oidc_token_sync = lambda: "sdk-token"  # type: ignore[attr-defined]
+    package.oidc = oidc  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "vercel", package)
+    monkeypatch.setitem(sys.modules, "vercel.oidc", oidc)
+
+    assert _default_oidc_token() == "sdk-token"
+
+
+@pytest.mark.parametrize("retention", [0, 59, 604_801])
+def test_queue_bounds_retention(retention: int) -> None:
+    queue = VercelResearchTaskQueue(oidc_token_provider=lambda: "oidc")
+    with pytest.raises(ValueError, match="retention"):
+        queue.publish(_task(), retention_seconds=retention)
+
+
+@pytest.mark.parametrize("delay", [-1, 3601])
+def test_queue_bounds_delay_by_retention(delay: int) -> None:
+    queue = VercelResearchTaskQueue(oidc_token_provider=lambda: "oidc")
+    with pytest.raises(ValueError, match="delay"):
+        queue.publish(_task(), retention_seconds=3600, delay_seconds=delay)

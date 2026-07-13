@@ -12,6 +12,7 @@ htmlcov/
 .hf-cache/
 dist/
 build/
+node_modules/
 *.egg-info/
 *.sqlite3
 *.faiss

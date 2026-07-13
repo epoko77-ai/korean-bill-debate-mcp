@@ -8,6 +8,7 @@ from typing import Any, Generic, TypeVar
 
 from kasm.core.exceptions import NotFoundError
 from kasm.core.models import (
+    Agenda,
     Bill,
     BillDocument,
     EmbeddingRecord,
@@ -54,6 +55,25 @@ class MeetingRepository(Repository[Meeting]):
 
     def save(self, meeting: Meeting) -> None:
         _upsert(self.connection, self.table, meeting.to_dict(), "id")
+
+
+class AgendaRepository(Repository[Agenda]):
+    table, model = "meeting_agendas", Agenda
+
+    def save(self, agenda: Agenda) -> None:
+        _upsert(self.connection, self.table, agenda.to_dict(), "id")
+
+    def save_many(self, agendas: Iterable[Agenda]) -> None:
+        with self.connection:
+            for agenda in agendas:
+                _upsert(self.connection, self.table, agenda.to_dict(), "id", commit=False)
+
+    def for_meeting(self, meeting_id: str) -> list[Agenda]:
+        rows = self.connection.execute(
+            "SELECT * FROM meeting_agendas WHERE meeting_id = ? ORDER BY sequence",
+            (meeting_id,),
+        ).fetchall()
+        return [Agenda.from_dict(dict(row)) for row in rows]
 
 
 class PersonRepository(Repository[Person]):

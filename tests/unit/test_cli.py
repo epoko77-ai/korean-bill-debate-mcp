@@ -31,6 +31,43 @@ def test_inspect_prints_speech(capsys):
     assert json.loads(capsys.readouterr().out)["id"] == "speech-7"
 
 
+def test_research_prints_complete_json_without_sampling_or_excerpt(capsys):
+    long_text = "전체 발언 " * 1000
+
+    class ResearchCatalog:
+        def explore_issue(self, query, limit):
+            return {
+                "query": query,
+                "bills": [],
+                "speeches": [
+                    {"speech_id": f"speech-{index}", "text": long_text}
+                    for index in range(limit)
+                ],
+                "discussion_threads": [],
+                "timeline": [
+                    {"event_type": "debate", "date": f"2026-07-{index:02d}"}
+                    for index in range(1, limit + 1)
+                ],
+            }
+
+    catalog = ResearchCatalog()
+    services = ServiceContext(  # type: ignore[arg-type]
+        search=catalog,
+        repository=catalog,
+        catalog=catalog,
+    )
+
+    assert main(
+        ["research", "보완수사권", "--limit", "12"],
+        service_factory=lambda: services,
+    ) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert len(output["timeline"]) == 12
+    assert len(output["speeches"]) == 12
+    assert output["speeches"][-1]["text"] == long_text
+
+
 def test_index_and_sync_validation_do_not_initialize_services(capsys, tmp_path):
     def fail():
         raise AssertionError("must not initialize")

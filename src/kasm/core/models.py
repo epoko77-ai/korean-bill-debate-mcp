@@ -60,6 +60,31 @@ class Meeting(Serializable):
 
 
 @dataclass(frozen=True, slots=True)
+class Agenda(Serializable):
+    """One official agenda item attached to a meeting document."""
+
+    id: str
+    meeting_id: str
+    sequence: int
+    title: str
+    bill_no: str | None
+    official_url: str
+    source_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.id or not self.meeting_id or self.sequence < 0:
+            raise ValidationError("agenda requires ids and a non-negative sequence")
+        if not self.title.strip():
+            raise ValidationError("agenda title is required")
+        if self.bill_no is not None and (
+            not self.bill_no.isdigit() or len(self.bill_no) != 7
+        ):
+            raise ValidationError("agenda bill number must contain exactly seven digits")
+        if not self.official_url or not self.source_hash:
+            raise ValidationError("agenda provenance is required")
+
+
+@dataclass(frozen=True, slots=True)
 class Person(Serializable):
     id: str
     name_ko: str

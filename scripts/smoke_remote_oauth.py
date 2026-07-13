@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import time
 import urllib.parse
 
 import httpx
@@ -87,12 +88,16 @@ async def exercise() -> dict[str, object]:
         ):
             raise RuntimeError("OAuth consent CSP blocks the client callback")
 
+        authorization_started = time.perf_counter()
         authorized = await client.post(
             metadata["authorization_endpoint"],
             data={**authorization_values, "api_key": api_key},
         )
+        authorization_seconds = time.perf_counter() - authorization_started
         if authorized.status_code != 303:
             raise RuntimeError("OAuth authorization did not return a callback code")
+        if authorization_seconds > 3:
+            raise RuntimeError("OAuth approval is too slow")
         callback_url = urllib.parse.urlsplit(authorized.headers["location"])
         callback_values = urllib.parse.parse_qs(callback_url.query)
         if callback_values.get("state") != ["production-smoke"]:
@@ -160,6 +165,7 @@ async def exercise() -> dict[str, object]:
         "oauth_discovery": True,
         "dynamic_registration": True,
         "pkce_authorization": True,
+        "authorization_seconds": round(authorization_seconds, 3),
         "browser_callback_allowed": True,
         "refresh_token": True,
         "tool_count": len(names),

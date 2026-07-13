@@ -1,5 +1,5 @@
 """MCP-facing tools for kasm."""
 
-from .tools import KasmTools, ServiceContext
+from .tools import KasmTools, ResearchBackend, ServiceContext
 
-__all__ = ["KasmTools", "ServiceContext"]
+__all__ = ["KasmTools", "ResearchBackend", "ServiceContext"]

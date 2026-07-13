@@ -6,11 +6,18 @@
 - `v0.7`: hosted Streamable HTTP MCP with personal encrypted connection URLs.
 - `v0.8`: English questions over Korean official records with explicit source-language metadata.
 - `v0.9`: no-account web research workspace using request-scoped Open Assembly and LLM keys.
+- `v0.10`: durable hosted research jobs; exact coverage accounting; complete core-first maps;
+  lossless source-text paging; and optional revision-bound corpus recall.
 
 ## Before calling the platform stable
 
-- Move long-running research from one serverless request to an isolated worker and durable job
-  queue with progress events, cancellation, and retry diagnostics.
+- Build, publish, and independently audit a complete official-record corpus revision, then verify
+  that the public deployment loads the pinned revision and never overstates broad-query recall.
+- Add an explicit migration or versioned compatibility reader for research jobs created before the
+  strict `v0.10` artifact schema.
+- Run deployed Claude.ai and ChatGPT OAuth smoke tests against the 13-tool surface after every
+  release; refresh and review ChatGPT action snapshots when tool schemas change.
+- Add cancellation and richer retry diagnostics to the durable research job surface.
 - Add a shared cache for public Assembly documents without creating cross-tenant credential or
   private-query state.
 - Put a distributed rate limit and abuse controls at ingress; the in-process limiter is not global

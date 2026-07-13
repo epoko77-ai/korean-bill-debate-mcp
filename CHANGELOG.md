@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.10.0] - 2026-07-14
+
+### Added
+
+- Add a durable, queue-backed hosted research workflow with five MCP tools for starting one job,
+  polling it, reading a complete core-first map, paging the evidence inventory, and opening exact
+  official-text ranges. A fully configured hosted server exposes 13 tools; the local live-cache
+  compatibility server continues to expose eight.
+- Add immutable job, coverage, overview, evidence-index, source-text, and document artifacts bound
+  to one research contract, index revision, and build. Publish the bounded overview before the
+  snapshot readiness marker and load only the catalog shards needed for each page.
+- Add exact bill-text evidence and deterministic bill, meeting, document, speech, question, answer,
+  and government-response connections with official URLs, source hashes, and locators.
+- Add an optional revision-bound corpus recall path and hosted Blob composition. Missing, stale, or
+  scope-incomplete corpus coverage fails closed to an explicit partial result rather than proving
+  completeness.
+
+### Changed
+
+- Separate the normal user flow into complete map first, prioritized core sources second, selected
+  source text on demand, and explicit exhaustive traversal only when the user requests every
+  record. Fast orientation no longer means silently dropping non-core entities.
+- Route long evidence by exact ID, character count, SHA-256, URL, and locator instead of returning a
+  shortened preview. Stable cursors reconstruct every stored range without application-level text
+  loss.
+- Preserve natural-language intent while using deterministic date, term, committee, exact bill
+  number, and relevance accounting. Coverage and pagination must both be complete before the tools
+  permit a comprehensive claim.
+- Update the local installer, documentation, runtime version, lock file, and GitHub source pin to
+  `v0.10.0`.
+
+### Fixed
+
+- Use the actual Vercel Blob 0.6 `list_objects` API and exhaust every cursor page for official
+  document pointers and research artifact inventories, preventing hosted document jobs from
+  failing SDK compatibility checks or silently omitting objects beyond the first list page.
+- Treat a bodyless Vercel Queue HTTP 202 as a successful deferred publication, matching the
+  official Queue SDK while retaining the task's idempotency identity for safe retries.
+- Align wheel dependency metadata and official-source User-Agent versions with the v0.10 runtime,
+  including direct cryptography and MCP 1.28 requirements used by the hosted OAuth path.
+- Advertise every legislative research tool as read-only and non-destructive in MCP metadata, so
+  ChatGPT plans and workspaces restricted to read/fetch actions can discover and enable them.
+- Advertise and preserve `offline_access` through OAuth discovery, authorization, access, and
+  refresh credentials so web connectors can retain access after the short-lived token expires.
+- Read `ASSEMBLY_OPEN_API_KEY` during `kbd setup`, expose the documented `--api-key` fallback, and
+  fail immediately without prompting in a non-interactive shell.
+- Preserve bounded top-level Open Assembly error codes such as `ERROR-290` and `ERROR-300` instead
+  of hiding them behind an unexpected-schema error, while continuing to redact credentials.
+- Make matching existing Claude Code, Codex, and Gemini registrations idempotent while rejecting a
+  conflicting command, and propagate a custom credentials path to the registered MCP process.
+
+### Known limitations
+
+- The full official-record corpus revision has not yet been built, deployed, and operationally
+  verified for the public service. Queries whose universe cannot be proven remain partial with
+  explicit coverage gaps; `v0.10.0` does not claim a complete historical full-text index.
+- Claude.ai OAuth has automated integration coverage, but a real ChatGPT web-account callback and
+  the 13-tool public deployment still require post-deployment smoke testing.
+- In-flight artifacts created before the strict `v0.10.0` schema do not yet have a migration path.
+  Do not claim zero-downtime resumption of older research jobs.
+
 ## [0.9.3] - 2026-07-13
 
 ### Fixed

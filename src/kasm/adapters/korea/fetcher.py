@@ -10,9 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from kasm import __version__
+
 from .pdf_text import FallbackExtractor, extract_pdf_text
 
 ALLOWED_MINUTES_HOST = "record.assembly.go.kr"
+_USER_AGENT = f"Mozilla/5.0 (compatible; KASM/{__version__})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +54,7 @@ class MinutesFetcher:
             request = urllib.request.Request(
                 source_url,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; KASM/0.1)",
+                    "User-Agent": _USER_AGENT,
                     "Referer": "https://open.assembly.go.kr/",
                 },
             )

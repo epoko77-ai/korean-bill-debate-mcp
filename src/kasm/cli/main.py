@@ -62,48 +62,9 @@ def _print_demo(payload: dict[str, Any], graph: dict[str, Any]) -> None:
 
 
 def _print_research(result: dict[str, Any]) -> None:
-    """Render the connected evidence trail as a readable terminal report."""
-    print("Korean Bill & Debate MCP — 법안·논의 시계열 조사\n")
-    print(f"질문: {result['query']}\n")
-    print("시계열")
-    timeline = result.get("timeline", [])
-    dated_bills: list[dict[str, Any]] = []
-    seen_dates: set[str] = set()
-    for event in timeline:
-        if event["event_type"] != "debate" and event["date"] not in seen_dates:
-            dated_bills.append(event)
-            seen_dates.add(event["date"])
-    if len(dated_bills) > 4:
-        last = len(dated_bills) - 1
-        dated_bills = [dated_bills[index] for index in (0, last // 3, last * 2 // 3, last)]
-    debates = [event for event in timeline if event["event_type"] == "debate"]
-    shown = [*dated_bills, *(debates[:1])]
-    for event in shown:
-        label = "토론" if event["event_type"] == "debate" else "의안"
-        print(f"  {event['date']}  [{label}] {event['detail']}")
-        if event.get("bill_no"):
-            print(f"              의안 {event['bill_no']} · {event['title']}")
-        if event.get("participants"):
-            print(f"              참여: {' · '.join(event['participants'][:6])}")
-    print("\n관련 발언과 앞뒤 맥락")
-    seen_speakers: set[str] = set()
-    for speech in result.get("speeches", []):
-        if speech["speaker"] in seen_speakers:
-            continue
-        seen_speakers.add(speech["speaker"])
-        text = " ".join(speech["text"].split())
-        print(f"  • {speech['speaker']} · {speech.get('committee') or '위원회 미상'}")
-        print(f"    {text[:105]}{'…' if len(text) > 105 else ''}")
-        print(f"    원문: {speech['citation']['official_url']}")
-        if len(seen_speakers) >= 5:
-            break
-    quality = result["quality"]
-    print(
-        "\n근거 요약: "
-        f"의안 {len(result['bills'])}건 · 발언 {quality['speech_matches']}건 · "
-        f"토론 스레드 {quality['discussion_threads']}개 · 앞뒤 발언 {quality['context_turns']}개"
-    )
-    print(f"공식 출처 보존율: {quality['provenance_rate']:.0%}")
+    """Print the complete research payload without a presentation-only sample."""
+
+    _print(result)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -116,7 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=("claude-code", "codex", "gemini", "claude-desktop"),
     )
-    setup.add_argument("--api-key", help=argparse.SUPPRESS)
+    setup.add_argument(
+        "--api-key",
+        help=(
+            "Open Assembly API key; defaults to ASSEMBLY_OPEN_API_KEY "
+            "(prefer the environment variable to keep the key out of shell history)"
+        ),
+    )
     setup.add_argument("--credentials-file")
     setup.add_argument("--no-validate", action="store_true")
 

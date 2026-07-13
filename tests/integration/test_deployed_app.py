@@ -95,6 +95,9 @@ def test_explicit_offline_cache_app_health(tmp_path, monkeypatch) -> None:
                 "bills": 1,
                 "semantic_index": False,
                 "remote_user_key": False,
+                "durable_research": False,
+                "mcp_tool_count": 8,
+                "corpus_revision_configured": False,
             }
             async with streamable_http_client(
                 "http://127.0.0.1/mcp", http_client=client
@@ -162,6 +165,7 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
     secret = Fernet.generate_key().decode()
     monkeypatch.setenv("KBD_REMOTE_TOKEN_SECRET", secret)
     monkeypatch.setenv("KBD_DATA_DIR", str(tmp_path / "remote"))
+    monkeypatch.setenv("KASM_ALLOWED_ORIGINS", "https://operator.example")
     monkeypatch.delenv("ASSEMBLY_OPEN_API_KEY", raising=False)
     monkeypatch.setattr("kasm.mcp.deployment._validate_remote_key", lambda _key: None)
 
@@ -229,7 +233,10 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
             unauthenticated = await client.post("/mcp")
             assert unauthenticated.status_code == 401
             assert "oauth-protected-resource/mcp" in unauthenticated.headers["www-authenticate"]
-            assert 'scope="mcp:tools"' in unauthenticated.headers["www-authenticate"]
+            assert (
+                'scope="mcp:tools offline_access"'
+                in unauthenticated.headers["www-authenticate"]
+            )
 
             resource_metadata = await client.get(
                 "/.well-known/oauth-protected-resource/mcp"
@@ -241,6 +248,10 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
             assert authorization_metadata.json()["registration_endpoint"].endswith(
                 "/oauth/register"
             )
+            assert authorization_metadata.json()["scopes_supported"] == [
+                "mcp:tools",
+                "offline_access",
+            ]
             registered = await client.post(
                 "/oauth/register",
                 json={
@@ -268,7 +279,7 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
                 "response_type": "code",
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
-                "scope": "mcp:tools",
+                "scope": "mcp:tools offline_access",
                 "resource": "http://127.0.0.1/mcp",
                 "state": "test-state",
             }
@@ -299,6 +310,7 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
                 },
             )
             assert exchanged.status_code == 200
+            assert exchanged.json()["scope"] == "mcp:tools offline_access"
             access_token = exchanged.json()["access_token"]
             refreshed = await client.post(
                 "/oauth/token",
@@ -326,11 +338,23 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
                 assert len((await session.list_tools()).tools) == 8
 
             token = RemoteTokenAuth(None, secret).issue("personal-key")
-            async with streamable_http_client(
-                f"http://127.0.0.1/mcp/t/{token}", http_client=client
-            ) as streams:
-                read_stream, write_stream, _ = streams
-                async with ClientSession(read_stream, write_stream) as session:
+            for origin in (
+                "https://operator.example",
+                "https://claude.ai",
+                "https://chatgpt.com",
+                "https://chat.openai.com",
+            ):
+                async with (
+                    httpx.AsyncClient(
+                        transport=transport,
+                        base_url="http://127.0.0.1",
+                        headers={"Origin": origin},
+                    ) as origin_client,
+                    streamable_http_client(
+                        f"http://127.0.0.1/mcp/t/{token}", http_client=origin_client
+                    ) as streams,
+                    ClientSession(streams[0], streams[1]) as session,
+                ):
                     await session.initialize()
                     tools = (await session.list_tools()).tools
                     assert len(tools) == 8

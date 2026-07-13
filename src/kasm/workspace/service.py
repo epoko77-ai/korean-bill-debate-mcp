@@ -13,10 +13,13 @@ from typing import Any
 from kasm.live import create_live_services
 from kasm.mcp.tools import KasmTools, ServiceContext
 
-from .llm import LlmError, synthesize
+from .llm import LlmError, answer_delivery_metadata, synthesize
 
 ServicesFactory = Callable[..., ServiceContext]
 Synthesizer = Callable[[str, str, str, dict[str, Any]], tuple[str, str]]
+
+_SOURCE_TITLE_DISPLAY_LIMIT = 180
+_SOURCE_DETAIL_DISPLAY_LIMIT = 240
 
 
 class WorkspaceError(RuntimeError):
@@ -68,6 +71,10 @@ def run_workspace_research(
                     "다른 법안으로 대체하지 않았으니 의안번호를 확인해 주세요.",
                     status_code=502,
                 )
+            if isinstance(validation, dict) and not isinstance(
+                research.get("exact_bill_evidence_validation"), dict
+            ):
+                _restrict_exact_bill_evidence(research)
             answer, model = synthesizer(provider, llm_api_key.strip(), query, research)
     except WorkspaceError:
         raise
@@ -84,6 +91,7 @@ def run_workspace_research(
         "answer": answer,
         "provider": provider,
         "model": model,
+        "answer_delivery": answer_delivery_metadata(provider),
         "elapsed_seconds": round(time.monotonic() - started, 1),
         "evidence": _evidence_summary(research),
     }
@@ -102,12 +110,14 @@ def _evidence_summary(research: dict[str, Any]) -> dict[str, Any]:
         "thread_count": len(threads),
         "quality": research.get("quality") or {},
         "live_refresh": research.get("live_refresh") or {},
+        "research_pagination": research.get("research_pagination") or {},
+        "scope_inventory": research.get("scope_inventory") or {},
         "sources": _official_sources(research),
     }
 
 
-def _official_sources(research: dict[str, Any]) -> list[dict[str, str]]:
-    sources: list[dict[str, str]] = []
+def _official_sources(research: dict[str, Any]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
     seen: set[str] = set()
 
     def add(url: Any, title: Any, source_type: str, detail: Any = "") -> None:
@@ -115,12 +125,28 @@ def _official_sources(research: dict[str, Any]) -> list[dict[str, str]]:
         if not _is_official_assembly_url(normalized_url) or normalized_url in seen:
             return
         seen.add(normalized_url)
+        full_title = str(title or "국회 공식 원문")
+        full_detail = str(detail or "")
+        display_title = _truncate_for_display(full_title, _SOURCE_TITLE_DISPLAY_LIMIT)
+        display_detail = _truncate_for_display(full_detail, _SOURCE_DETAIL_DISPLAY_LIMIT)
         sources.append(
             {
                 "url": normalized_url,
-                "title": str(title or "국회 공식 원문")[:180],
+                "title": full_title,
                 "type": source_type,
-                "detail": str(detail or "")[:240],
+                "detail": full_detail,
+                "presentation": {
+                    "title": display_title,
+                    "detail": display_detail,
+                    "title_truncated": display_title != full_title,
+                    "detail_truncated": display_detail != full_detail,
+                    "title_original_characters": len(full_title),
+                    "detail_original_characters": len(full_detail),
+                    "title_displayed_characters": len(display_title),
+                    "detail_displayed_characters": len(display_detail),
+                    "title_limit": _SOURCE_TITLE_DISPLAY_LIMIT,
+                    "detail_limit": _SOURCE_DETAIL_DISPLAY_LIMIT,
+                },
             }
         )
 
@@ -151,7 +177,135 @@ def _official_sources(research: dict[str, Any]) -> list[dict[str, str]]:
             "회의록",
             f"{speech.get('speaker') or ''} · {citation.get('source_locator') or ''}",
         )
-    return sources[:40]
+    raw_inventory = research.get("scope_inventory")
+    inventory: dict[str, Any] = raw_inventory if isinstance(raw_inventory, dict) else {}
+    for group_name, source_type in (
+        ("bill_candidates", "의안 후보 지도"),
+        ("meeting_candidates", "회의록 후보 지도"),
+    ):
+        raw_group = inventory.get(group_name)
+        group: dict[str, Any] = raw_group if isinstance(raw_group, dict) else {}
+        raw_items = group.get("items")
+        items: list[Any] = raw_items if isinstance(raw_items, list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            add(
+                item.get("official_url"),
+                item.get("name") or item.get("title"),
+                source_type,
+                (
+                    item.get("process_result")
+                    or item.get("committee")
+                    or (
+                        "회의록 본문 확인 완료"
+                        if item.get("full_text_loaded")
+                        else "공식 후보 확인·본문 추가 확인 필요"
+                    )
+                ),
+            )
+    return sources
+
+
+def _truncate_for_display(value: str, limit: int) -> str:
+    """Bound only card presentation while retaining the full source metadata."""
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def _restrict_exact_bill_evidence(research: dict[str, Any]) -> None:
+    """Fail closed for speeches and threads as well as the exact bill record itself."""
+
+    raw_validation = research.get("bill_number_validation")
+    validation: dict[str, Any] = raw_validation if isinstance(raw_validation, dict) else {}
+    requested = _string_values(validation.get("requested"))
+    raw_bills = research.get("bills")
+    bills: list[Any] = raw_bills if isinstance(raw_bills, list) else []
+    exact_bills = [
+        bill
+        for bill in bills
+        if isinstance(bill, dict) and str(bill.get("bill_no") or "") in requested
+    ]
+    allowed_bill_ids = {str(bill.get("id") or "") for bill in exact_bills}
+    raw_links = research.get("links")
+    links: list[Any] = raw_links if isinstance(raw_links, list) else []
+    exact_links = [
+        link
+        for link in links
+        if isinstance(link, dict) and str(link.get("bill_id") or "") in allowed_bill_ids
+    ]
+    linked_speech_ids = {
+        str(link.get("speech_id") or "")
+        for link in exact_links
+        if str(link.get("speech_id") or "").strip()
+    }
+    raw_speeches = research.get("speeches")
+    speeches: list[Any] = raw_speeches if isinstance(raw_speeches, list) else []
+    exact_speeches = [
+        speech
+        for speech in speeches
+        if isinstance(speech, dict) and str(speech.get("speech_id") or "") in linked_speech_ids
+    ]
+    raw_threads = research.get("discussion_threads")
+    threads: list[Any] = raw_threads if isinstance(raw_threads, list) else []
+    exact_threads: list[dict[str, Any]] = []
+    for raw_thread in threads:
+        if not isinstance(raw_thread, dict):
+            continue
+        matched = _string_values(raw_thread.get("matched_speech_ids"))
+        allowed_matches = sorted(matched.intersection(linked_speech_ids))
+        if not allowed_matches:
+            continue
+        thread = dict(raw_thread)
+        thread["matched_speech_ids"] = allowed_matches
+        thread["exact_bill_context"] = True
+        exact_threads.append(thread)
+    allowed_meeting_ids = {str(thread.get("meeting_id") or "") for thread in exact_threads}
+    raw_timeline = research.get("timeline")
+    timeline: list[Any] = raw_timeline if isinstance(raw_timeline, list) else []
+    exact_timeline = [
+        event
+        for event in timeline
+        if not isinstance(event, dict)
+        or (
+            str(event.get("bill_no") or "") in requested
+            if event.get("bill_no")
+            else event.get("event_type") != "debate"
+            or str(event.get("meeting_id") or "") in allowed_meeting_ids
+        )
+    ]
+    research["bills"] = exact_bills
+    research["links"] = exact_links
+    research["speeches"] = exact_speeches
+    research["discussion_threads"] = exact_threads
+    research["timeline"] = exact_timeline
+    research["exact_bill_evidence_validation"] = {
+        "requested_bill_numbers": sorted(requested),
+        "unlinked_speeches_removed": len(speeches) - len(exact_speeches),
+        "unlinked_threads_removed": len(threads) - len(exact_threads),
+        "policy": "명시적 의안번호와 공식 연결이 증명된 발언·회의 맥락만 유지",
+    }
+    raw_quality = research.get("quality")
+    if isinstance(raw_quality, dict):
+        raw_quality["speech_matches"] = len(exact_speeches)
+        raw_quality["discussion_threads"] = len(exact_threads)
+        raw_quality["context_turns"] = sum(len(thread.get("turns", [])) for thread in exact_threads)
+        if not exact_speeches:
+            raw_warnings = raw_quality.get("warnings")
+            warnings = raw_warnings if isinstance(raw_warnings, list) else []
+            warning = (
+                "해당 의안번호와 공식 연결이 증명된 회의 발언은 현재 자료에서 확인되지 않았습니다."
+            )
+            if warning not in warnings:
+                warnings.append(warning)
+            raw_quality["warnings"] = warnings
+
+
+def _string_values(value: Any) -> set[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return set()
+    return {str(item) for item in value if str(item).strip()}
 
 
 def _is_official_assembly_url(url: str) -> bool:

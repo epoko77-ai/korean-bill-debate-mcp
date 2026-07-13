@@ -17,6 +17,36 @@ CREATE TABLE IF NOT EXISTS meetings (
 CREATE INDEX IF NOT EXISTS idx_meetings_filters
     ON meetings (assembly_term, committee_id, date, meeting_type);
 
+CREATE TABLE IF NOT EXISTS meeting_agendas (
+    id TEXT PRIMARY KEY,
+    meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+    title TEXT NOT NULL,
+    bill_no TEXT,
+    official_url TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    UNIQUE (meeting_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_agendas_bill
+    ON meeting_agendas (bill_no, meeting_id, sequence);
+CREATE VIRTUAL TABLE IF NOT EXISTS meeting_agendas_fts USING fts5(
+    title, bill_no, content='meeting_agendas', content_rowid='rowid', tokenize='unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS meeting_agendas_ai AFTER INSERT ON meeting_agendas BEGIN
+    INSERT INTO meeting_agendas_fts(rowid, title, bill_no)
+    VALUES (new.rowid, new.title, new.bill_no);
+END;
+CREATE TRIGGER IF NOT EXISTS meeting_agendas_ad AFTER DELETE ON meeting_agendas BEGIN
+    INSERT INTO meeting_agendas_fts(meeting_agendas_fts, rowid, title, bill_no)
+    VALUES ('delete', old.rowid, old.title, old.bill_no);
+END;
+CREATE TRIGGER IF NOT EXISTS meeting_agendas_au AFTER UPDATE ON meeting_agendas BEGIN
+    INSERT INTO meeting_agendas_fts(meeting_agendas_fts, rowid, title, bill_no)
+    VALUES ('delete', old.rowid, old.title, old.bill_no);
+    INSERT INTO meeting_agendas_fts(rowid, title, bill_no)
+    VALUES (new.rowid, new.title, new.bill_no);
+END;
+
 CREATE TABLE IF NOT EXISTS persons (
     id TEXT PRIMARY KEY,
     name_ko TEXT NOT NULL,

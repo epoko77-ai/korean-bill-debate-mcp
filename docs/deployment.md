@@ -7,16 +7,60 @@ query cache on the user's machine.
 
 ```bash
 export ASSEMBLY_OPEN_API_KEY='YOUR_KEY'
-uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.3 kbd mcp
+uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.10.0 kbd mcp
 ```
 
 ## Hosted user-keyed Streamable HTTP
 
-The public [connection page](https://korean-bill-debate-mcp.vercel.app) encrypts each user's
-Open Assembly key into a personal connection token. The raw key is not stored in a database or file.
+Claude.ai and ChatGPT should register the stable public endpoint
+`https://korean-bill-debate-mcp.vercel.app/mcp`. It returns the MCP OAuth discovery challenge,
+supports dynamic client registration and PKCE, and turns the Open Assembly key entered on the
+approval page into expiring access and refresh credentials. The raw key is not stored in a database
+or file.
+
+The public [connection page](https://korean-bill-debate-mcp.vercel.app) also keeps a legacy
+`/connect` form for clients that cannot complete OAuth. That form validates the user's key before
+issuing a password-equivalent `/mcp/t/...` URL. Do not use the personal URL in Claude.ai or ChatGPT.
 
 Self-hosters must set `KBD_REMOTE_TOKEN_SECRET` to a Fernet key. The setup page then issues personal
 `/mcp/t/...` URLs. Never configure one shared Open Assembly operator key for public traffic.
+
+The five durable research tools require the complete hosted research configuration: credential
+secret, Blob storage, deployment identity, queue dispatch, and internal dispatch secret. A partial
+configuration deliberately exposes only the eight live-cache compatibility tools and no worker.
+
+### Durable production checklist
+
+Before deploying the 13-tool surface:
+
+1. Connect a **private** Vercel Blob store. Its project connection must expose
+   `BLOB_READ_WRITE_TOKEN` to Production. Do not point the artifact adapters at a public store.
+2. Keep the existing Fernet `KBD_REMOTE_TOKEN_SECRET`. Optionally set a separate Fernet
+   `KBD_RESEARCH_CREDENTIAL_SECRET`; when omitted, the remote-token secret is reused.
+3. Set `KBD_INTERNAL_TASK_SECRET` to an independent 32–512 byte printable ASCII secret. It protects
+   the queue bridge's same-deployment Python dispatch boundary and must not be a user API key.
+4. Enable Vercel **Secure Backend Access with OIDC** and automatic System Environment Variables.
+   Runtime requests need the `x-vercel-oidc-token` identity and the application requires the
+   system-provided `VERCEL_DEPLOYMENT_ID` to keep queue messages deployment-bound. The queue bridge
+   uses the system-provided `VERCEL_URL` for its same-deployment internal dispatch target; it never
+   trusts an inbound Host header for that secret-bearing request.
+5. Keep the queue topic at `kbd-research`, or change `KBD_RESEARCH_QUEUE_TOPIC` and the
+   `experimentalTriggers[].topic` value in `vercel.json` together.
+6. Allow the production host and the web-client origins in `KASM_ALLOWED_HOSTS` and
+   `KASM_ALLOWED_ORIGINS`. The production smoke must cover both `https://claude.ai` and
+   `https://chatgpt.com`.
+
+Do not set `KBD_RESEARCH_CORPUS_REVISION` merely to make the health field true. Set it only to a
+published, complete revision whose readiness marker and referenced objects have been verified. It
+is valid to leave it unset: the server then reports unproven broad scope as partial instead of
+claiming complete historical recall.
+
+After deployment, `/healthz` must report `durable_research: true` and `mcp_tool_count: 13`. Then run
+`scripts/smoke_remote_durable_oauth.py` once with `KBD_SMOKE_ORIGIN=https://claude.ai` and once with
+`KBD_SMOKE_ORIGIN=https://chatgpt.com`. The smoke uses the official MCP SDK, dynamic registration,
+PKCE, refresh credentials, read-only tool annotations, and a fast durable research receipt without
+printing the Open Assembly key or OAuth tokens. An 8-tool health result is a failed durable rollout,
+not a successful compatibility substitute.
 
 The same deployment exposes the no-account research workspace at `/workspace`. It accepts a user's
 Open Assembly and LLM keys in one HTTPS request, isolates them by purpose, and deletes its temporary

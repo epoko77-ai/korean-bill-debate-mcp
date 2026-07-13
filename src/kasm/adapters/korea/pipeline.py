@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -56,13 +57,94 @@ class OpenAssemblyPipeline:
 def distinct_minutes_rows(
     rows: list[dict[str, Any]] | tuple[dict[str, Any], ...],
 ) -> list[dict[str, Any]]:
-    """Keep the first portal row for each official PDF URL, preserving API order."""
-    seen: set[str] = set()
-    distinct = []
+    """Merge portal agenda rows that refer to the same official minutes PDF.
+
+    Open Assembly meeting datasets can return one row per agenda item even
+    though every row points at the same minutes PDF.  The original
+    implementation retained only the first row, which silently discarded the
+    remaining agenda titles and bill numbers.  Keep the first row's existing
+    fields for backwards compatibility and add a complete, stable agenda
+    summary assembled from every matching row.
+    """
+    grouped: dict[str, dict[str, Any]] = {}
+    agenda_by_url: dict[str, list[dict[str, str | None]]] = {}
     for row in rows:
         url = OpenAssemblyPipeline.minutes_url(row)
-        if url in seen:
+        if url not in grouped:
+            grouped[url] = dict(row)
+            agenda_by_url[url] = []
+        agenda_by_url[url].extend(_agenda_items(row))
+
+    for url, row in grouped.items():
+        items = _deduplicate_agenda_items(agenda_by_url[url])
+        row["agenda_items"] = items
+        row["agenda_text"] = "\n".join(_agenda_item_text(item) for item in items)
+    return list(grouped.values())
+
+
+_AGENDA_TITLE_FIELDS = (
+    "SUB_NAME",
+    "AGENDA_NAME",
+    "AGENDA_NM",
+    "MTR_NM",
+    "ITEM_NAME",
+    "ITEM_NM",
+    "BILL_NAME",
+    "BILL_NM",
+    "agenda_title",
+    "agenda",
+)
+_AGENDA_BILL_FIELDS = (
+    "BILL_NO",
+    "BILL_NUM",
+    "BILL_NUMBER",
+    "bill_no",
+)
+_BILL_NUMBER = re.compile(r"(?<!\d)\d{7}(?!\d)")
+
+
+def _agenda_items(row: Mapping[str, Any]) -> list[dict[str, str | None]]:
+    existing = row.get("agenda_items")
+    items: list[dict[str, str | None]] = []
+    if isinstance(existing, (list, tuple)):
+        for item in existing:
+            if not isinstance(item, Mapping):
+                continue
+            title = _first(item, "title", "name")
+            bill_no = _first(item, "bill_no", "BILL_NO")
+            if title or bill_no:
+                items.append({"bill_no": bill_no, "title": title})
+
+    title = _first(row, *_AGENDA_TITLE_FIELDS)
+    bill_no = _first(row, *_AGENDA_BILL_FIELDS)
+    if bill_no is None and title:
+        match = _BILL_NUMBER.search(title)
+        bill_no = match.group() if match else None
+    if title or bill_no:
+        items.append({"bill_no": bill_no, "title": title})
+    return items
+
+
+def _deduplicate_agenda_items(
+    items: list[dict[str, str | None]],
+) -> list[dict[str, str | None]]:
+    distinct: list[dict[str, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        bill_no = item["bill_no"]
+        title = item["title"]
+        normalized_title = " ".join((title or "").split()).casefold()
+        key = (bill_no or "", normalized_title)
+        if key in seen:
             continue
-        seen.add(url)
-        distinct.append(row)
+        seen.add(key)
+        distinct.append({"bill_no": bill_no, "title": title})
     return distinct
+
+
+def _agenda_item_text(item: Mapping[str, str | None]) -> str:
+    bill_no = item.get("bill_no")
+    title = item.get("title")
+    if bill_no and title:
+        return f"{bill_no} {title}"
+    return bill_no or title or ""

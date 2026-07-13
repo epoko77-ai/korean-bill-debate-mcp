@@ -1,0 +1,1010 @@
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+
+from kasm.adapters.korea.bills import BILL_STATUS_DATASET
+from kasm.adapters.korea.client import ApiPage
+from kasm.research.collector import CollectionCoverage, MetadataCollection
+from kasm.research.contracts import (
+    CoverageLedger,
+    EvidenceCoverage,
+    EvidenceType,
+    ResearchContract,
+)
+from kasm.research.credentials import ResearchCredential
+from kasm.research.document_worker import DocumentWorkResult, TransientDocumentError
+from kasm.research.documents import OfficialDocumentKind, ParsedOfficialDocument, TextSegment
+from kasm.research.engine import (
+    BillDocumentDiscovery,
+    DiscoveryStageState,
+    DocumentOutcome,
+    DocumentOutcomeStatus,
+    DocumentWorkItem,
+    DocumentWorkManifest,
+    FamilyFilterAccounting,
+    FinalizationContext,
+    GatewayPlanState,
+    InMemoryResearchRunStore,
+    MetadataStageState,
+    ResearchEngine,
+    StrictFilterReport,
+)
+from kasm.research.jobs import InMemoryResearchJobStore, JobStatus, ResearchJob
+from kasm.research.partitioning import ResearchPartitionPlan, ResearchPartitionPlanner
+from kasm.research.planner import ResearchContractPlanner, ResearchPlan, plan_research
+from kasm.research.queue import LeasedResearchTask, ResearchTask, ResearchTaskStage
+from kasm.research.resolver import MetadataCandidateResolver, resolve_metadata_candidates
+from kasm.research.results import ResearchSnapshot
+
+AS_OF = datetime(2026, 7, 13, 9, 30, tzinfo=UTC)
+REVIEW_URL = "https://likms.assembly.go.kr/filegate/review.pdf?id=2219564"
+MINUTES_URL = "https://record.assembly.go.kr/minutes/ai.pdf"
+
+Responder = Callable[[str, int, int, dict[str, str | int]], ApiPage]
+
+
+class Queue:
+    def __init__(self) -> None:
+        self.tasks: list[ResearchTask] = []
+        self._keys: set[str] = set()
+
+    def publish(
+        self,
+        task: ResearchTask,
+        *,
+        retention_seconds: int = 86_400,
+        delay_seconds: int = 0,
+    ) -> str:
+        assert retention_seconds >= 60
+        assert delay_seconds >= 0
+        if task.idempotency_key not in self._keys:
+            self._keys.add(task.idempotency_key)
+            self.tasks.append(task)
+        return f"message-{task.idempotency_key[:12]}"
+
+    def receive(
+        self,
+        *,
+        max_messages: int = 1,
+        visibility_timeout_seconds: int = 300,
+    ) -> tuple[LeasedResearchTask, ...]:
+        del max_messages, visibility_timeout_seconds
+        return ()
+
+    def acknowledge(self, receipt_handle: str) -> None:
+        del receipt_handle
+
+    def extend(self, receipt_handle: str, visibility_timeout_seconds: int) -> None:
+        del receipt_handle, visibility_timeout_seconds
+
+
+class Credentials:
+    capability = "g" * 120
+
+    def __init__(self) -> None:
+        self.issued_keys: list[str] = []
+
+    def issue(
+        self,
+        *,
+        research_id: str,
+        query_fingerprint: str,
+        assembly_api_key: str,
+        ttl_seconds: int = 3600,
+    ) -> str:
+        assert research_id and len(query_fingerprint) == 64 and ttl_seconds >= 60
+        self.issued_keys.append(assembly_api_key)
+        return self.capability
+
+    def reveal(
+        self,
+        token: str,
+        *,
+        research_id: str,
+        query_fingerprint: str,
+    ) -> ResearchCredential:
+        assert token == self.capability
+        return ResearchCredential(
+            research_id=research_id,
+            query_fingerprint=query_fingerprint,
+            assembly_api_key="user-open-assembly-key",
+            expires_at=2_000_000_000.0,
+        )
+
+
+class LostProcessLocalJobs:
+    """Models a new hosted invocation whose process-local status DB disappeared."""
+
+    def create(
+        self,
+        contract: ResearchContract,
+        index_revision: str,
+        *,
+        ttl: timedelta = timedelta(hours=1),
+    ) -> ResearchJob:
+        del contract, index_revision, ttl
+        raise AssertionError("a worker must not create another research job")
+
+    def get(self, research_id: str) -> ResearchJob | None:
+        del research_id
+        return None
+
+    def transition(
+        self,
+        research_id: str,
+        status: JobStatus,
+        *,
+        stage: str,
+        progress: float,
+        coverage: CoverageLedger | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> ResearchJob:
+        del (
+            research_id,
+            status,
+            stage,
+            progress,
+            coverage,
+            error_code,
+            error_message,
+        )
+        raise AssertionError("immutable artifacts, not local status, drive workers")
+
+
+class PageClient:
+    def __init__(self, responder: Responder) -> None:
+        self.responder = responder
+        self.calls: list[tuple[str, int, int, dict[str, str | int]]] = []
+
+    def fetch_page(
+        self,
+        dataset: str,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        parameters: Any = None,
+        refresh: bool = False,
+    ) -> ApiPage:
+        assert refresh is False
+        values = dict(parameters or {})
+        self.calls.append((dataset, page, page_size, values))
+        return self.responder(dataset, page, page_size, values)
+
+
+class BillDocuments:
+    def __init__(self, *, failure: str | None = None) -> None:
+        self.failure = failure
+        self.bills: list[str] = []
+
+    def discover_one(
+        self, plan: ResearchPlan, bill: Any
+    ) -> BillDocumentDiscovery:
+        assert plan.contract.query
+        number = str(bill.candidate["BILL_NO"])
+        self.bills.append(number)
+        if self.failure:
+            return BillDocumentDiscovery(number, failure_reason=self.failure)
+        return BillDocumentDiscovery(
+            number,
+            (
+                DocumentWorkItem.create(
+                    OfficialDocumentKind.REVIEW_REPORT,
+                    REVIEW_URL.replace("2219564", number),
+                    evidence_types=(EvidenceType.REVIEW_REPORTS,),
+                    related_bill_numbers=(number,),
+                ),
+            ),
+        )
+
+
+class Worker:
+    def __init__(self) -> None:
+        self.calls: list[tuple[OfficialDocumentKind, str]] = []
+
+    def process(
+        self,
+        kind: OfficialDocumentKind,
+        official_url: str,
+        *,
+        refresh: bool = False,
+    ) -> DocumentWorkResult:
+        assert refresh is False
+        self.calls.append((kind, official_url))
+        document = ParsedOfficialDocument(
+            kind=kind,
+            official_url=official_url,
+            source_hash="d" * 64,
+            parser_version="test-parser-v1",
+            parsed_at=AS_OF,
+            segments=(TextSegment("p.1", "전문위원 검토 원문"),),
+        )
+        return DocumentWorkResult(
+            kind=kind,
+            official_url=official_url,
+            parser_version=document.parser_version,
+            byte_count=100,
+            page_count=1,
+            character_count=len(document.full_text),
+            source_hash=document.source_hash,
+            text_hash=document.text_hash,
+            cache_hit=False,
+            raw_object_key="official/raw/test",
+            parsed_object_key="official/parsed/test.json",
+            document=document,
+        )
+
+
+class TransientThenWorker(Worker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def process(
+        self,
+        kind: OfficialDocumentKind,
+        official_url: str,
+        *,
+        refresh: bool = False,
+    ) -> DocumentWorkResult:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise TransientDocumentError("temporary upstream timeout", code="network_error")
+        return super().process(kind, official_url, refresh=refresh)
+
+
+class Finalizer:
+    def __init__(self) -> None:
+        self.contexts: list[FinalizationContext] = []
+
+    def build(self, context: FinalizationContext) -> ResearchSnapshot:
+        self.contexts.append(context)
+        entries = []
+        for evidence_type in context.job.contract.evidence_types:
+            reasons = tuple(
+                gap.reason
+                for gap in context.coverage_gaps
+                if evidence_type in gap.evidence_types
+            )
+            entries.append(
+                EvidenceCoverage(
+                    evidence_type,
+                    candidate_total=1,
+                    checked_count=0 if reasons else 1,
+                    matched_count=0 if reasons else 1,
+                    failed_count=1 if reasons else 0,
+                    gap_reasons=reasons,
+                )
+            )
+        coverage = CoverageLedger(context.job.contract.evidence_types, tuple(entries))
+        return ResearchSnapshot(
+            research_id=context.job.id,
+            contract=context.job.contract,
+            index_revision=context.job.index_revision,
+            build_sha="test-build",
+            coverage=coverage,
+            evidence=(),
+        )
+
+
+class ReducedPartitionPlanner(ResearchPartitionPlanner):
+    """Keep one bill-discovery partition so fan-out cardinality is easy to prove."""
+
+    def plan(self, research_plan: ResearchPlan) -> ResearchPartitionPlan:
+        original = super().plan(research_plan)
+        selected = next(
+            item
+            for item in original.planned_partitions
+            if item.source.value == "bill_metadata"
+        )
+        return replace(original, planned_partitions=(selected,))
+
+
+def collection(
+    *, bills: tuple[dict[str, Any], ...] = (), meetings: tuple[dict[str, Any], ...] = ()
+) -> MetadataCollection:
+    return MetadataCollection(
+        bills,
+        meetings,
+        (),
+        CollectionCoverage(
+            partitions_expected=0,
+            partitions_complete=0,
+            source_rows_expected=len(bills) + len(meetings),
+            source_rows_fetched=len(bills) + len(meetings),
+            bill_source_rows=len(bills),
+            bill_unique_records=len(bills),
+            bill_duplicate_rows=0,
+            bill_rejected_rows=0,
+            meeting_source_rows=len(meetings),
+            meeting_unique_pdfs=len(meetings),
+            meeting_rows_merged=0,
+            meeting_rejected_rows=0,
+        ),
+    )
+
+
+def page(
+    dataset: str,
+    number: int,
+    page_size: int,
+    total: int,
+    rows: list[dict[str, Any]],
+) -> ApiPage:
+    source_hash = hashlib.sha256(repr((dataset, number, rows)).encode()).hexdigest()
+    return ApiPage(
+        dataset,
+        number,
+        page_size,
+        total,
+        tuple(rows),
+        (
+            f"https://open.assembly.go.kr/portal/openapi/{dataset}?"
+            f"KEY=%2A%2A%2A&pIndex={number}&pSize={page_size}"
+        ),
+        source_hash,
+    )
+
+
+def engine(
+    responder: Responder,
+    *,
+    partition_planner: ResearchPartitionPlanner | None = None,
+    bill_documents: BillDocuments | None = None,
+    document_worker: Worker | None = None,
+) -> tuple[
+    ResearchEngine,
+    Queue,
+    PageClient,
+    InMemoryResearchJobStore,
+    InMemoryResearchRunStore,
+    Finalizer,
+]:
+    queue = Queue()
+    client = PageClient(responder)
+    jobs = InMemoryResearchJobStore()
+    runs = InMemoryResearchRunStore()
+    finalizer = Finalizer()
+
+    def client_factory(key: str) -> PageClient:
+        assert key == "user-open-assembly-key"
+        return client
+
+    value = ResearchEngine(
+        index_revision="index-test",
+        planner=ResearchContractPlanner(),
+        partition_planner=partition_planner or ResearchPartitionPlanner(),
+        jobs=jobs,
+        queue=queue,
+        credentials=Credentials(),
+        page_client_factory=client_factory,
+        resolver=MetadataCandidateResolver(),
+        bill_documents=bill_documents or BillDocuments(),
+        document_worker=document_worker or Worker(),
+        finalizer=finalizer,
+        runs=runs,
+    )
+    return value, queue, client, jobs, runs, finalizer
+
+
+def exact_responder(
+    dataset: str, number: int, page_size: int, parameters: dict[str, str | int]
+) -> ApiPage:
+    assert number == 1
+    bill_number = str(parameters["BILL_NO"])
+    if dataset == BILL_STATUS_DATASET:
+        rows = [{"BILL_NO": bill_number, "PROC_RESULT": "위원회 심사"}]
+    else:
+        rows = [
+            {
+                "BILL_NO": bill_number,
+                "BILL_NAME": "형사소송법 일부개정법률안",
+                "summary": "보완수사권을 정비한다.",
+                "PROPOSE_DT": "2026-06-01",
+            }
+        ]
+    return page(dataset, number, page_size, 1, rows)
+
+
+def task_with(queue: Queue, **payload: object) -> ResearchTask:
+    return next(
+        task
+        for task in queue.tasks
+        if all(dict(task.payload).get(name) == value for name, value in payload.items())
+    )
+
+
+def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
+    value, queue, client, _jobs, _runs, _finalizer = engine(exact_responder)
+
+    receipt = value.gateway(
+        "2026-01-01부터 2026-07-13까지 2219564 보완수사권",
+        assembly_api_key="private-user-key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+
+    assert client.calls == []
+    assert receipt.metadata_task_count == 1
+    assert len(queue.tasks) == 1
+    assert dict(queue.tasks[0].payload)["page"] == 1
+    derived = value.derive_status(receipt.research_id)
+    assert derived.stage == "metadata_discovery"
+    assert derived.metadata_partitions_expected == 1
+    assert derived.metadata_pages_expected == 1
+    assert derived.metadata_pages_complete == 0
+    assert derived.overview_available is False
+    public = repr(receipt.to_dict())
+    assert "private-user-key" not in public
+    assert Credentials.capability not in public
+
+
+def test_broad_gateway_uses_bounded_coordinators_instead_of_serial_queue_fanout() -> None:
+    value, queue, client, _jobs, _runs, _finalizer = engine(exact_responder)
+
+    receipt = value.gateway(
+        "2025년부터 현재까지 AI 입법",
+        assembly_api_key="private-user-key",
+        as_of=AS_OF,
+    )
+
+    assert client.calls == []
+    assert receipt.metadata_task_count > value.direct_fanout_limit
+    coordinators = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "discovery_fanout"
+    ]
+    assert 1 <= len(coordinators) < receipt.metadata_task_count
+    value.process_metadata_task(coordinators[0])
+    children = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "metadata_page"
+    ]
+    assert len(children) <= value.fanout_chunk_size
+    assert client.calls == []
+
+
+def test_gateway_rejects_credential_ttl_shorter_than_queued_task_retention() -> None:
+    value, _queue, _client, _jobs, _runs, _finalizer = engine(exact_responder)
+
+    with pytest.raises(ValueError, match="task retention <= credential TTL <= job TTL"):
+        value.gateway(
+            "2219564 보완수사권",
+            assembly_api_key="key",
+            as_of=AS_OF,
+            evidence_types=(EvidenceType.BILLS,),
+            credential_ttl_seconds=3600,
+        )
+
+
+def test_poisoned_task_retry_budget_marks_job_failed_with_sanitized_error() -> None:
+    value, queue, _client, jobs, _runs, _finalizer = engine(exact_responder)
+    receipt = value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+    task = queue.tasks[0]
+
+    failed = value.fail_task(task, error_code="task_retry_budget_exhausted")
+
+    assert failed.status is JobStatus.FAILED
+    assert failed.stage == "collect_metadata_failed"
+    assert failed.error_code == "task_retry_budget_exhausted"
+    assert "key" not in (failed.error_message or "")
+    assert jobs.get(receipt.research_id) == failed
+
+
+def test_worker_recovers_plan_and_identity_when_process_local_job_store_is_empty() -> None:
+    value, queue, client, _jobs, runs, finalizer = engine(exact_responder)
+    receipt = value.gateway(
+        "2026-01-01부터 2026-07-13까지 2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    worker_invocation = ResearchEngine(
+        index_revision="index-test",
+        planner=ResearchContractPlanner(),
+        partition_planner=ResearchPartitionPlanner(),
+        jobs=LostProcessLocalJobs(),
+        queue=queue,
+        credentials=Credentials(),
+        page_client_factory=lambda _key: client,
+        resolver=MetadataCandidateResolver(),
+        bill_documents=BillDocuments(),
+        document_worker=Worker(),
+        finalizer=finalizer,
+        runs=runs,
+    )
+
+    worker_invocation.process_metadata_task(queue.tasks[0])
+
+    assert runs.get_discovery(receipt.research_id) is not None
+    derived = worker_invocation.derive_status(receipt.research_id)
+    assert derived.stage == "deferred_metadata"
+    assert derived.overview_available is True
+
+
+def test_one_worker_fetches_only_one_page_then_fans_out_every_remaining_page() -> None:
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        _parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        rows = [
+            {
+                "BILL_NO": f"{2200000 + index:07d}",
+                "BILL_NAME": f"인공지능 법안 {index}",
+                "PROPOSE_DT": "2026-06-01",
+            }
+            for index in range(100)
+        ]
+        return page(dataset, 1, page_size, 237, rows)
+
+    value, queue, client, _jobs, _runs, _finalizer = engine(
+        responder,
+        partition_planner=ReducedPartitionPlanner(),
+    )
+    value.gateway(
+        "최근 AI 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+
+    value.process_metadata_task(queue.tasks[0])
+
+    assert len(client.calls) == 1
+    follow_ups = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "metadata_page"
+        and dict(task.payload).get("page") in {2, 3}
+    ]
+    assert [dict(task.payload)["page"] for task in follow_ups] == [2, 3]
+    assert all(dict(task.payload)["expected_total"] == 237 for task in follow_ups)
+
+
+def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss() -> None:
+    rows = [
+        {
+            "BILL_NO": f"{2210000 + index:07d}",
+            "BILL_NAME": f"인공지능 산업 진흥 제{index}호 법안",
+            "PROPOSE_DT": "2026-06-01",
+        }
+        for index in range(101)
+    ]
+    rows.extend(
+        (
+            {
+                "BILL_NO": "2219001",
+                "BILL_NAME": "인공지능 과거 법안",
+                "PROPOSE_DT": "2025-01-01",
+            },
+            {
+                "BILL_NO": "2219002",
+                "BILL_NAME": "인공지능 날짜 누락 법안",
+            },
+        )
+    )
+
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        _parameters: dict[str, str | int],
+    ) -> ApiPage:
+        start = (number - 1) * page_size
+        selected = rows[start : start + page_size]
+        return page(dataset, number, page_size, len(rows), selected)
+
+    value, queue, client, _jobs, runs, _finalizer = engine(
+        responder,
+        partition_planner=ReducedPartitionPlanner(),
+    )
+    receipt = value.gateway(
+        "최근 AI 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(queue.tasks[0])
+    second_page = task_with(queue, work_kind="metadata_page", page=2)
+    value.process_metadata_task(second_page)
+
+    discovery = runs.get_discovery(receipt.research_id)
+    assert discovery is not None
+    assert discovery.filter_report.bills.source_count == 103
+    assert discovery.filter_report.bills.kept_count == 103
+    assert discovery.filter_report.bills.outside_date_count == 0
+    assert discovery.filter_report.bills.missing_date_count == 0
+    assert discovery.resolution.bills.accepted_count == 103
+    fanout_tasks = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "deferred_fanout"
+    ]
+    assert len(fanout_tasks) == 7
+    assert not [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("phase") == "bill_status"
+    ]
+    for task in fanout_tasks:
+        value.process_metadata_task(task)
+    status_tasks = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("phase") == "bill_status"
+        and dict(task.payload).get("page") == 1
+    ]
+    discovery_tasks = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "bill_documents"
+    ]
+    assert len(status_tasks) == 103
+    assert len(discovery_tasks) == 103
+    assert len(client.calls) == 2
+
+
+def test_exact_status_document_pipeline_completes_and_is_idempotent() -> None:
+    value, queue, _client, jobs, runs, finalizer = engine(exact_responder)
+    receipt = value.gateway(
+        "2026-01-01부터 2026-07-13까지 2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(queue.tasks[0])
+    value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
+    value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
+    document_task = next(
+        task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
+    )
+
+    outcome = value.process_document_task(document_task)
+    repeated = value.process_document_task(document_task)
+
+    assert outcome.status is DocumentOutcomeStatus.SUCCEEDED
+    assert repeated == outcome
+    assert len(finalizer.contexts) == 1
+    snapshot = runs.get_snapshot(receipt.research_id)
+    assert snapshot is not None and snapshot.coverage.complete
+    job = jobs.get(receipt.research_id)
+    assert job is not None and job.status is JobStatus.COMPLETE
+    derived = value.derive_status(receipt.research_id)
+    assert derived.snapshot_ready and derived.complete
+    assert derived.overview_available is True
+    assert derived.documents_expected == 1
+    assert derived.documents_complete == 1
+
+
+def test_cross_term_date_scope_collects_every_term_without_a_false_gap() -> None:
+    value, queue, _client, jobs, runs, finalizer = engine(exact_responder)
+    receipt = value.gateway(
+        "2020-01-01부터 2025-12-31까지 2219564 법안",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+
+    for task in tuple(queue.tasks):
+        value.process_metadata_task(task)
+
+    snapshot = runs.get_snapshot(receipt.research_id)
+    assert snapshot is not None and snapshot.coverage.complete
+    assert not finalizer.contexts[0].coverage_gaps
+    job = jobs.get(receipt.research_id)
+    assert job is not None and job.status is JobStatus.COMPLETE
+
+
+def test_explicit_assembly_term_clipping_finishes_partial_with_explicit_gap() -> None:
+    value, queue, _client, jobs, runs, finalizer = engine(exact_responder)
+    receipt = value.gateway(
+        "2020-01-01부터 2025-12-31까지 2219564 법안",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        assembly_term=22,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+
+    value.process_metadata_task(queue.tasks[0])
+
+    expected = (
+        "requested_date_scope_not_fully_represented:"
+        "date_from_clipped_to_assembly_term_start"
+    )
+    snapshot = runs.get_snapshot(receipt.research_id)
+    assert snapshot is not None and not snapshot.coverage.complete
+    assert expected in snapshot.coverage.entries[0].gap_reasons
+    assert expected in {gap.reason for gap in finalizer.contexts[0].coverage_gaps}
+    job = jobs.get(receipt.research_id)
+    assert job is not None and job.status is JobStatus.PARTIAL
+
+
+def test_cross_term_status_requests_use_each_accepted_bills_own_term() -> None:
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        assembly_term = int(parameters["AGE"])
+        bill_number = "2119001" if assembly_term == 21 else "2219001"
+        if dataset == BILL_STATUS_DATASET:
+            assert parameters["BILL_NO"] == bill_number
+            rows = [{"BILL_NO": bill_number, "AGE": assembly_term, "PROC_RESULT": "심사"}]
+        else:
+            rows = [
+                {
+                    "BILL_NO": bill_number,
+                    "AGE": assembly_term,
+                    "BILL_NAME": "인공지능 산업 진흥 법률안",
+                    "PROPOSE_DT": (
+                        "2023-06-01" if assembly_term == 21 else "2025-06-01"
+                    ),
+                }
+            ]
+        return page(dataset, number, page_size, 1, rows)
+
+    value, queue, client, jobs, runs, _finalizer = engine(responder)
+    receipt = value.gateway(
+        "2020년 5월 30일부터 현재까지 인공지능 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS, EvidenceType.BILL_STATUS),
+    )
+
+    for task in tuple(queue.tasks):
+        value.process_metadata_task(task)
+    status_tasks = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("phase") == "bill_status"
+    ]
+    assert len(status_tasks) == 2
+    for task in status_tasks:
+        value.process_metadata_task(task)
+
+    status_parameters = {
+        tuple(sorted(parameters.items()))
+        for dataset, _page, _size, parameters in client.calls
+        if dataset == BILL_STATUS_DATASET
+    }
+    assert status_parameters == {
+        (("AGE", 21), ("BILL_NO", "2119001")),
+        (("AGE", 22), ("BILL_NO", "2219001")),
+    }
+    snapshot = runs.get_snapshot(receipt.research_id)
+    assert snapshot is not None and snapshot.coverage.complete is False
+    assert all(
+        "full_text_corpus:corpus_recall_provider_unconfigured" in entry.gap_reasons
+        for entry in snapshot.coverage.entries
+    )
+    job = jobs.get(receipt.research_id)
+    assert job is not None and job.status is JobStatus.PARTIAL
+
+
+def test_document_discovery_failure_finishes_partial_with_explicit_coverage_gap() -> None:
+    documents = BillDocuments(failure="review_index_timeout")
+    value, queue, _client, jobs, runs, finalizer = engine(
+        exact_responder,
+        bill_documents=documents,
+    )
+    receipt = value.gateway(
+        "2026-01-01부터 2026-07-13까지 2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(queue.tasks[0])
+    value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
+    value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
+
+    snapshot = runs.get_snapshot(receipt.research_id)
+    assert snapshot is not None and not snapshot.coverage.complete
+    reason = "bill_document_discovery_failed:2219564:review_index_timeout"
+    review = next(
+        entry
+        for entry in snapshot.coverage.entries
+        if entry.evidence_type is EvidenceType.REVIEW_REPORTS
+    )
+    assert reason in review.gap_reasons
+    assert reason in {gap.reason for gap in finalizer.contexts[0].coverage_gaps}
+    job = jobs.get(receipt.research_id)
+    assert job is not None and job.status is JobStatus.PARTIAL
+
+
+def test_transient_document_failure_is_not_acked_and_redelivery_can_finalize() -> None:
+    worker = TransientThenWorker()
+    value, queue, _client, jobs, runs, finalizer = engine(
+        exact_responder,
+        document_worker=worker,
+    )
+    receipt = value.gateway(
+        "2026-01-01부터 2026-07-13까지 2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(queue.tasks[0])
+    value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
+    value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
+    document_task = next(
+        task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
+    )
+
+    with pytest.raises(TransientDocumentError, match="temporary upstream timeout"):
+        value.process_document_task(document_task)
+
+    first = runs.document_outcomes(receipt.research_id)[0]
+    assert first.status is DocumentOutcomeStatus.RETRYABLE_FAILURE
+    assert runs.get_snapshot(receipt.research_id) is None
+    outcome = value.process_document_task(document_task)
+
+    assert outcome.status is DocumentOutcomeStatus.SUCCEEDED
+    assert worker.attempts == 2
+    assert len(finalizer.contexts) == 1
+    assert runs.get_snapshot(receipt.research_id) is not None
+    job = jobs.get(receipt.research_id)
+    assert job is not None and job.status is JobStatus.COMPLETE
+
+
+def test_finalizer_receives_page_aware_transcript_with_cross_page_sequence() -> None:
+    research_plan = plan_research(
+        "2026-07-01부터 2026-07-13까지 보완수사권 회의록",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.SPEECHES,
+            EvidenceType.SPEECH_CONTEXT,
+            EvidenceType.GOVERNMENT_RESPONSES,
+        ),
+    )
+    meeting_row = {
+        "DAE_NUM": 22,
+        "CONF_ID": "meeting-1",
+        "CONF_DATE": "2026-07-02",
+        "COMM_NAME": "법제사법위원회 법안심사소위원회",
+        "TITLE": "법제사법위원회 법안심사소위원회",
+        "PDF_LINK_URL": MINUTES_URL,
+        "agenda_text": "보완수사권 형사소송법",
+    }
+    metadata_collection = collection(meetings=(meeting_row,))
+    resolution = resolve_metadata_candidates(research_plan, metadata_collection)
+    assert resolution.meetings.accepted_count == 1
+    partition_plan = ResearchPartitionPlanner().plan(research_plan)
+    discovery = DiscoveryStageState(
+        metadata_collection,
+        metadata_collection,
+        StrictFilterReport(
+            FamilyFilterAccounting(0, 0),
+            FamilyFilterAccounting(1, 1),
+        ),
+        resolution,
+        (),
+        (),
+    )
+    minute_item = DocumentWorkItem.create(
+        OfficialDocumentKind.MINUTES,
+        MINUTES_URL,
+        evidence_types=research_plan.contract.evidence_types,
+    )
+    manifest = DocumentWorkManifest.create((minute_item,), ())
+    metadata = MetadataStageState(discovery, collection(), manifest, ())
+
+    jobs = InMemoryResearchJobStore()
+    job = jobs.create(research_plan.contract, "index-test")
+    jobs.transition(job.id, JobStatus.RUNNING, stage="documents", progress=0.4)
+    runs = InMemoryResearchRunStore()
+    runs.put_gateway(
+        job.id,
+        GatewayPlanState(
+            job,
+            research_plan,
+            partition_plan,
+            partition_plan.metadata_partitions,
+        ),
+    )
+    runs.put_metadata(job.id, metadata)
+    document = ParsedOfficialDocument(
+        OfficialDocumentKind.MINUTES,
+        MINUTES_URL,
+        "a" * 64,
+        "pypdf-layout-v1",
+        AS_OF,
+        (
+            TextSegment(
+                "p.1",
+                "1. 형사소송법 일부개정법률안\n○김철수 위원: 정부 입장은 무엇입니까?",
+            ),
+            TextSegment(
+                "p.2",
+                "○박영희 장관: 정부는 통제 장치가 필요하다고 봅니다.",
+            ),
+        ),
+    )
+    result = DocumentWorkResult(
+        OfficialDocumentKind.MINUTES,
+        MINUTES_URL,
+        document.parser_version,
+        200,
+        2,
+        len(document.full_text),
+        document.source_hash,
+        document.text_hash,
+        False,
+        "official/raw/minutes",
+        "official/parsed/minutes.json",
+        document,
+    )
+    runs.put_document_outcome(
+        job.id,
+        DocumentOutcome(
+            minute_item.work_id,
+            DocumentOutcomeStatus.SUCCEEDED,
+            result=result,
+        ),
+    )
+    finalizer = Finalizer()
+    value = ResearchEngine(
+        index_revision="index-test",
+        planner=ResearchContractPlanner(),
+        partition_planner=ResearchPartitionPlanner(),
+        jobs=jobs,
+        queue=Queue(),
+        credentials=Credentials(),
+        page_client_factory=lambda _key: PageClient(exact_responder),
+        resolver=MetadataCandidateResolver(),
+        bill_documents=BillDocuments(),
+        document_worker=Worker(),
+        finalizer=finalizer,
+        runs=runs,
+    )
+
+    value.try_finalize(job.id)
+
+    transcript = finalizer.contexts[0].transcripts[0]
+    assert [speech.sequence for speech in transcript.speeches] == [1, 2]
+    assert transcript.speeches[0].source_locator is not None
+    assert transcript.speeches[1].source_locator is not None
+    assert transcript.speeches[0].source_locator.startswith("p.1:")
+    assert transcript.speeches[1].source_locator.startswith("p.2:")
+    assert transcript.speeches[0].next_speech_id == transcript.speeches[1].id

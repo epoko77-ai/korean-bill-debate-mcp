@@ -4,9 +4,28 @@
     "api/index.py": {
       "maxDuration": 300,
       "includeFiles": "src/**"
+    },
+    "api/research_dispatch.py": {
+      "maxDuration": 300,
+      "includeFiles": "src/**"
+    },
+    "api/queues/kbd-research.ts": {
+      "maxDuration": 300,
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "kbd-research",
+          "retryAfterSeconds": 15,
+          "initialDelaySeconds": 0
+        }
+      ]
     }
   },
   "rewrites": [
+    {
+      "source": "/_internal/research/dispatch",
+      "destination": "/api/research_dispatch"
+    },
     {
       "source": "/(.*)",
       "destination": "/api/index"

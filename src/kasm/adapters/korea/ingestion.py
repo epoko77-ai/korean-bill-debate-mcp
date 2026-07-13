@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
-from kasm.core.ids import meeting_id, speech_id
-from kasm.core.models import Bill, Meeting, Speech
+from kasm.core.ids import agenda_id, meeting_id, speech_id
+from kasm.core.models import Agenda, Bill, Meeting, Speech
 from kasm.core.relations import infer_question_answer_relations
 from kasm.storage.repositories import (
+    AgendaRepository,
     BillRepository,
     MeetingRepository,
     SpeechRelationRepository,
@@ -28,6 +29,7 @@ _AGENDA_BILL = re.compile(
     r"\((?P<proposer>[^\n()]{2,60}?대표발의)\)\s*"
     r"\(의안번호\s*(?P<bill_no>\d{5,})\)"
 )
+_EXACT_BILL_NO = re.compile(r"(?<!\d)(\d{7})(?!\d)")
 
 
 def _first(row: Mapping[str, Any], *names: str) -> str | None:
@@ -111,6 +113,7 @@ class IngestionResult:
     speeches_saved: int
     failures: tuple[ParseFailure, ...]
     relations_saved: int = 0
+    agendas_saved: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +128,7 @@ class OpenAssemblyIngestor:
     def __init__(self, connection: Any) -> None:
         self.connection = getattr(connection, "connection", connection)
         self.meetings = MeetingRepository(self.connection)
+        self.agendas = AgendaRepository(self.connection)
         self.speeches = SpeechRepository(self.connection)
         self.relations = SpeechRelationRepository(self.connection)
         self.bills = BillRepository(self.connection)
@@ -146,6 +150,7 @@ class OpenAssemblyIngestor:
             retrieved_at=retrieved_at,
         )
         parsed = parse_transcript(transcript, locator_prefix=meeting.source_url)
+        agendas = agendas_from_row(row, meeting)
         speeches: list[Speech] = []
         for index, item in enumerate(parsed.speeches):
             identifier = speech_id(meeting.id, item.sequence)
@@ -173,6 +178,10 @@ class OpenAssemblyIngestor:
             )
         with self.connection:
             self.meetings.save(meeting)
+            self.connection.execute(
+                "DELETE FROM meeting_agendas WHERE meeting_id = ?", (meeting.id,)
+            )
+            self.agendas.save_many(agendas)
             self.connection.execute("DELETE FROM speeches WHERE meeting_id = ?", (meeting.id,))
             self.speeches.save_many(speeches)
             relations = infer_question_answer_relations(speeches)
@@ -184,7 +193,13 @@ class OpenAssemblyIngestor:
         from .bills import rebuild_speech_bill_links
 
         rebuild_speech_bill_links(self.connection)
-        return IngestionResult(meeting, len(speeches), tuple(parsed.failures), len(relations))
+        return IngestionResult(
+            meeting,
+            len(speeches),
+            tuple(parsed.failures),
+            len(relations),
+            len(agendas),
+        )
 
     def ingest_rows(
         self,
@@ -233,3 +248,54 @@ def bills_from_agenda(transcript: str, meeting: Meeting) -> list[Bill]:
             retrieved_at=meeting.retrieved_at,
         )
     return list(bills.values())
+
+
+def agendas_from_row(row: Mapping[str, Any], meeting: Meeting) -> list[Agenda]:
+    """Persist the complete agenda aggregation attached to one meeting PDF."""
+
+    raw_items = row.get("agenda_items")
+    items: list[tuple[str, str | None]] = []
+    if isinstance(raw_items, (list, tuple)):
+        for raw in raw_items:
+            if not isinstance(raw, Mapping):
+                continue
+            title = _first(raw, "title", "name")
+            bill_no = _first(raw, "bill_no", "BILL_NO")
+            if title:
+                items.append((normalize_text(title), _valid_bill_no(bill_no, title)))
+    if not items:
+        title = _first(
+            row,
+            "SUB_NAME",
+            "AGENDA_NAME",
+            "AGENDA_NM",
+            "MTR_NM",
+            "BILL_NAME",
+            "BILL_NM",
+        )
+        if title:
+            items.append(
+                (
+                    normalize_text(title),
+                    _valid_bill_no(_first(row, "BILL_NO", "BILL_NUM"), title),
+                )
+            )
+    return [
+        Agenda(
+            id=agenda_id(meeting.id, sequence, title, bill_no),
+            meeting_id=meeting.id,
+            sequence=sequence,
+            title=title,
+            bill_no=bill_no,
+            official_url=meeting.source_url,
+            source_hash=meeting.source_hash,
+        )
+        for sequence, (title, bill_no) in enumerate(items)
+    ]
+
+
+def _valid_bill_no(value: str | None, title: str) -> str | None:
+    if value and value.isdigit() and len(value) == 7:
+        return value
+    match = _EXACT_BILL_NO.search(title)
+    return match.group(1) if match else None
