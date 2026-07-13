@@ -2,6 +2,9 @@
 
 Current version: `v0.8.0`
 
+[한국어](README.md) · [MCP setup guide](docs/mcp-clients.md) ·
+[Data sources](docs/data-sources.md) · [Architecture](docs/architecture.md)
+
 **Connect scattered Assembly records around a single bill.**
 
 From a bill's introduction and current status to committee review, expert analysis, and the actual
@@ -18,7 +21,7 @@ journalists, and civil-society organizations.
 For deeper legislative analysis, it also surfaces two sources insiders look for first:
 subcommittee negotiation records and committee expert review reports.
 
-![Demo tracing a question from bills to actual remarks and surrounding context](assets/demo.gif)
+![One bill connected to its text, status, subcommittee minutes, expert review, and lawmakers' Q&A](assets/english-thumbnail-v1.png)
 
 ## Ask in English, verify the Korean official record
 
@@ -41,6 +44,10 @@ the English explanation remains distinguishable from the Korean source record.
 
 The official bill titles, minutes, and review reports remain in Korean. English quotations in the
 AI's answer are translations; open the cited official URL when exact Korean wording matters.
+
+### See the research flow
+
+![Demo tracing a question from bills to actual remarks and surrounding context](assets/demo.gif)
 
 ## Connect it to your AI in about three minutes
 
