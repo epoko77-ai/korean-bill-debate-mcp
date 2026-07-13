@@ -77,6 +77,15 @@ async def exercise() -> dict[str, object]:
         consent.raise_for_status()
         if "본인의 열린국회 API 키" not in consent.text:
             raise RuntimeError("OAuth consent page did not request the user key")
+        callback_origin = (
+            f"{urllib.parse.urlsplit(callback).scheme}://"
+            f"{urllib.parse.urlsplit(callback).netloc}"
+        )
+        if (
+            f"form-action 'self' {callback_origin}"
+            not in consent.headers.get("content-security-policy", "")
+        ):
+            raise RuntimeError("OAuth consent CSP blocks the client callback")
 
         authorized = await client.post(
             metadata["authorization_endpoint"],
@@ -151,6 +160,7 @@ async def exercise() -> dict[str, object]:
         "oauth_discovery": True,
         "dynamic_registration": True,
         "pkce_authorization": True,
+        "browser_callback_allowed": True,
         "refresh_token": True,
         "tool_count": len(names),
         "tools": sorted(names),
