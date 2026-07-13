@@ -13,6 +13,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from kasm.search.bilingual import korean_committee, prepare_query
+
 
 class SearchService(Protocol):
     def search(self, query: str, **filters: Any) -> Any: ...
@@ -93,8 +95,14 @@ class KasmTools:
         date_to: str | None = None,
         limit: int = 10,
         include_context: bool = True,
+        korean_query: str | None = None,
     ) -> dict[str, Any]:
-        """Discover relevant official meetings live, ingest bounded minutes, and search speeches."""
+        """Search official speeches in Korean or English.
+
+        Source records are Korean. For an English request, optionally provide concise Korean search
+        terms in korean_query; otherwise the built-in legislative glossary supplies common terms.
+        Preserve official citations and answer the user in the language they requested.
+        """
         if not query.strip():
             raise ValueError("query must not be empty")
         if len(query) > 500:
@@ -103,7 +111,7 @@ class KasmTools:
             raise ValueError("limit must be between 1 and 100")
         filters = {
             "assembly_term": assembly_term,
-            "committee": committee,
+            "committee": korean_committee(committee),
             "speaker": speaker,
             "speaker_role": speaker_role,
             "organization": organization,
@@ -113,13 +121,15 @@ class KasmTools:
             "limit": limit,
             "include_context": include_context,
         }
+        prepared = prepare_query(query, korean_query)
         result = self.services.search.search(
-            query, **{key: value for key, value in filters.items() if value is not None}
+            prepared.search_query,
+            **{key: value for key, value in filters.items() if value is not None},
         )
         payload = to_jsonable(result)
         if isinstance(payload, Mapping) and "results" in payload:
-            return {"query": query, **dict(payload)}
-        return {"query": query, "results": payload or []}
+            return {**prepared.metadata(), **dict(payload)}
+        return {**prepared.metadata(), "results": payload or []}
 
     def get_speech(self, speech_id: str) -> dict[str, Any]:
         result = _invoke(self.services.repository, ("get_speech", "get"), speech_id)
@@ -147,7 +157,8 @@ class KasmTools:
         self, assembly_term: int | None = None, query: str | None = None
     ) -> list[Any]:
         catalog = self.services.catalog or self.services.repository
-        filters = {"assembly_term": assembly_term, "query": query}
+        prepared_query = prepare_query(query).search_query if query else None
+        filters = {"assembly_term": assembly_term, "query": prepared_query}
         result = _invoke(
             catalog,
             ("list_committees",),
@@ -165,7 +176,7 @@ class KasmTools:
         """Query official meeting metadata for the requested scope and list cached candidates."""
         catalog = self.services.catalog or self.services.repository
         filters = {
-            "committee": committee,
+            "committee": korean_committee(committee),
             "date_from": date_from,
             "date_to": date_to,
             "meeting_type": meeting_type,
@@ -184,8 +195,13 @@ class KasmTools:
         committee: str | None = None,
         status: str | None = None,
         limit: int = 10,
+        korean_query: str | None = None,
     ) -> dict[str, Any]:
-        """Search live bills and attach on-demand official committee expert review reports."""
+        """Search live bills from a Korean or English request and attach expert review reports.
+
+        Use korean_query for Korean bill-title or policy keywords when the English subject contains
+        a proper noun not covered by the built-in glossary.
+        """
         if not query.strip():
             raise ValueError("query must not be empty")
         if status not in {None, "pending", "processed"}:
@@ -195,14 +211,18 @@ class KasmTools:
         catalog = self.services.catalog or self.services.repository
         filters = {
             "assembly_term": assembly_term,
-            "committee": committee,
+            "committee": korean_committee(committee),
             "status": status,
             "limit": limit,
         }
+        prepared = prepare_query(query, korean_query)
         result = _invoke(
-            catalog, ("search_bills",), query, **{k: v for k, v in filters.items() if v is not None}
+            catalog,
+            ("search_bills",),
+            prepared.search_query,
+            **{k: v for k, v in filters.items() if v is not None},
         )
-        return {"query": query, "results": to_jsonable(result) or []}
+        return {**prepared.metadata(), "results": to_jsonable(result) or []}
 
     def get_bill_status(self, bill_id_or_no: str) -> dict[str, Any]:
         """Refresh one bill's status and attach its official expert review report when available."""
@@ -214,23 +234,33 @@ class KasmTools:
             raise LookupError(f"Bill not found: {bill_id_or_no}")
         return cast(dict[str, Any], to_jsonable(result))
 
-    def explore_issue(self, query: str, limit: int = 20) -> dict[str, Any]:
+    def explore_issue(
+        self, query: str, limit: int = 20, korean_query: str | None = None
+    ) -> dict[str, Any]:
         """Research an issue across bills, status, committees and full discussion context.
 
-        Use this as the primary tool for questions asking what happened, who argued what,
-        or how a policy and bill evolved. Results include evidence-ranked speeches, ordered
-        multi-turn discussion threads, bill and review-report links, official provenance, and
-        live-check metadata.
+        Use this as the primary tool for Korean or English questions asking what happened, who
+        argued what, or how a policy and bill evolved. Results include evidence-ranked speeches,
+        ordered multi-turn discussion threads, bill and review-report links, official provenance,
+        and live-check metadata.
         It queries official Open Assembly APIs before searching the private local cache and reports
         bounded-refresh diagnostics. Synthesize the answer from actual turns; do not infer a stance
         that is not supported by a quoted speech. Put each quote's citation.official_url next
-        to the claim so the user can open and verify the original minutes immediately.
+        to the claim so the user can open and verify the original minutes immediately. Source
+        records are Korean; answer English users in English and identify translated quotations.
+        For unfamiliar English subjects, supply concise Korean keywords in korean_query.
         """
         if not query.strip():
             raise ValueError("query must not be empty")
         if not 1 <= limit <= 50:
             raise ValueError("limit must be between 1 and 50")
         catalog = self.services.catalog or self.services.repository
-        return cast(
-            dict[str, Any], to_jsonable(_invoke(catalog, ("explore_issue",), query, limit=limit))
+        prepared = prepare_query(query, korean_query)
+        payload = cast(
+            dict[str, Any],
+            to_jsonable(
+                _invoke(catalog, ("explore_issue",), prepared.search_query, limit=limit)
+            ),
         )
+        payload.update(prepared.metadata())
+        return payload

@@ -2,7 +2,7 @@
 
 ## Claude.ai·ChatGPT 웹 — 설치 없음
 
-연결 페이지: **https://korean-bill-debate-mcp.vercel.app**
+연결 페이지: [Korean Bill & Debate MCP](https://korean-bill-debate-mcp.vercel.app)
 
 1. 연결 페이지에 본인의 열린국회 API 키를 입력합니다.
 2. 발급된 개인 MCP 링크 전체를 복사합니다.
@@ -29,7 +29,7 @@
 PyPI 배포 전에는 검증된 GitHub 릴리스를 직접 설치합니다.
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0
 ```
 
 ## 자동 설정
@@ -55,7 +55,7 @@ kbd setup --client claude-desktop
 ```bash
 claude mcp add --scope user korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0 kbd mcp
 claude mcp get korean-bill-debate
 ```
 
@@ -66,7 +66,7 @@ Claude Code에서 `/mcp`를 실행해 8개 도구를 확인합니다.
 ```bash
 codex mcp add korean-bill-debate \
   --env ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0 kbd mcp
 codex mcp get korean-bill-debate
 codex mcp list
 ```
@@ -78,7 +78,7 @@ Codex 안에서는 `/mcp`로 연결 상태를 확인합니다.
 ```bash
 gemini mcp add korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0 kbd mcp
 gemini mcp list
 ```
 
@@ -95,7 +95,7 @@ Gemini CLI 안에서는 `/mcp list`를 사용합니다.
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1",
+        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0",
         "kbd",
         "mcp"
       ],
@@ -133,6 +133,20 @@ get_speech, get_speech_context, list_committees, list_meetings
 
 응답의 `data_mode`는 `live_open_assembly_with_local_cache`, `live_checked_at`은 이번 조회
 시각이어야 합니다.
+
+## 영어 질문 확인
+
+`v0.8.0`부터 영어 질문을 그대로 사용할 수 있습니다.
+
+```text
+In July 2026, compare bills and opposing views on abolishing prosecutors'
+supplementary investigation authority. Include surrounding Q&A and official sources.
+```
+
+응답 메타데이터에서 `query_language: en`, 한국어 검색어 `search_query_ko`,
+`source_language: ko`를 확인할 수 있습니다. 연결된 AI는 답변을 영어로 작성하고 번역한
+인용임을 표시하며, 한국어 공식 원문 URL을 함께 제시하도록 안내됩니다. 낯선 고유명사는
+MCP의 선택 인자 `korean_query`로 한국어 검색어를 함께 전달할 수 있습니다.
 
 ## 문제 해결
 

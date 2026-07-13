@@ -35,6 +35,8 @@ async def exercise_stdio_server() -> None:
             "get_bill_status",
             "explore_issue",
         }
+        search_tool = next(tool for tool in listed.tools if tool.name == "search_speeches")
+        assert "korean_query" in search_tool.inputSchema["properties"]
         result = await session.call_tool(
             "search_speeches",
             {"query": "domestic foundation models", "limit": 3},
@@ -42,6 +44,9 @@ async def exercise_stdio_server() -> None:
         assert not result.isError
         assert result.structuredContent is not None
         assert result.structuredContent["results"]
+        assert result.structuredContent["query_language"] == "en"
+        assert result.structuredContent["search_query_ko"] == "소버린 AI"
+        assert result.structuredContent["source_language"] == "ko"
 
 
 def test_real_mcp_stdio_round_trip() -> None:

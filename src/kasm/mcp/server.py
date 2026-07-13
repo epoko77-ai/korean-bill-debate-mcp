@@ -28,6 +28,15 @@ def create_server(
     implementation = KasmTools(services)
     server = FastMCP(
         name,
+        instructions=(
+            "This server searches official Korean National Assembly records. It accepts Korean "
+            "and English research requests. When the user writes in English, answer in English, "
+            "translate Korean evidence faithfully, label translated quotations, preserve Korean "
+            "names when useful, and cite each official URL. For subjects with unfamiliar proper "
+            "nouns, provide concise Korean search terms through the korean_query argument. If an "
+            "English call reports query_translation=untranslated or no results, retry once with "
+            "a concise Korean korean_query."
+        ),
         host=host,
         port=port,
         stateless_http=stateless_http,

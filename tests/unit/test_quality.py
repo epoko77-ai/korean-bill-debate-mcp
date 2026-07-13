@@ -23,6 +23,21 @@ def test_issue_research_reports_evidence_depth_and_provenance() -> None:
     assert all(event["official_url"] for event in result["timeline"])
 
 
+def test_english_issue_research_preserves_request_and_uses_korean_evidence_query() -> None:
+    result = KasmTools(create_services()).explore_issue(
+        "How is the AI ecosystem bill evolving?",
+        korean_query="인공지능 생태계",
+    )
+
+    assert result["query"] == "How is the AI ecosystem bill evolving?"
+    assert result["query_language"] == "en"
+    assert result["search_query_ko"] == "인공지능 생태계"
+    assert result["query_translation"] == "client_supplied"
+    assert result["source_language"] == "ko"
+    assert result["bills"]
+    assert result["speeches"]
+
+
 def test_high_signal_topic_routes_to_relevant_committee() -> None:
     assert infer_issue_committee("검찰 보완수사권 폐지 논의") == "법제사법위원회"
     assert infer_issue_committee("국세청 세무조사 운영") == "재정경제기획위원회"

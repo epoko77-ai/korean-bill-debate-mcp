@@ -142,7 +142,7 @@ def create_asgi_app() -> Any:
 def _validate_remote_key(api_key: str) -> None:
     """Reject invalid keys before issuing a password-equivalent MCP URL."""
     if not api_key or len(api_key) > 256:
-        raise ValueError("열린국회 API 키를 확인해 주세요.")
+        raise ValueError("열린국회 API 키를 확인해 주세요. / Check your Open Assembly API key.")
     try:
         AssemblyOpenApiClient(api_key, cache_ttl_seconds=0).fetch_page(
             BILL_DATASET,
@@ -152,7 +152,8 @@ def _validate_remote_key(api_key: str) -> None:
         )
     except RuntimeError as exc:
         raise RuntimeError(
-            "열린국회 API 키가 유효하지 않거나 공식 API에 연결할 수 없습니다."
+            "열린국회 API 키가 유효하지 않거나 공식 API에 연결할 수 없습니다. / "
+            "The key is invalid or the official API is temporarily unavailable."
         ) from exc
 
 

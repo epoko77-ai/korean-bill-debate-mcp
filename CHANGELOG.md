@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0] - 2026-07-13
+
+### Added
+
+- English research requests with preserved original questions, Korean official-source search terms,
+  and explicit `query_language`, `search_query_ko`, and `source_language` metadata.
+- An optional `korean_query` argument for precise bilingual searches involving unfamiliar proper
+  nouns, plus a built-in glossary for common legislative topics.
+- MCP server instructions for English answers, faithfully translated quotations, Korean names, and
+  claim-level official citations.
+- Bilingual hosted connection and result pages, English prompts, and source-language guidance.
+
+### Changed
+
+- Updated the local installer source, demo badge, and client guides for `v0.8.0`.
+
 ## [0.7.1] - 2026-07-13
 
 ### Fixed

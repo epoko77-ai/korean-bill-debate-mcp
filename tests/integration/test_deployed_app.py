@@ -173,9 +173,12 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
         ):
             setup = await client.get("/")
             assert "본인의 열린국회 API 키" in setup.text
+            assert "Create a web MCP connection" in setup.text
+            assert "Get an API key from Open Assembly" in setup.text
             issued = await client.post("/connect", data={"api_key": "personal-key"})
             assert "/mcp?token=" in issued.text
             assert "personal-key" not in issued.text
+            assert "Your personal MCP URL is ready" in issued.text
             unauthenticated = await client.post("/mcp")
             assert unauthenticated.status_code == 401
 
@@ -186,7 +189,10 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
                 read_stream, write_stream, _ = streams
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
-                    assert len((await session.list_tools()).tools) == 8
+                    tools = (await session.list_tools()).tools
+                    assert len(tools) == 8
+                    explore = next(tool for tool in tools if tool.name == "explore_issue")
+                    assert "korean_query" in explore.inputSchema["properties"]
 
     asyncio.run(exercise())
 

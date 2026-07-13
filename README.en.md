@@ -1,6 +1,6 @@
 # Korean Bill & Debate MCP
 
-Current version: `v0.7.1`
+Current version: `v0.8.0`
 
 **Connect scattered Assembly records around a single bill.**
 
@@ -20,6 +20,28 @@ subcommittee negotiation records and committee expert review reports.
 
 ![Demo tracing a question from bills to actual remarks and surrounding context](assets/demo.gif)
 
+## Ask in English, verify the Korean official record
+
+`v0.8.0` preserves the user's English question while converting legislative concepts into Korean
+search terms for the official data sources. The connected AI is instructed to answer in English,
+label translated quotations, and keep every official source URL beside the claim it supports.
+
+```text
+In July 2026, compare bills and opposing views on abolishing prosecutors'
+supplementary investigation authority. Include surrounding Q&A and official sources.
+
+For bill 2217784, show its current status, the committee expert review report,
+and related statements by lawmakers and government officials.
+```
+
+Common legislative topics are handled by the built-in bilingual glossary. For an unfamiliar proper
+noun, the MCP tool schema lets Claude or ChatGPT provide a concise `korean_query` while preserving
+the English request. Results expose `query_language`, `search_query_ko`, and `source_language` so
+the English explanation remains distinguishable from the Korean source record.
+
+The official bill titles, minutes, and review reports remain in Korean. English quotations in the
+AI's answer are translations; open the cited official URL when exact Korean wording matters.
+
 ## Connect it to your AI in about three minutes
 
 You do not need to learn a separate research interface. Connect the MCP once, then ask Claude,
@@ -27,9 +49,8 @@ Codex, or Gemini a normal question and let the tools retrieve the official Assem
 
 ### Option 1: Use it on Claude.ai or ChatGPT web — no installation
 
-Open the connection page first:
-
-**https://korean-bill-debate-mcp.vercel.app**
+Open the [Korean Bill & Debate MCP connection page](https://korean-bill-debate-mcp.vercel.app)
+first.
 
 1. Enter your personal Open Assembly API key.
 2. Select **Create personal MCP link**.
@@ -65,7 +86,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #### 2. Install the pinned GitHub release
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0
 ```
 
 #### 3. Run one command for the client you use

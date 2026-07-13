@@ -61,11 +61,30 @@ def test_search_validates_query_and_limit(configured_tools):
         tools.search_speeches("AI", limit=101)
 
 
+def test_english_search_uses_korean_terms_and_reports_language_metadata(configured_tools):
+    tools, search = configured_tools
+
+    response = tools.search_speeches(
+        "What did lawmakers say about the AI Basic Act?",
+        korean_query="인공지능 기본법 의원 발언",
+    )
+
+    assert search.call[0] == "인공지능 기본법 의원 발언"
+    assert response["query"] == "What did lawmakers say about the AI Basic Act?"
+    assert response["query_language"] == "en"
+    assert response["search_query_ko"] == "인공지능 기본법 의원 발언"
+    assert response["query_translation"] == "client_supplied"
+    assert response["source_language"] == "ko"
+
+
 def test_speech_and_catalog_tools(configured_tools):
     tools, _ = configured_tools
     assert tools.get_speech("speech-1")["text"] == "원문"
     assert tools.get_speech_context("speech-1", 1, 3)["after"] == 3
     assert tools.list_committees(assembly_term=22)[0]["assembly_term"] == 22
     assert tools.list_meetings(committee="과방위")[0]["committee"] == "과방위"
+    assert tools.list_meetings(committee="National Policy Committee")[0]["committee"] == (
+        "정무위원회"
+    )
     with pytest.raises(LookupError, match="not found"):
         tools.get_speech("missing")

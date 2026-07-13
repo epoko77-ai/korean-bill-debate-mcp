@@ -7,12 +7,12 @@ query cache on the user's machine.
 
 ```bash
 export ASSEMBLY_OPEN_API_KEY='YOUR_KEY'
-uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.7.1 kbd mcp
+uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0 kbd mcp
 ```
 
 ## Hosted user-keyed Streamable HTTP
 
-The public connection page is `https://korean-bill-debate-mcp.vercel.app`. It encrypts each user's
+The public [connection page](https://korean-bill-debate-mcp.vercel.app) encrypts each user's
 Open Assembly key into a personal connection token. The raw key is not stored in a database or file.
 
 Self-hosters must set `KBD_REMOTE_TOKEN_SECRET` to a Fernet key. The setup page then issues personal

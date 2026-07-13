@@ -85,32 +85,42 @@ def setup_page(*, action: str = "/connect", error: str | None = None) -> str:
     message = f'<p class="error">{html.escape(error)}</p>' if error else ""
     return f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Korean Bill & Debate MCP 연결</title><style>
+<title>Korean Bill & Debate MCP 연결 / Connect</title><style>
 body{{margin:0;background:#061a31;color:#f7f2e8;font:16px/1.6 system-ui,sans-serif}}
 main{{max-width:720px;margin:8vh auto;padding:36px}}h1{{font-size:clamp(30px,6vw,52px);line-height:1.15}}
 .card{{background:#0b2945;border:1px solid #2b5a71;border-radius:20px;padding:28px}}
 input{{box-sizing:border-box;width:100%;padding:15px;border-radius:10px;border:1px solid #6b8798;font-size:16px}}
 button{{margin-top:14px;padding:14px 20px;border:0;border-radius:10px;background:#e5b85c;color:#071728;font-weight:800;font-size:16px}}
-small{{color:#b8c8d4}}.error{{color:#ffb3a8}}code{{overflow-wrap:anywhere;color:#f0cc83}}
+small,.english{{color:#b8c8d4}}.error{{color:#ffb3a8}}code{{overflow-wrap:anywhere;color:#f0cc83}}
+a{{color:#f0cc83}}
 </style></head><body><main><h1>흩어진 국회 기록을,<br>법안 하나로 연결합니다.</h1>
-<div class="card"><h2>웹 앱용 MCP 연결 링크 만들기</h2>
-<p>본인의 열린국회 API 키를 입력하면 ChatGPT·Claude에 붙여 넣을 개인 연결 링크를 만듭니다.</p>
+<p class="english">Connect scattered National Assembly records around a single bill.</p>
+<div class="card"><h2>웹 앱용 MCP 연결 링크 만들기<br><span class="english">Create a web MCP connection</span></h2>
+<p>본인의 열린국회 API 키를 입력하면 ChatGPT·Claude에 붙여 넣을 개인 연결 링크를 만듭니다.<br>
+<span class="english">Enter your personal Open Assembly API key to create a private URL for ChatGPT or Claude.</span></p>
+<p><a href="https://open.assembly.go.kr/portal/openapi/openApiNaListPage.do">열린국회에서 API 키 발급 / Get an API key from Open Assembly</a>
+<br><small>공식 발급 사이트의 화면과 원문 데이터는 한국어로 제공됩니다. / The official issuance site and source records are in Korean.</small></p>
 {message}<form method="post" action="{html.escape(action)}">
-<label>열린국회 API 키<input name="api_key" type="password" required autocomplete="off"></label>
-<button type="submit">개인 MCP 링크 만들기</button></form>
+<label>열린국회 API 키 / Open Assembly API key<input name="api_key" type="password" required autocomplete="off"></label>
+<button type="submit">개인 MCP 링크 만들기 / Create personal MCP link</button></form>
 <p><small>키 원문은 데이터베이스나 파일에 저장하지 않습니다. 암호화된 연결 토큰을 발급하고,
-요청 순간에만 사용자의 키로 열린국회 공식 API를 호출합니다.</small></p></div></main></body></html>"""
+요청 순간에만 사용자의 키로 열린국회 공식 API를 호출합니다.<br>
+The raw key is not stored in a database or file. It is used only while requesting official records.</small></p></div></main></body></html>"""
 
 
 def result_page(mcp_url: str) -> str:
     escaped = html.escape(mcp_url)
     return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width"><title>MCP 연결 링크</title><style>
+<meta name="viewport" content="width=device-width"><title>MCP 연결 링크 / Connection URL</title><style>
 body{{margin:0;background:#061a31;color:#f7f2e8;font:16px/1.6 system-ui,sans-serif}}
 main{{max-width:760px;margin:8vh auto;padding:36px}}.card{{background:#0b2945;border:1px solid #2b5a71;border-radius:20px;padding:28px}}
 textarea{{box-sizing:border-box;width:100%;min-height:130px;padding:14px;font:14px/1.5 ui-monospace,monospace}}
-h1{{font-size:40px}}strong{{color:#f0cc83}}</style></head><body><main><h1>개인 MCP 링크가 준비됐습니다.</h1>
-<div class="card"><p>아래 주소 전체를 복사해 ChatGPT 또는 Claude의 커스텀 MCP 서버 URL에 붙여 넣으세요.</p>
+h1{{font-size:40px}}strong{{color:#f0cc83}}.english{{color:#b8c8d4}}</style></head><body><main><h1>개인 MCP 링크가 준비됐습니다.<br><span class="english">Your personal MCP URL is ready.</span></h1>
+<div class="card"><p>아래 주소 전체를 복사해 ChatGPT 또는 Claude의 커스텀 MCP 서버 URL에 붙여 넣으세요.<br>
+<span class="english">Copy the complete URL into the custom MCP server field in ChatGPT or Claude.</span></p>
 <textarea readonly onclick="this.select()">{escaped}</textarea>
-<p><strong>이 링크는 비밀번호처럼 보관하세요.</strong> 링크를 아는 사람은 사용자의 열린국회 API 할당량을 사용할 수 있습니다.</p>
-<p>ChatGPT: 설정 → 앱 → 고급 설정 → 앱 만들기<br>Claude: 설정 → 커넥터 → 커스텀 커넥터 추가</p></div></main></body></html>"""
+<p><strong>이 링크는 비밀번호처럼 보관하세요. / Treat this URL like a password.</strong><br>
+링크를 아는 사람은 사용자의 열린국회 API 할당량을 사용할 수 있습니다.<br>
+<span class="english">Anyone holding it can consume your Open Assembly API quota.</span></p>
+<p>ChatGPT: 설정(Settings) → 앱(Apps) → 고급 설정(Advanced settings) → 앱 만들기(Create app)<br>
+Claude: 설정(Settings) → 커넥터(Connectors) → 커스텀 커넥터 추가(Add custom connector)</p></div></main></body></html>"""
