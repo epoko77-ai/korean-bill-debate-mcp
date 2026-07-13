@@ -185,7 +185,7 @@ def create_asgi_app() -> Any:
         try:
             if values["resource"] != f"{oauth_base(request)}/mcp":
                 raise ValueError("resource does not match this MCP server")
-            await run_in_threadpool(_validate_remote_key, api_key)
+            _validate_remote_key_shape(api_key)
             location = oauth.authorize(values, api_key)
         except (RuntimeError, ValueError) as exc:
             try:
@@ -378,8 +378,7 @@ def _redirect_origin(uri: str) -> str:
 
 def _validate_remote_key(api_key: str) -> None:
     """Reject invalid keys before issuing a password-equivalent MCP URL."""
-    if not api_key or len(api_key) > 256:
-        raise ValueError("열린국회 API 키를 확인해 주세요. / Check your Open Assembly API key.")
+    _validate_remote_key_shape(api_key)
     try:
         AssemblyOpenApiClient(api_key, cache_ttl_seconds=0).fetch_page(
             BILL_DATASET,
@@ -392,6 +391,12 @@ def _validate_remote_key(api_key: str) -> None:
             "열린국회 API 키가 유효하지 않거나 공식 API에 연결할 수 없습니다. / "
             "The key is invalid or the official API is temporarily unavailable."
         ) from exc
+
+
+def _validate_remote_key_shape(api_key: str) -> None:
+    """Reject empty or implausibly large credentials without a network round trip."""
+    if not api_key or len(api_key) > 256:
+        raise ValueError("열린국회 API 키를 확인해 주세요. / Check your Open Assembly API key.")
 
 
 app = create_asgi_app()

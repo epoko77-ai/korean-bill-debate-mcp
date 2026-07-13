@@ -1,6 +1,6 @@
 # Korean Bill & Debate MCP
 
-Current version: `v0.9.2`
+Current version: `v0.9.3`
 
 [한국어](README.md) · [MCP setup guide](docs/mcp-clients.md) ·
 [Data sources](docs/data-sources.md) · [Architecture](docs/architecture.md)
@@ -104,7 +104,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #### 2. Install the pinned GitHub release
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.2
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.3
 ```
 
 #### 3. Run one command for the client you use

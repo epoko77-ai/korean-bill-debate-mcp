@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.3] - 2026-07-13
+
+### Fixed
+
+- Allow the browser to return from the OAuth consent form to the exact registered Claude.ai or
+  ChatGPT callback origin instead of blocking the redirect with the consent page CSP.
+- Complete OAuth approval immediately instead of holding the browser open while the Open Assembly
+  API performs a live validation request. Invalid credentials are reported on the first research
+  request without delaying connector authorization.
+
 ## [0.9.2] - 2026-07-13
 
 ### Fixed
