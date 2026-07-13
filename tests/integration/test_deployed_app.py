@@ -161,6 +161,23 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
     monkeypatch.setenv("KBD_DATA_DIR", str(tmp_path / "remote"))
     monkeypatch.delenv("ASSEMBLY_OPEN_API_KEY", raising=False)
     monkeypatch.setattr("kasm.mcp.deployment._validate_remote_key", lambda _key: None)
+
+    def fake_workspace(**values):
+        assert values == {
+            "question": "2219564번 의안",
+            "assembly_api_key": "workspace-assembly-secret",
+            "llm_provider": "openai",
+            "llm_api_key": "workspace-llm-secret",
+        }
+        return {
+            "answer": "공식 원문 기반 답변",
+            "provider": "openai",
+            "model": "test-model",
+            "elapsed_seconds": 1.0,
+            "evidence": {"bill_count": 1, "speech_count": 2, "thread_count": 1, "sources": []},
+        }
+
+    monkeypatch.setattr("kasm.mcp.deployment.run_workspace_research", fake_workspace)
     from kasm.mcp.deployment import create_asgi_app
 
     async def exercise() -> None:
@@ -175,6 +192,28 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
             assert "본인의 열린국회 API 키" in setup.text
             assert "Create a web MCP connection" in setup.text
             assert "Get an API key from Open Assembly" in setup.text
+            assert "/workspace" in setup.text
+            workspace = await client.get("/workspace")
+            assert "국회 입법조사 워크스페이스" in workspace.text
+            assert "localStorage.setItem" not in workspace.text
+            assert workspace.headers["cache-control"].startswith("no-store")
+            assert workspace.headers["referrer-policy"] == "no-referrer"
+            assert "script-src 'self'" in workspace.headers["content-security-policy"]
+            script = await client.get("/workspace/app.js")
+            assert "localStorage" not in script.text
+            researched = await client.post(
+                "/workspace/research",
+                json={
+                    "question": "2219564번 의안",
+                    "assembly_api_key": "workspace-assembly-secret",
+                    "llm_provider": "openai",
+                    "llm_api_key": "workspace-llm-secret",
+                },
+            )
+            assert researched.status_code == 200
+            assert researched.json()["answer"] == "공식 원문 기반 답변"
+            assert "workspace-assembly-secret" not in researched.text
+            assert "workspace-llm-secret" not in researched.text
             issued = await client.post("/connect", data={"api_key": "personal-key"})
             assert "/mcp?token=" in issued.text
             assert "personal-key" not in issued.text

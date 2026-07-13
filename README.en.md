@@ -1,6 +1,6 @@
 # Korean Bill & Debate MCP
 
-Current version: `v0.8.0`
+Current version: `v0.9.0`
 
 [한국어](README.md) · [MCP setup guide](docs/mcp-clients.md) ·
 [Data sources](docs/data-sources.md) · [Architecture](docs/architecture.md)
@@ -22,6 +22,10 @@ For deeper legislative analysis, it also surfaces two sources insiders look for 
 subcommittee negotiation records and committee expert review reports.
 
 ![One bill connected to its text, status, subcommittee minutes, expert review, and lawmakers' Q&A](assets/english-thumbnail-v1.png)
+
+The `v0.9` no-account web workspace is currently a Korean-language alpha. English users should keep
+using the MCP connection below while the Korean workspace workflow and credential boundary are
+validated.
 
 ## Ask in English, verify the Korean official record
 
@@ -93,7 +97,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #### 2. Install the pinned GitHub release
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.0
 ```
 
 #### 3. Run one command for the client you use

@@ -95,6 +95,7 @@ small,.english{{color:#b8c8d4}}.error{{color:#ffb3a8}}code{{overflow-wrap:anywhe
 a{{color:#f0cc83}}
 </style></head><body><main><h1>흩어진 국회 기록을,<br>법안 하나로 연결합니다.</h1>
 <p class="english">Connect scattered National Assembly records around a single bill.</p>
+<p><a href="/workspace">설치 없이 바로 조사하기 — 입법조사 워크스페이스 alpha →</a></p>
 <div class="card"><h2>웹 앱용 MCP 연결 링크 만들기<br><span class="english">Create a web MCP connection</span></h2>
 <p>본인의 열린국회 API 키를 입력하면 ChatGPT·Claude에 붙여 넣을 개인 연결 링크를 만듭니다.<br>
 <span class="english">Enter your personal Open Assembly API key to create a private URL for ChatGPT or Claude.</span></p>

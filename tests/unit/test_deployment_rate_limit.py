@@ -31,3 +31,38 @@ def test_rate_limit_applies_only_to_mcp_path() -> None:
 
     asyncio.run(exercise())
     assert called == ["/healthz", "/mcp"]
+
+
+def test_path_specific_limits_are_independent() -> None:
+    called = []
+
+    async def downstream(scope, receive, send) -> None:
+        del receive
+        called.append(scope["path"])
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def exercise() -> None:
+        app = FixedWindowRateLimit(
+            downstream,
+            path_limits={"/workspace/research": 1, "/mcp": 2},
+        )
+
+        async def receive():
+            return {"type": "http.request", "body": b""}
+
+        responses = []
+
+        async def send(message) -> None:
+            responses.append(message)
+
+        base = {"type": "http", "client": ("127.0.0.1", 1)}
+        await app({**base, "path": "/workspace/research"}, receive, send)
+        await app({**base, "path": "/workspace/research"}, receive, send)
+        await app({**base, "path": "/mcp"}, receive, send)
+        await app({**base, "path": "/mcp"}, receive, send)
+        await app({**base, "path": "/mcp"}, receive, send)
+        assert sum(message.get("status") == 429 for message in responses) == 2
+
+    asyncio.run(exercise())
+    assert called == ["/workspace/research", "/mcp", "/mcp"]

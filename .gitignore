@@ -19,3 +19,4 @@ build/
 .env
 benchmarks/utility-evaluation.json
 .vercel
+.DS_Store

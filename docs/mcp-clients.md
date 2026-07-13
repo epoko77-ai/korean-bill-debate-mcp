@@ -29,7 +29,7 @@
 PyPI 배포 전에는 검증된 GitHub 릴리스를 직접 설치합니다.
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.0
 ```
 
 ## 자동 설정
@@ -55,7 +55,7 @@ kbd setup --client claude-desktop
 ```bash
 claude mcp add --scope user korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.0 kbd mcp
 claude mcp get korean-bill-debate
 ```
 
@@ -66,7 +66,7 @@ Claude Code에서 `/mcp`를 실행해 8개 도구를 확인합니다.
 ```bash
 codex mcp add korean-bill-debate \
   --env ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.0 kbd mcp
 codex mcp get korean-bill-debate
 codex mcp list
 ```
@@ -78,7 +78,7 @@ Codex 안에서는 `/mcp`로 연결 상태를 확인합니다.
 ```bash
 gemini mcp add korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.0 kbd mcp
 gemini mcp list
 ```
 
@@ -95,7 +95,7 @@ Gemini CLI 안에서는 `/mcp list`를 사용합니다.
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0",
+        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.0",
         "kbd",
         "mcp"
       ],

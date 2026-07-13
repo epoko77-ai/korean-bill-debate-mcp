@@ -5,12 +5,27 @@
 > 법안 내용과 처리상태부터 소위원회 회의록, 전문위원 검토보고서, 의원과 정부의 실제
 > 발언까지 하나의 조사 흐름으로 이어서 확인합니다.
 
-`v0.8.0` · 한국어·영어 질의 · 사용자 본인의 열린국회 API 키 · 실시간 조회 · Apache-2.0
+`v0.9.0` · MCP + 웹 입법조사 워크스페이스 · 사용자 본인의 API 키 · 실시간 조회 · Apache-2.0
 
 [English](README.en.md) · [MCP 연결](docs/mcp-clients.md) ·
 [데이터 출처](docs/data-sources.md) · [아키텍처](docs/architecture.md)
 
 ![질문 하나로 법안부터 실제 발언과 앞뒤 맥락까지 추적하는 데모](assets/demo.gif)
+
+## 설치 없이, 한 화면에서 바로 조사할 수 있습니다
+
+**[국회 입법조사 워크스페이스 열기](https://korean-bill-debate-mcp.vercel.app/workspace)**
+
+열린국회 API 키와 OpenAI 또는 Anthropic API 키를 입력하면, 별도 프로그램이나 MCP 연결
+설정 없이 질문 한 줄로 공식 자료 조사와 답변 생성을 실행합니다. 법안·처리상태·전문위원
+검토보고서·소위원회 회의록·의원과 정부의 질의답변을 연결하고, 사용자가 직접 확인할 공식
+원문 카드를 함께 보여줍니다.
+
+두 키는 요청 처리 중에만 분리해 사용합니다. URL·DB·파일·쿠키·브라우저 저장소에 남기지
+않으며, 질문과 조사된 공식 자료는 답변 생성을 위해 사용자가 선택한 LLM 제공자로 전송됩니다.
+현재 `v0.9` 워크스페이스는 계정과 저장 기록이 없는 한국어 알파입니다. 기존 Claude·ChatGPT
+MCP 연결 방식도 그대로 유지됩니다. 자세한 구조와 한계는 [워크스페이스 문서](docs/workspace.md)를
+참고하세요.
 
 ## 국회 정보는 공개돼 있습니다. 하지만 답은 흩어져 있습니다
 
@@ -168,7 +183,7 @@ supplementary investigation authority. Include surrounding Q&A and official sour
 2. 릴리스를 설치합니다.
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.8.0
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.0
 ```
 
 3. 사용하는 앱 하나만 골라 실행합니다.

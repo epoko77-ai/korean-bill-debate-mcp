@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.0] - 2026-07-13
+
+### Added
+
+- A no-account Korean legislative research workspace at `/workspace` that connects one natural
+  language question to live bills, status, expert review reports, subcommittee minutes, lawmakers'
+  remarks, government answers, and verified official-source cards.
+- Request-scoped OpenAI Responses API and Anthropic Messages API synthesis using each user's own
+  LLM key, with provider-specific safe error handling and configurable model defaults.
+- Session-only browser key handling without cookies or browser storage, per-request temporary
+  research directories, JSON result export, strict response security headers, and a dedicated
+  workspace request limit.
+
+### Changed
+
+- Corrected the security policy and roadmap to describe the already-shipped hosted user-key mode
+  and the new two-key web workspace accurately.
+
 ## [0.8.0] - 2026-07-13
 
 ### Added
