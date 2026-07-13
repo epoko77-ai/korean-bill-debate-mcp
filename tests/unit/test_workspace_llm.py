@@ -4,7 +4,7 @@ import urllib.error
 
 import pytest
 
-from kasm.workspace.llm import LlmError, synthesize
+from kasm.workspace.llm import LlmError, _evidence_prompt, synthesize
 
 
 class FakeResponse:
@@ -43,6 +43,7 @@ def test_openai_synthesis_uses_responses_api_without_storage(monkeypatch) -> Non
     assert captured["url"] == "https://api.openai.com/v1/responses"
     assert captured["headers"]["Authorization"] == "Bearer private-openai-key"
     assert captured["body"]["store"] is False
+    assert captured["body"]["max_output_tokens"] == 4800
     assert "private-openai-key" not in json.dumps(captured["body"])
 
 
@@ -68,6 +69,7 @@ def test_anthropic_synthesis_uses_messages_api(monkeypatch) -> None:
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["headers"]["X-api-key"] == "private-anthropic-key"
     assert captured["headers"]["Anthropic-version"] == "2023-06-01"
+    assert captured["body"]["max_tokens"] == 4096
     assert "private-anthropic-key" not in json.dumps(captured["body"])
 
 
@@ -138,3 +140,71 @@ def test_provider_auth_error_never_echoes_key() -> None:
 def test_unknown_provider_is_rejected_before_network() -> None:
     with pytest.raises(LlmError, match="지원하지 않는"):
         synthesize("unknown", "key", "질문", {})
+
+
+def test_large_evidence_is_compacted_as_valid_bounded_json(monkeypatch) -> None:
+    monkeypatch.setenv("KBD_WORKSPACE_MAX_EVIDENCE_CHARS", "2000")
+    evidence = {
+        "bill_number_validation": {
+            "requested": ["2219564"],
+            "matched": ["2219564"],
+            "exact_match": True,
+        },
+        "bills": [
+            {
+                "bill_no": "2219564",
+                "name": "형사소송법 일부개정법률안",
+                "status": "위원회 심사",
+                "official_url": "https://likms.assembly.go.kr/bill/2219564",
+                "documents": [
+                    {
+                        "title": "전문위원 검토보고서",
+                        "official_url": "https://likms.assembly.go.kr/review.pdf",
+                        "text_excerpt": "검토 내용 " * 5000,
+                    }
+                ],
+            }
+        ],
+        "speeches": [{"speaker": "위원", "text": "발언 " * 5000}] * 20,
+        "discussion_threads": [],
+    }
+
+    prompt = _evidence_prompt("보완수사권 쟁점", evidence)
+    serialized = prompt.split("<official_research_data>\n", 1)[1].split(
+        "\n</official_research_data>", 1
+    )[0]
+    compact = json.loads(serialized)
+
+    assert len(serialized) <= 2000
+    assert compact["bill_number_validation"]["exact_match"] is True
+    assert compact["bills"][0]["bill_no"] == "2219564"
+
+
+def test_openai_partial_answer_is_not_returned() -> None:
+    def opener(request, timeout):
+        del request, timeout
+        return FakeResponse(
+            {
+                "output_text": "전문위원 검토사항에서 잘린 답변",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            }
+        )
+
+    with pytest.raises(LlmError, match="부분 답변은 표시하지 않았습니다"):
+        synthesize("openai", "private-key", "질문", {}, opener=opener)
+
+
+def test_anthropic_partial_answer_is_not_returned() -> None:
+    def opener(request, timeout):
+        del timeout
+        if "/v1/models" in request.full_url:
+            return FakeResponse({"data": [{"id": "claude-sonnet-test"}]})
+        return FakeResponse(
+            {
+                "content": [{"type": "text", "text": "전문위원 검토사항에서 잘린 답변"}],
+                "stop_reason": "max_tokens",
+            }
+        )
+
+    with pytest.raises(LlmError, match="부분 답변은 표시하지 않았습니다"):
+        synthesize("anthropic", "private-key", "질문", {}, opener=opener)

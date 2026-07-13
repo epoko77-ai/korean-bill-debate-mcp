@@ -4,7 +4,7 @@ from kasm.adapters.korea.bills import bill_from_open_assembly_row
 from kasm.adapters.korea.ingestion import bills_from_agenda
 from kasm.app import create_services
 from kasm.core.models import Meeting
-from kasm.mcp.tools import KasmTools
+from kasm.mcp.tools import KasmTools, ServiceContext
 
 
 def test_open_assembly_bill_mapping_and_status() -> None:
@@ -71,3 +71,54 @@ def test_issue_discovers_bill_through_linked_speech_when_query_does_not_match_ti
     graph = KasmTools(create_services()).explore_issue("해외 기반 모델 의존")
     assert graph["bills"][0]["bill_no"] == "2200001"
     assert graph["bills"][0]["linked_by"] == "AGENDA_MATCH"
+
+
+def test_explicit_bill_number_can_never_be_replaced_by_a_fuzzy_bill() -> None:
+    class ConfusedCatalog:
+        def explore_issue(self, query: str, limit: int):
+            del query, limit
+            return {
+                "bills": [
+                    {"id": "wrong", "bill_no": "2299999", "name": "전혀 다른 법안"}
+                ],
+                "speeches": [],
+                "discussion_threads": [],
+                "links": [{"bill_id": "wrong", "speech_id": "wrong-speech"}],
+                "timeline": [
+                    {
+                        "event_type": "bill_proposed",
+                        "bill_no": "2299999",
+                        "title": "전혀 다른 법안",
+                    }
+                ],
+            }
+
+        def get_bill_status(self, bill_no: str):
+            assert bill_no == "2219564"
+            return {
+                "id": "kna:bill:2219564",
+                "bill_no": "2219564",
+                "name": "형사소송법 일부개정법률안",
+                "status": "위원회 심사",
+                "documents": [
+                    {
+                        "title": "전문위원 검토보고서",
+                        "official_url": "https://likms.assembly.go.kr/review.pdf",
+                    }
+                ],
+            }
+
+    catalog = ConfusedCatalog()
+    graph = KasmTools(
+        ServiceContext(search=catalog, repository=catalog, catalog=catalog)  # type: ignore[arg-type]
+    ).explore_issue("의안번호 2219564 보완수사권 쟁점")
+
+    assert [bill["bill_no"] for bill in graph["bills"]] == ["2219564"]
+    assert graph["bills"][0]["name"] == "형사소송법 일부개정법률안"
+    assert graph["links"] == []
+    assert graph["timeline"] == []
+    assert graph["bill_number_validation"] == {
+        "requested": ["2219564"],
+        "matched": ["2219564"],
+        "exact_match": True,
+    }

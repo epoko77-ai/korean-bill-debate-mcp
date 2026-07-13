@@ -215,15 +215,17 @@ def test_remote_user_key_page_and_authenticated_mcp_handshake(tmp_path, monkeypa
             assert "workspace-assembly-secret" not in researched.text
             assert "workspace-llm-secret" not in researched.text
             issued = await client.post("/connect", data={"api_key": "personal-key"})
-            assert "/mcp?token=" in issued.text
+            assert "/mcp/t/" in issued.text
             assert "personal-key" not in issued.text
             assert "Your personal MCP URL is ready" in issued.text
+            assert "등록만 하면 끝이 아닙니다" in issued.text
+            assert "+ 또는 도구 메뉴" in issued.text
             unauthenticated = await client.post("/mcp")
             assert unauthenticated.status_code == 401
 
             token = RemoteTokenAuth(None, secret).issue("personal-key")
             async with streamable_http_client(
-                f"http://127.0.0.1/mcp?token={token}", http_client=client
+                f"http://127.0.0.1/mcp/t/{token}", http_client=client
             ) as streams:
                 read_stream, write_stream, _ = streams
                 async with ClientSession(read_stream, write_stream) as session:
@@ -254,7 +256,7 @@ def test_remote_connection_rejects_invalid_key_before_issuing_link(tmp_path, mon
             response = await client.post("/connect", data={"api_key": "invalid"})
             assert response.status_code == 400
             assert "유효하지 않습니다" in response.text
-            assert "/mcp?token=" not in response.text
+            assert "/mcp/t/" not in response.text
 
     asyncio.run(exercise())
 

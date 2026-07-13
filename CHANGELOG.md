@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.2] - 2026-07-13
+
+### Fixed
+
+- Treat every seven-digit bill number in a natural-language question as an exact identifier and
+  reject unrelated rows returned by fuzzy search or an upstream API response.
+- Stop the web workspace before LLM synthesis when an explicit bill number cannot be verified,
+  instead of substituting a different bill or review report.
+- Preserve valid, priority-ordered evidence JSON under the provider input limit, keeping bill
+  identity and expert review reports ahead of duplicate discussion context.
+- Increase answer budgets and reject provider responses stopped at their token limit so the UI
+  never presents a mid-sentence partial answer as complete.
+- Issue Claude-compatible personal MCP capability URLs with authentication in a stable path instead
+  of a query parameter, while continuing to accept previously issued query-token URLs.
+
 ## [0.9.1] - 2026-07-13
 
 ### Fixed

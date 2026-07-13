@@ -144,6 +144,26 @@ def test_pending_bill_status_falls_back_to_main_bill_api(tmp_path) -> None:
     )
 
 
+def test_natural_language_bill_number_rejects_nonmatching_api_rows(tmp_path) -> None:
+    client = FakeClient({})
+    database = Database(tmp_path / "cache.sqlite3")
+    database.initialize()
+    service = LiveAssemblyServices(
+        database,
+        client,  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+    )
+
+    results = service.search_bills("의안번호 2219564 보완수사권", limit=10)
+
+    assert results == []
+    assert service.local.get_bill_status("2201000") is None
+    assert any(
+        dataset == BILL_DATASET and parameters.get("BILL_NO") == "2219564"
+        for dataset, parameters in client.calls
+    )
+
+
 def test_live_bill_search_attaches_on_demand_review_report(tmp_path) -> None:
     class DocumentsClient:
         def review_reports(self, bill_id: str, bill_no: str):

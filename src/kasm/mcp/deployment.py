@@ -119,7 +119,7 @@ def create_asgi_app() -> Any:
         except (RuntimeError, ValueError) as exc:
             return HTMLResponse(setup_page(error=str(exc)), 400, headers=_private_headers())
         base = str(request.base_url).rstrip("/")
-        mcp_url = f"{base}/mcp?{urllib.parse.urlencode({'token': token})}"
+        mcp_url = f"{base}/mcp/t/{urllib.parse.quote(token, safe='')}"
         return HTMLResponse(result_page(mcp_url), headers=_private_headers())
 
     async def workspace(_request: Request) -> HTMLResponse:

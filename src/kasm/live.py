@@ -24,7 +24,7 @@ from kasm.adapters.korea.pipeline import OpenAssemblyPipeline, distinct_minutes_
 from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
 from kasm.app import LocalServices, infer_bill_title_query, infer_issue_committee
 from kasm.core.models import BillDocument
-from kasm.mcp.tools import ServiceContext
+from kasm.mcp.tools import ServiceContext, extract_bill_numbers
 from kasm.search.lexical import query_terms
 from kasm.storage.database import Database
 from kasm.storage.repositories import BillDocumentRepository, MeetingRepository
@@ -158,33 +158,35 @@ class LiveAssemblyServices:
 
     def _refresh_bills(self, *, query: str, assembly_term: int) -> list[dict[str, Any]]:
         queries = _bill_queries(query)
+        bill_numbers = extract_bill_numbers(query)
         rows: list[dict[str, Any]] = []
         hashes: list[str] = []
-        if query.strip().isdigit():
+        for bill_no in bill_numbers:
             page = self.client.fetch_page(
                 BILL_DATASET,
                 page_size=10,
-                parameters={"AGE": assembly_term, "BILL_NO": query.strip()},
+                parameters={"AGE": assembly_term, "BILL_NO": bill_no},
                 refresh=True,
             )
-            rows.extend(page.rows)
+            rows.extend(row for row in page.rows if _value(row, "BILL_NO") == bill_no)
             hashes.append(page.source_hash)
-        for candidate in queries[:4]:
-            page = self.client.fetch_page(
-                BILL_DATASET,
-                page_size=100,
-                parameters={"AGE": assembly_term, "BILL_NAME": candidate},
-            )
-            rows.extend(page.rows)
-            hashes.append(page.source_hash)
+        if not bill_numbers:
+            for candidate in queries[:4]:
+                page = self.client.fetch_page(
+                    BILL_DATASET,
+                    page_size=100,
+                    parameters={"AGE": assembly_term, "BILL_NAME": candidate},
+                )
+                rows.extend(page.rows)
+                hashes.append(page.source_hash)
         rows = _unique_rows(rows, "BILL_NO")
         if rows:
             source_hash = hashlib.sha256("".join(hashes).encode()).hexdigest()
             ingest_bill_rows(self.database, rows, source_hash=source_hash)
             for row in rows[:5]:
-                bill_no = _value(row, "BILL_NO")
-                if bill_no:
-                    self._refresh_bill_status(bill_no)
+                refreshed_bill_no = _value(row, "BILL_NO")
+                if refreshed_bill_no:
+                    self._refresh_bill_status(refreshed_bill_no)
             for row in rows[:2]:
                 self._refresh_bill_documents(row)
         return rows
@@ -196,9 +198,10 @@ class LiveAssemblyServices:
             parameters={"AGE": self.assembly_term, "BILL_NO": bill_no},
             refresh=True,
         )
-        if page.rows:
-            ingest_bill_rows(self.database, page.rows, source_hash=page.source_hash)
-            return page.rows[0]
+        exact_rows = [row for row in page.rows if _value(row, "BILL_NO") == bill_no]
+        if exact_rows:
+            ingest_bill_rows(self.database, exact_rows, source_hash=page.source_hash)
+            return exact_rows[0]
         return None
 
     def _refresh_bill_by_number(self, bill_no: str) -> dict[str, Any] | None:
@@ -208,9 +211,10 @@ class LiveAssemblyServices:
             parameters={"AGE": self.assembly_term, "BILL_NO": bill_no},
             refresh=True,
         )
-        if page.rows:
-            ingest_bill_rows(self.database, page.rows, source_hash=page.source_hash)
-            return page.rows[0]
+        exact_rows = [row for row in page.rows if _value(row, "BILL_NO") == bill_no]
+        if exact_rows:
+            ingest_bill_rows(self.database, exact_rows, source_hash=page.source_hash)
+            return exact_rows[0]
         return None
 
     def _refresh_bill_documents(self, row: dict[str, Any]) -> None:

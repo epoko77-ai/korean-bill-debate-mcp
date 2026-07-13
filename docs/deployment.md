@@ -7,7 +7,7 @@ query cache on the user's machine.
 
 ```bash
 export ASSEMBLY_OPEN_API_KEY='YOUR_KEY'
-uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.1 kbd mcp
+uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.2 kbd mcp
 ```
 
 ## Hosted user-keyed Streamable HTTP
@@ -16,7 +16,7 @@ The public [connection page](https://korean-bill-debate-mcp.vercel.app) encrypts
 Open Assembly key into a personal connection token. The raw key is not stored in a database or file.
 
 Self-hosters must set `KBD_REMOTE_TOKEN_SECRET` to a Fernet key. The setup page then issues personal
-`/mcp?token=...` URLs. Never configure one shared Open Assembly operator key for public traffic.
+`/mcp/t/...` URLs. Never configure one shared Open Assembly operator key for public traffic.
 
 The same deployment exposes the no-account research workspace at `/workspace`. It accepts a user's
 Open Assembly and LLM keys in one HTTPS request, isolates them by purpose, and deletes its temporary

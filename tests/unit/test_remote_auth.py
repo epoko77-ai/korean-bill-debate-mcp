@@ -10,7 +10,7 @@ def test_remote_token_auth_requires_valid_token_and_scopes_user_key() -> None:
 
     async def downstream(scope, receive, send) -> None:
         del receive
-        calls.append((scope["query_string"], request_api_key()))
+        calls.append((scope["path"], scope["query_string"], request_api_key()))
         await send({"type": "http.response.start", "status": 204, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
@@ -27,6 +27,16 @@ def test_remote_token_auth_requires_valid_token_and_scopes_user_key() -> None:
             responses.append(message)
 
         await auth(
+            {
+                "type": "http",
+                "path": f"/mcp/t/{token}",
+                "raw_path": f"/mcp/t/{token}".encode(),
+                "query_string": b"",
+            },
+            receive,
+            send,
+        )
+        await auth(
             {"type": "http", "path": "/mcp", "query_string": f"token={token}".encode()},
             receive,
             send,
@@ -37,7 +47,10 @@ def test_remote_token_auth_requires_valid_token_and_scopes_user_key() -> None:
         assert any(message.get("status") == 401 for message in responses)
 
     asyncio.run(exercise())
-    assert calls == [(b"", "personal-assembly-key")]
+    assert calls == [
+        ("/mcp", b"", "personal-assembly-key"),
+        ("/mcp", b"", "personal-assembly-key"),
+    ]
     assert request_api_key() is None
 
 

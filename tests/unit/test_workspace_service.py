@@ -61,3 +61,24 @@ def test_workspace_rejects_invalid_input(override, message) -> None:
     }
     with pytest.raises(WorkspaceError, match=message):
         run_workspace_research(**values)
+
+
+def test_workspace_never_synthesizes_when_explicit_bill_number_is_unverified() -> None:
+    synthesized = False
+
+    def synthesizer(*_args):
+        nonlocal synthesized
+        synthesized = True
+        return "잘못된 답변", "test-model"
+
+    with pytest.raises(WorkspaceError, match="정확히 일치"):
+        run_workspace_research(
+            question="의안번호 2219564 보완수사권",
+            assembly_api_key="assembly-key",
+            llm_provider="openai",
+            llm_api_key="llm-key",
+            services_factory=lambda **_kwargs: create_services(),
+            synthesizer=synthesizer,
+        )
+
+    assert synthesized is False

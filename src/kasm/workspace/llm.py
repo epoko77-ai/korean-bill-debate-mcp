@@ -18,6 +18,10 @@ _SYSTEM_PROMPT = """당신은 대한민국 국회 입법조사 보조자입니�
 구분하고, 중요한 주장 바로 뒤에 제공된 공식 URL을 그대로 붙이세요. 자료가 부족하면
 무엇을 확인하지 못했는지 명확히 밝히세요.
 
+아래 다섯 항목을 모두 끝까지 작성하세요. 전체를 약 3,500자 이내로 간결하게 구성하고,
+근거가 없는 항목은 생략하지 말고 '제공된 공식 자료에서 확인되지 않음'이라고 적으세요.
+완료할 수 없는 새 항목을 시작하거나 문장을 중간에서 끊지 마세요.
+
 답변 순서:
 1. 핵심 요약
 2. 법안과 현재 처리상태
@@ -55,10 +59,12 @@ def synthesize(
 
 
 def _evidence_prompt(question: str, evidence: dict[str, Any]) -> str:
-    serialized = json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
-    max_chars = int(os.getenv("KBD_WORKSPACE_MAX_EVIDENCE_CHARS", "60000"))
-    if len(serialized) > max_chars:
-        serialized = serialized[:max_chars] + '\n{"truncated":true}'
+    try:
+        configured_max = int(os.getenv("KBD_WORKSPACE_MAX_EVIDENCE_CHARS", "60000"))
+    except ValueError:
+        configured_max = 60000
+    max_chars = max(2000, min(configured_max, 120000))
+    serialized = _bounded_evidence_json(evidence, max_chars)
     return (
         "사용자 질문:\n"
         + question
@@ -68,12 +74,264 @@ def _evidence_prompt(question: str, evidence: dict[str, Any]) -> str:
     )
 
 
+def _bounded_evidence_json(evidence: dict[str, Any], max_chars: int) -> str:
+    """Return valid, priority-ordered JSON instead of slicing serialized evidence."""
+    tiers = (
+        (5, 3, 1800, 8, 900, 4, 6, 700, 16),
+        (3, 2, 1000, 6, 650, 3, 4, 450, 10),
+        (2, 1, 500, 4, 350, 2, 3, 250, 6),
+        (1, 1, 240, 2, 200, 1, 2, 160, 3),
+    )
+    for tier in tiers:
+        compact = _compact_evidence(evidence, *tier)
+        serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+        if len(serialized) <= max_chars:
+            return serialized
+    minimal = {
+        "evidence_compacted": True,
+        "bill_number_validation": _compact_validation(evidence.get("bill_number_validation")),
+        "bills": [
+            _pick_text_fields(
+                item,
+                ("bill_no", "name", "status", "process_result", "official_url"),
+                text_limit=180,
+            )
+            for item in _dict_list(evidence.get("bills"), 1)
+        ],
+        "quality": _compact_quality(evidence.get("quality"), warning_limit=2),
+        "compaction_note": "응답 한도에 맞춰 핵심 의안 식별정보만 전달했습니다.",
+    }
+    serialized = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) <= max_chars:
+        return serialized
+    return json.dumps(
+        {
+            "evidence_compacted": True,
+            "compaction_note": "공식 자료가 입력 한도를 초과했습니다.",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _compact_evidence(
+    evidence: dict[str, Any],
+    bill_limit: int,
+    document_limit: int,
+    document_chars: int,
+    speech_limit: int,
+    speech_chars: int,
+    thread_limit: int,
+    turn_limit: int,
+    turn_chars: int,
+    timeline_limit: int,
+) -> dict[str, Any]:
+    bills = [
+        _compact_bill(item, document_limit, document_chars)
+        for item in _dict_list(evidence.get("bills"), bill_limit)
+    ]
+    speeches = [
+        _compact_speech(item, speech_chars)
+        for item in _dict_list(evidence.get("speeches"), speech_limit)
+    ]
+    threads = [
+        _compact_thread(item, turn_limit, turn_chars)
+        for item in _dict_list(evidence.get("discussion_threads"), thread_limit)
+    ]
+    timeline = [
+        _pick_text_fields(
+            item,
+            (
+                "date",
+                "event_type",
+                "bill_no",
+                "title",
+                "detail",
+                "participants",
+                "official_url",
+            ),
+            text_limit=300,
+        )
+        for item in _dict_list(evidence.get("timeline"), timeline_limit)
+    ]
+    return {
+        "evidence_compacted": True,
+        "original_counts": {
+            "bills": len(_dict_list(evidence.get("bills"))),
+            "speeches": len(_dict_list(evidence.get("speeches"))),
+            "discussion_threads": len(_dict_list(evidence.get("discussion_threads"))),
+        },
+        "bill_number_validation": _compact_validation(evidence.get("bill_number_validation")),
+        "bills": bills,
+        "speeches": speeches,
+        "discussion_threads": threads,
+        "timeline": timeline,
+        "quality": _compact_quality(evidence.get("quality"), warning_limit=6),
+        "source_metadata": _pick_text_fields(
+            evidence,
+            ("data_mode", "live_checked_at", "query_language", "source_language"),
+            text_limit=180,
+        ),
+    }
+
+
+def _compact_bill(item: dict[str, Any], document_limit: int, text_limit: int) -> dict[str, Any]:
+    bill = _pick_text_fields(
+        item,
+        (
+            "id",
+            "bill_no",
+            "name",
+            "status",
+            "process_result",
+            "proposer",
+            "committee",
+            "proposed_at",
+            "processed_at",
+            "official_url",
+        ),
+        text_limit=300,
+    )
+    bill["documents"] = [
+        {
+            **_pick_text_fields(
+                document,
+                ("document_type", "title", "file_format", "official_url"),
+                text_limit=300,
+            ),
+            "text_excerpt": _short_text(
+                document.get("text_excerpt") or document.get("text"), text_limit
+            ),
+        }
+        for document in _dict_list(item.get("documents"), document_limit)
+    ]
+    return bill
+
+
+def _compact_speech(item: dict[str, Any], text_limit: int) -> dict[str, Any]:
+    speech = _pick_text_fields(
+        item,
+        (
+            "speaker",
+            "speaker_role",
+            "organization",
+            "text",
+            "agenda",
+            "meeting",
+            "committee",
+            "date",
+            "source_locator",
+            "official_source",
+        ),
+        text_limit=text_limit,
+    )
+    speech["citation"] = _compact_citation(item.get("citation"))
+    return speech
+
+
+def _compact_thread(item: dict[str, Any], turn_limit: int, text_limit: int) -> dict[str, Any]:
+    thread = _pick_text_fields(
+        item,
+        ("meeting", "committee", "date", "participants"),
+        text_limit=300,
+    )
+    thread["turns"] = [
+        {
+            **_pick_text_fields(
+                turn,
+                (
+                    "sequence",
+                    "speaker",
+                    "speaker_role",
+                    "organization",
+                    "text",
+                    "agenda",
+                    "source_locator",
+                    "official_source",
+                ),
+                text_limit=text_limit,
+            ),
+            "citation": _compact_citation(turn.get("citation")),
+        }
+        for turn in _dict_list(item.get("turns"), turn_limit)
+    ]
+    return thread
+
+
+def _compact_citation(value: Any) -> dict[str, Any]:
+    return _pick_text_fields(
+        value,
+        ("official_url", "source_locator", "meeting", "date", "speaker"),
+        text_limit=300,
+    )
+
+
+def _compact_validation(value: Any) -> dict[str, Any]:
+    return _pick_text_fields(value, ("requested", "matched", "exact_match"), text_limit=80)
+
+
+def _compact_quality(value: Any, *, warning_limit: int) -> dict[str, Any]:
+    quality = _pick_text_fields(
+        value,
+        (
+            "score",
+            "evidence_sufficient",
+            "bill_coverage",
+            "speech_matches",
+            "discussion_threads",
+            "context_turns",
+            "provenance_rate",
+        ),
+        text_limit=100,
+    )
+    if isinstance(value, dict):
+        warnings = value.get("warnings")
+        if isinstance(warnings, list):
+            quality["warnings"] = [_short_text(item, 300) for item in warnings[:warning_limit]]
+    return quality
+
+
+def _dict_list(value: Any, limit: int | None = None) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    items = [item for item in value if isinstance(item, dict)]
+    return items if limit is None else items[:limit]
+
+
+def _pick_text_fields(
+    value: Any, fields: tuple[str, ...], *, text_limit: int
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for field in fields:
+        field_value = value.get(field)
+        if field_value is None:
+            continue
+        if isinstance(field_value, str):
+            result[field] = _short_text(field_value, text_limit)
+        elif isinstance(field_value, list):
+            result[field] = [_short_text(item, text_limit) for item in field_value[:20]]
+        elif isinstance(field_value, (bool, int, float)):
+            result[field] = field_value
+        else:
+            result[field] = _short_text(field_value, text_limit)
+    return result
+
+
+def _short_text(value: Any, limit: int) -> str:
+    compact = " ".join(str(value or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "…"
+
+
 def _openai(api_key: str, model: str, prompt: str, opener: JsonOpener) -> str:
     payload = {
         "model": model,
         "instructions": _SYSTEM_PROMPT,
         "input": prompt,
-        "max_output_tokens": 2200,
+        "max_output_tokens": 4800,
         "store": False,
     }
     data = _post_json(
@@ -83,6 +341,12 @@ def _openai(api_key: str, model: str, prompt: str, opener: JsonOpener) -> str:
         "OpenAI",
         opener,
     )
+    incomplete = data.get("incomplete_details")
+    if isinstance(incomplete, dict) and incomplete.get("reason") == "max_output_tokens":
+        raise LlmError(
+            "OpenAI 답변이 출력 한도에 도달했습니다. 부분 답변은 표시하지 않았습니다. "
+            "질문 범위를 조금 좁혀 다시 시도해 주세요."
+        )
     direct = data.get("output_text")
     if isinstance(direct, str) and direct.strip():
         return direct.strip()
@@ -112,7 +376,7 @@ def _anthropic(
     model = _available_anthropic_model(api_key, preferred_model, opener)
     payload = {
         "model": model,
-        "max_tokens": 2200,
+        "max_tokens": 4096,
         "system": _SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -123,6 +387,11 @@ def _anthropic(
         "Anthropic",
         opener,
     )
+    if data.get("stop_reason") == "max_tokens":
+        raise LlmError(
+            "Anthropic 답변이 출력 한도에 도달했습니다. 부분 답변은 표시하지 않았습니다. "
+            "질문 범위를 조금 좁혀 다시 시도해 주세요."
+        )
     raw_content = data.get("content")
     content: list[Any] = raw_content if isinstance(raw_content, list) else []
     texts = [

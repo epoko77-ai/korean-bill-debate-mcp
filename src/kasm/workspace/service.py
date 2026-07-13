@@ -61,7 +61,16 @@ def run_workspace_research(
                 ),
             )
             research = KasmTools(services).explore_issue(query, limit=12)
+            validation = research.get("bill_number_validation")
+            if isinstance(validation, dict) and validation.get("exact_match") is not True:
+                raise WorkspaceError(
+                    "요청한 의안번호와 정확히 일치하는 공식 의안을 확인하지 못했습니다. "
+                    "다른 법안으로 대체하지 않았으니 의안번호를 확인해 주세요.",
+                    status_code=502,
+                )
             answer, model = synthesizer(provider, llm_api_key.strip(), query, research)
+    except WorkspaceError:
+        raise
     except LlmError as exc:
         raise WorkspaceError(str(exc), status_code=502) from exc
     except (OSError, RuntimeError, ValueError) as exc:

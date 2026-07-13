@@ -25,7 +25,7 @@ and issue a Fernet-encrypted MCP connection token. The raw key is not written to
 file. The hosted process decrypts the token for one authenticated MCP request and uses the key only
 to query official Assembly services.
 
-The generated `/mcp?token=...` URL is a password-equivalent bearer credential. Anyone who has the
+The generated `/mcp/t/...` URL is a password-equivalent bearer credential. Anyone who has the
 complete URL can consume that user's Open Assembly quota. Users must not publish, screenshot, or
 send it through untrusted channels. Operators must avoid logging full query strings and rotate
 `KBD_REMOTE_TOKEN_SECRET` if connection URLs are exposed.

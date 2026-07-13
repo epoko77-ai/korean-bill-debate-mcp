@@ -6,6 +6,7 @@ makes the product API usable from the CLI and straightforward to unit test.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime
@@ -13,7 +14,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from kasm.core.quality import issue_quality
 from kasm.search.bilingual import korean_committee, prepare_query
+
+_BILL_NUMBER = re.compile(r"(?<!\d)(\d{7})(?!\d)")
 
 
 class SearchService(Protocol):
@@ -74,6 +78,11 @@ def _invoke(target: Any, names: tuple[str, ...], /, *args: Any, **kwargs: Any) -
                 raise
     joined = " or ".join(names)
     raise RuntimeError(f"Configured service does not implement {joined}")
+
+
+def extract_bill_numbers(query: str) -> list[str]:
+    """Return unique seven-digit Assembly bill numbers mentioned in natural language."""
+    return list(dict.fromkeys(_BILL_NUMBER.findall(query)))
 
 
 class KasmTools:
@@ -262,5 +271,48 @@ class KasmTools:
                 _invoke(catalog, ("explore_issue",), prepared.search_query, limit=limit)
             ),
         )
+        requested_bill_numbers = extract_bill_numbers(prepared.search_query)
+        if requested_bill_numbers:
+            payload = self._enforce_exact_bill_numbers(payload, requested_bill_numbers)
         payload.update(prepared.metadata())
+        return payload
+
+    def _enforce_exact_bill_numbers(
+        self, payload: dict[str, Any], requested_bill_numbers: list[str]
+    ) -> dict[str, Any]:
+        """Never let fuzzy issue search substitute another bill for an explicit number."""
+        catalog = self.services.catalog or self.services.repository
+        exact_bills: list[dict[str, Any]] = []
+        for bill_no in requested_bill_numbers:
+            result = to_jsonable(_invoke(catalog, ("get_bill_status",), bill_no))
+            if isinstance(result, dict) and str(result.get("bill_no") or "") == bill_no:
+                exact_bills.append(result)
+        allowed_bill_ids = {str(bill.get("id") or "") for bill in exact_bills}
+        raw_links = payload.get("links")
+        links = raw_links if isinstance(raw_links, list) else []
+        payload["bills"] = exact_bills
+        payload["links"] = [
+            link
+            for link in links
+            if isinstance(link, dict) and str(link.get("bill_id") or "") in allowed_bill_ids
+        ]
+        raw_timeline = payload.get("timeline")
+        timeline = raw_timeline if isinstance(raw_timeline, list) else []
+        payload["timeline"] = [
+            event
+            for event in timeline
+            if not isinstance(event, dict)
+            or not event.get("bill_no")
+            or str(event.get("bill_no")) in requested_bill_numbers
+        ]
+        payload["bill_number_validation"] = {
+            "requested": requested_bill_numbers,
+            "matched": [str(bill["bill_no"]) for bill in exact_bills],
+            "exact_match": len(exact_bills) == len(requested_bill_numbers),
+        }
+        payload["quality"] = issue_quality(payload)
+        if not exact_bills:
+            payload["quality"]["warnings"].append(
+                "요청한 의안번호와 정확히 일치하는 공식 의안을 확인하지 못했습니다."
+            )
         return payload

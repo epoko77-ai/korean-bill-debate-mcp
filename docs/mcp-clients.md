@@ -11,8 +11,13 @@
    넣습니다.
 5. 채팅의 `+` 메뉴에서 추가한 커넥터 또는 앱을 활성화합니다.
 
-키 없는 `/mcp` 주소는 동작하지 않습니다. 연결 페이지가 발급한 `?token=...`까지 포함된
-주소를 사용하세요. 서버는 API 키 원문을 DB나 파일에 저장하지 않습니다. 개인 링크는 API
+`연결됨`은 계정에 등록됐다는 뜻이고, 현재 채팅에서 켜졌다는 뜻은 아닙니다. 새 채팅의 입력창
+아래 `+` 또는 **도구** 메뉴에서 `Korean Bill & Debate`를 선택하세요. “이 대화에서는 MCP가
+호출 가능한 도구로 잡히지 않는다”는 안내가 나오면 현재 채팅에 앱이 활성화되지 않은 상태입니다.
+
+키 없는 `/mcp` 주소는 동작하지 않습니다. 연결 페이지가 발급한 `/mcp/t/...` 전체 주소를
+사용하세요. 0.9.2 이전의 `?token=...` 링크를 Claude.ai에 등록했다면 새 링크를 발급해 커넥터를
+다시 등록하세요. 서버는 API 키 원문을 DB나 파일에 저장하지 않습니다. 개인 링크는 API
 할당량을 사용할 수 있으므로 외부에 공유하지 마세요.
 
 ## 로컬 설치 공통 준비
@@ -29,7 +34,7 @@
 PyPI 배포 전에는 검증된 GitHub 릴리스를 직접 설치합니다.
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.1
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.2
 ```
 
 ## 자동 설정
@@ -55,7 +60,7 @@ kbd setup --client claude-desktop
 ```bash
 claude mcp add --scope user korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.1 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.2 kbd mcp
 claude mcp get korean-bill-debate
 ```
 
@@ -66,7 +71,7 @@ Claude Code에서 `/mcp`를 실행해 8개 도구를 확인합니다.
 ```bash
 codex mcp add korean-bill-debate \
   --env ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.1 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.2 kbd mcp
 codex mcp get korean-bill-debate
 codex mcp list
 ```
@@ -78,7 +83,7 @@ Codex 안에서는 `/mcp`로 연결 상태를 확인합니다.
 ```bash
 gemini mcp add korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.1 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.2 kbd mcp
 gemini mcp list
 ```
 
@@ -95,7 +100,7 @@ Gemini CLI 안에서는 `/mcp list`를 사용합니다.
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.1",
+        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.2",
         "kbd",
         "mcp"
       ],

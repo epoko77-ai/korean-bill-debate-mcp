@@ -12,6 +12,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 _request_api_key: ContextVar[str | None] = ContextVar("kbd_request_api_key", default=None)
+_TOKEN_PATH_PREFIX = "/mcp/t/"
 
 
 def request_api_key() -> str | None:
@@ -42,19 +43,28 @@ class RemoteTokenAuth:
         return value
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope.get("type") != "http" or not str(scope.get("path", "")).startswith("/mcp"):
+        path = str(scope.get("path", ""))
+        if scope.get("type") != "http" or not path.startswith("/mcp"):
             await self.app(scope, receive, send)
             return
         pairs = urllib.parse.parse_qsl(
             bytes(scope.get("query_string", b"")).decode(), keep_blank_values=True
         )
-        token = next((value for name, value in pairs if name == "token"), "")
+        path_token = ""
+        if path.startswith(_TOKEN_PATH_PREFIX):
+            path_token = urllib.parse.unquote(path.removeprefix(_TOKEN_PATH_PREFIX))
+            if not path_token or "/" in path_token:
+                path_token = ""
+        token = path_token or next((value for name, value in pairs if name == "token"), "")
         try:
             api_key = self.reveal(token)
         except ValueError:
             await _json_error(send, 401, "A valid personal connection token is required")
             return
         clean_scope = dict(scope)
+        if path_token:
+            clean_scope["path"] = "/mcp"
+            clean_scope["raw_path"] = b"/mcp"
         clean_scope["query_string"] = urllib.parse.urlencode(
             [(name, value) for name, value in pairs if name != "token"]
         ).encode()
@@ -124,4 +134,10 @@ h1{{font-size:40px}}strong{{color:#f0cc83}}.english{{color:#b8c8d4}}</style></he
 링크를 아는 사람은 사용자의 열린국회 API 할당량을 사용할 수 있습니다.<br>
 <span class="english">Anyone holding it can consume your Open Assembly API quota.</span></p>
 <p>ChatGPT: 설정(Settings) → 앱(Apps) → 고급 설정(Advanced settings) → 앱 만들기(Create app)<br>
-Claude: 설정(Settings) → 커넥터(Connectors) → 커스텀 커넥터 추가(Add custom connector)</p></div></main></body></html>"""
+Claude: 설정(Settings) → 커넥터(Connectors) → 커스텀 커넥터 추가(Add custom connector)</p>
+<p><strong>등록만 하면 끝이 아닙니다.</strong><br>
+새 채팅을 열고 입력창 아래의 <strong>+ 또는 도구 메뉴</strong>에서 방금 만든
+<strong>Korean Bill &amp; Debate</strong> 앱·커넥터를 선택하세요. 선택한 뒤 질문해야 의안 원문과
+회의록 도구가 호출됩니다.<br><span class="english"><strong>One final step:</strong> open a new
+chat and enable Korean Bill &amp; Debate from the + / Tools menu before asking your question.</span></p>
+</div></main></body></html>"""

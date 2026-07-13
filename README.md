@@ -5,7 +5,7 @@
 > 법안 내용과 처리상태부터 소위원회 회의록, 전문위원 검토보고서, 의원과 정부의 실제
 > 발언까지 하나의 조사 흐름으로 이어서 확인합니다.
 
-`v0.9.1` · MCP + 웹 입법조사 워크스페이스 · 사용자 본인의 API 키 · 실시간 조회 · Apache-2.0
+`v0.9.2` · MCP + 웹 입법조사 워크스페이스 · 사용자 본인의 API 키 · 실시간 조회 · Apache-2.0
 
 [English](README.en.md) · [MCP 연결](docs/mcp-clients.md) ·
 [데이터 출처](docs/data-sources.md) · [아키텍처](docs/architecture.md)
@@ -155,7 +155,7 @@ supplementary investigation authority. Include surrounding Q&A and official sour
 
 1. 본인의 열린국회 API 키를 입력합니다.
 2. **개인 MCP 링크 만들기**를 누릅니다.
-3. 완성된 `https://.../mcp?token=...` 주소 전체를 복사합니다.
+3. 완성된 `https://.../mcp/t/...` 주소 전체를 복사합니다.
 4. 사용하는 웹 앱의 커스텀 MCP 서버 URL에 붙여 넣습니다.
 
 #### Claude.ai
@@ -171,6 +171,14 @@ supplementary investigation authority. Include surrounding Q&A and official sour
 3. 이름은 `Korean Bill & Debate`, 서버 URL은 발급받은 개인 MCP 링크를 입력합니다.
 4. 만든 앱을 연결하고 채팅의 `+` 메뉴에서 선택합니다.
 
+> **연결됨 표시만으로는 이 대화에서 활성화된 것이 아닙니다.** 새 채팅을 열고 입력창 아래
+> `+` 또는 **도구** 메뉴에서 `Korean Bill & Debate`를 선택한 뒤 질문하세요. AI가 “이
+> 대화에서는 MCP가 호출 가능한 도구로 잡히지 않는다”고 말하면 이 단계가 빠진 것입니다.
+
+> 0.9.2 이전 연결 페이지에서 발급한 `?token=...` 링크를 Claude.ai에 등록했다면, 연결
+> 페이지에서 `/mcp/t/...` 형식의 링크를 새로 발급해 커스텀 커넥터를 다시 등록하세요. URL
+> 쿼리에 인증값을 넣지 않아 Claude의 후속 MCP 요청에서도 같은 개인 연결 경로가 유지됩니다.
+
 > 키 없는 `/mcp` 주소만 붙여 넣으면 연결되지 않습니다. 반드시 연결 페이지에서 본인의 키로
 > 만든 **개인 MCP 링크 전체**를 사용하세요. 키 원문은 서버의 DB나 파일에 저장하지 않지만,
 > 발급된 링크는 사용자의 API 할당량을 사용할 수 있으므로 비밀번호처럼 보관해야 합니다.
@@ -183,7 +191,7 @@ supplementary investigation authority. Include surrounding Q&A and official sour
 2. 릴리스를 설치합니다.
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.1
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.9.2
 ```
 
 3. 사용하는 앱 하나만 골라 실행합니다.
