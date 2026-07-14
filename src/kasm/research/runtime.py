@@ -131,7 +131,12 @@ def create_hosted_research_runtime(
             ),
         ),
         finalizer=ConnectedResearchFinalizer(build_sha=build_sha),
-        runs=StatusSnapshotResearchRunStore(artifacts),
+        runs=StatusSnapshotResearchRunStore(
+            artifacts,
+            page_read_concurrency=int(
+                os.getenv("KBD_RESEARCH_PAGE_READ_CONCURRENCY", "8")
+            ),
+        ),
         status_page_size=int(os.getenv("KBD_RESEARCH_STATUS_PAGE_SIZE", "100")),
         direct_fanout_limit=int(os.getenv("KBD_RESEARCH_DIRECT_FANOUT_LIMIT", "4")),
         fanout_chunk_size=int(os.getenv("KBD_RESEARCH_FANOUT_CHUNK_SIZE", "4")),

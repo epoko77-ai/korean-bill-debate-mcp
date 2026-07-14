@@ -345,6 +345,18 @@ def test_output_words_and_particle_variants_do_not_create_bill_partitions() -> N
     }
 
 
+def test_broad_research_instruction_keeps_only_subject_search_terms() -> None:
+    plan = _plan(
+        "2026년 7월 인공지능 관련 법안과 위원회 논의를 "
+        "공식 원문 기준으로 조사해줘"
+    )
+
+    assert {term.value for term in plan.search_terms} == {
+        "인공지능",
+        "인공지능 기본법",
+    }
+
+
 @pytest.mark.parametrize(
     ("query", "expected_literals"),
     (

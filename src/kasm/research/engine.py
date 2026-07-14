@@ -590,6 +590,14 @@ class ResearchRunStore(Protocol):
         page: ApiPage,
     ) -> ApiPage: ...
 
+    def get_page(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+        partition_id: str,
+        page_number: int,
+    ) -> ApiPage | None: ...
+
     def pages(
         self, research_id: str, phase: MetadataPhase, partition_id: str
     ) -> tuple[ApiPage, ...]: ...
@@ -603,6 +611,14 @@ class ResearchRunStore(Protocol):
     def put_bill_discovery(
         self, research_id: str, outcome: BillDocumentDiscovery
     ) -> BillDocumentDiscovery: ...
+
+    def get_bill_discovery(
+        self, research_id: str, bill_number: str
+    ) -> BillDocumentDiscovery | None: ...
+
+    def bill_discoveries_for(
+        self, research_id: str, bill_numbers: Sequence[str]
+    ) -> tuple[BillDocumentDiscovery, ...]: ...
 
     def bill_discoveries(self, research_id: str) -> tuple[BillDocumentDiscovery, ...]: ...
 
@@ -694,6 +710,18 @@ class InMemoryResearchRunStore:
             self._pages, (research_id, phase, partition_id, page.page), page
         )
 
+    def get_page(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+        partition_id: str,
+        page_number: int,
+    ) -> ApiPage | None:
+        with self._lock:
+            return self._pages.get(
+                (research_id, phase, partition_id, page_number)
+            )
+
     def pages(
         self, research_id: str, phase: MetadataPhase, partition_id: str
     ) -> tuple[ApiPage, ...]:
@@ -719,6 +747,27 @@ class InMemoryResearchRunStore:
         return self._put_once(
             self._bill_discoveries, (research_id, outcome.bill_number), outcome
         )
+
+    def get_bill_discovery(
+        self, research_id: str, bill_number: str
+    ) -> BillDocumentDiscovery | None:
+        with self._lock:
+            return self._bill_discoveries.get((research_id, bill_number))
+
+    def bill_discoveries_for(
+        self, research_id: str, bill_numbers: Sequence[str]
+    ) -> tuple[BillDocumentDiscovery, ...]:
+        with self._lock:
+            return tuple(
+                outcome
+                for bill_number in sorted(set(bill_numbers))
+                if (
+                    outcome := self._bill_discoveries.get(
+                        (research_id, bill_number)
+                    )
+                )
+                is not None
+            )
 
     def bill_discoveries(self, research_id: str) -> tuple[BillDocumentDiscovery, ...]:
         with self._lock:
@@ -1357,13 +1406,11 @@ class ResearchEngine:
         phase = MetadataPhase(str(payload.get(_PHASE) or ""))
         partition_id = str(payload.get(_PARTITION_ID) or "")
         partition = self._partition(task.research_id, phase, partition_id)
-        first = next(
-            (
-                page
-                for page in self.runs.pages(task.research_id, phase, partition_id)
-                if page.page == 1
-            ),
-            None,
+        first = self.runs.get_page(
+            task.research_id,
+            phase,
+            partition_id,
+            1,
         )
         if first is None or first.total_count is None:
             raise ValueError("page fan-out requires a complete stored first page")
@@ -1412,11 +1459,48 @@ class ResearchEngine:
             _PHASE_BARRIER,
             phase.value,
         )
-        complete = (
-            self._phase_complete(task.research_id, phase)
-            if phase is MetadataPhase.DISCOVERY
-            else self._deferred_metadata_complete(task.research_id)
-        )
+        discovery_collection: MetadataCollection | None = None
+        status_collection: MetadataCollection | None = None
+        bill_discoveries: tuple[BillDocumentDiscovery, ...] | None = None
+        if phase is MetadataPhase.DISCOVERY:
+            # A completed discovery snapshot is itself the durable phase
+            # marker. Otherwise load every immutable page once, validate the
+            # complete set, and carry that in-memory collection directly into
+            # resolution. The old check-then-assemble path downloaded dozens
+            # of large Blob pages twice and could exceed Vercel's 300-second
+            # function budget despite all source work already being complete.
+            complete = self.runs.get_discovery(task.research_id) is not None
+            if not complete:
+                discovery_collection = self._try_assemble_collection(
+                    task.research_id,
+                    MetadataPhase.DISCOVERY,
+                    self._phase_partitions(
+                        task.research_id, MetadataPhase.DISCOVERY
+                    ),
+                )
+                complete = discovery_collection is not None
+        else:
+            discovery = self._required_discovery(task.research_id)
+            complete = self.runs.get_metadata(task.research_id) is not None
+            if not complete:
+                status_collection = (
+                    self._try_assemble_collection(
+                        task.research_id,
+                        MetadataPhase.BILL_STATUS,
+                        discovery.status_partitions,
+                    )
+                    if discovery.status_partitions
+                    else _empty_collection()
+                )
+                bill_discoveries = self.runs.bill_discoveries_for(
+                    task.research_id,
+                    discovery.document_bill_numbers,
+                )
+                complete = bool(
+                    status_collection is not None
+                    and len(bill_discoveries)
+                    == len(discovery.document_bill_numbers)
+                )
         if not complete:
             self._publish_phase_barrier(
                 self._required_job(task.research_id),
@@ -1427,9 +1511,18 @@ class ResearchEngine:
             )
             return
         if phase is MetadataPhase.DISCOVERY:
-            self._complete_discovery(task.research_id, task.credential_capability)
+            self._complete_discovery(
+                task.research_id,
+                task.credential_capability,
+                preassembled=discovery_collection,
+            )
         else:
-            self._complete_metadata(task.research_id, prerequisites_verified=True)
+            self._complete_metadata(
+                task.research_id,
+                prerequisites_verified=True,
+                preassembled_status=status_collection,
+                preassembled_bill_discoveries=bill_discoveries,
+            )
 
     def process_document_task(self, task: ResearchTask) -> DocumentOutcome:
         self._validate_task(task, ResearchTaskStage.HYDRATE_DOCUMENT)
@@ -1601,10 +1694,15 @@ class ResearchEngine:
             raise ValueError("metadata task work_id does not match its page")
         partition = self._partition(task.research_id, phase, partition_id)
 
-        existing = {
-            page.page: page
-            for page in self.runs.pages(task.research_id, phase, partition_id)
-        }.get(page_number)
+        # Page identities are fixed and write-once. A direct lookup avoids
+        # re-reading every prior page for each delivery (P² Blob reads on a
+        # broad partition) while preserving the exact same idempotency check.
+        existing = self.runs.get_page(
+            task.research_id,
+            phase,
+            partition_id,
+            page_number,
+        )
         if existing is None:
             credential = self._reveal_task_credential(task)
             client = self.page_client_factory(credential.assembly_api_key)
@@ -1649,13 +1747,19 @@ class ResearchEngine:
         return existing
 
     def _complete_discovery(
-        self, research_id: str, credential_capability: str | None
+        self,
+        research_id: str,
+        credential_capability: str | None,
+        *,
+        preassembled: MetadataCollection | None = None,
     ) -> None:
         gateway = self._required_gateway(research_id)
         existing = self.runs.get_discovery(research_id)
         if existing is None:
-            collection = self._assemble_collection(
-                research_id, MetadataPhase.DISCOVERY, gateway.discovery_partitions
+            collection = preassembled or self._assemble_collection(
+                research_id,
+                MetadataPhase.DISCOVERY,
+                gateway.discovery_partitions,
             )
             filtered, report = _strict_filter(
                 collection,
@@ -1880,10 +1984,11 @@ class ResearchEngine:
         discovery = self._required_discovery(task.research_id)
         if bill_number not in discovery.document_bill_numbers:
             raise ValueError("bill document task is outside the resolved candidate set")
-        existing = {
-            item.bill_number: item
-            for item in self.runs.bill_discoveries(task.research_id)
-        }.get(bill_number)
+        # Every bill discovery is stored under a fixed write-once identity.
+        # Reading that identity directly keeps N concurrent bill checks O(N);
+        # scanning all prior discoveries here made the same workload O(N²) in
+        # hosted Blob reads and JSON decoding.
+        existing = self.runs.get_bill_discovery(task.research_id, bill_number)
         if existing is None:
             bill = _accepted_bill_by_number(discovery.resolution, bill_number)
             try:
@@ -1909,18 +2014,20 @@ class ResearchEngine:
             research_id, MetadataPhase.BILL_STATUS
         ):
             return False
-        discovered_numbers = {
-            item.bill_number for item in self.runs.bill_discoveries(research_id)
-        }
-        return all(
-            number in discovered_numbers for number in discovery.document_bill_numbers
-        )
+        return len(
+            self.runs.bill_discoveries_for(
+                research_id,
+                discovery.document_bill_numbers,
+            )
+        ) == len(discovery.document_bill_numbers)
 
     def _complete_metadata(
         self,
         research_id: str,
         *,
         prerequisites_verified: bool = False,
+        preassembled_status: MetadataCollection | None = None,
+        preassembled_bill_discoveries: Sequence[BillDocumentDiscovery] | None = None,
     ) -> MetadataStageState | None:
         existing = self.runs.get_metadata(research_id)
         if existing is not None:
@@ -1931,17 +2038,28 @@ class ResearchEngine:
             return None
         if not prerequisites_verified and not self._deferred_metadata_complete(research_id):
             return None
-        bill_discoveries = self.runs.bill_discoveries(research_id)
-
-        status_collection = (
-            self._assemble_collection(
+        bill_discoveries = (
+            tuple(preassembled_bill_discoveries)
+            if preassembled_bill_discoveries is not None
+            else self.runs.bill_discoveries_for(
                 research_id,
-                MetadataPhase.BILL_STATUS,
-                discovery.status_partitions,
+                discovery.document_bill_numbers,
             )
-            if discovery.status_partitions
-            else _empty_collection()
         )
+        if len(bill_discoveries) != len(discovery.document_bill_numbers):
+            return None
+
+        status_collection = preassembled_status
+        if status_collection is None:
+            status_collection = (
+                self._assemble_collection(
+                    research_id,
+                    MetadataPhase.BILL_STATUS,
+                    discovery.status_partitions,
+                )
+                if discovery.status_partitions
+                else _empty_collection()
+            )
         gateway = self._required_gateway(research_id)
         manifest = _document_manifest(
             gateway.research_plan.contract,
@@ -2230,10 +2348,37 @@ class ResearchEngine:
         phase: MetadataPhase,
         partitions: Sequence[MetadataPartition],
     ) -> MetadataCollection:
+        result = self._try_assemble_collection(research_id, phase, partitions)
+        if result is None:
+            raise ValueError("metadata collection is not complete")
+        return result
+
+    def _try_assemble_collection(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+        partitions: Sequence[MetadataPartition],
+    ) -> MetadataCollection | None:
+        """Load and validate each immutable page exactly once for this attempt."""
+
+        page_sets: dict[str, tuple[ApiPage, ...]] = {}
+        for partition in partitions:
+            pages = self.runs.pages(research_id, phase, partition.partition_id)
+            first = next((page for page in pages if page.page == 1), None)
+            if first is None or first.total_count is None:
+                return None
+            expected_pages = max(
+                1,
+                (first.total_count + partition.page_size - 1)
+                // partition.page_size,
+            )
+            if {page.page for page in pages} != set(range(1, expected_pages + 1)):
+                return None
+            page_sets[partition.partition_id] = pages
         results = {
             partition.partition_id: assemble_partition_pages(
                 partition,
-                self.runs.pages(research_id, phase, partition.partition_id),
+                page_sets[partition.partition_id],
             )
             for partition in partitions
         }

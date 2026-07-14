@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import importlib
 import math
+import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import MISSING, fields, is_dataclass
 from datetime import UTC, date, datetime
 from enum import Enum
@@ -124,9 +126,13 @@ class ArtifactResearchRunStore:
         artifacts: ResearchArtifactStore,
         *,
         now: Callable[[], datetime] | None = None,
+        page_read_concurrency: int = 8,
     ) -> None:
+        if not 1 <= page_read_concurrency <= 32:
+            raise ValueError("page_read_concurrency must be between 1 and 32")
         self.artifacts = artifacts
         self._now = now or (lambda: datetime.now(UTC))
+        self._page_read_concurrency = page_read_concurrency
         self._lock = threading.RLock()
 
     def put_gateway(
@@ -181,6 +187,24 @@ class ArtifactResearchRunStore:
             expires_at=gateway.job.expires_at,
         )
 
+    def get_page(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+        partition_id: str,
+        page_number: int,
+    ) -> ApiPage | None:
+        """Read one immutable API page directly, without a partition scan."""
+
+        if not partition_id.strip() or page_number < 1:
+            raise ValueError("metadata page identity is invalid")
+        return self._get_page(
+            research_id,
+            phase,
+            partition_id,
+            page_number,
+        )
+
     def pages(
         self, research_id: str, phase: MetadataPhase, partition_id: str
     ) -> tuple[ApiPage, ...]:
@@ -197,16 +221,30 @@ class ArtifactResearchRunStore:
             1,
             (first.total_count + partition.page_size - 1) // partition.page_size,
         )
-        values = [first]
-        for page_number in range(2, expected_pages + 1):
-            value = self._get_page(
+        page_numbers = tuple(range(2, expected_pages + 1))
+
+        def read_page(page_number: int) -> ApiPage | None:
+            return self._get_page(
                 research_id,
                 phase,
                 partition_id,
                 page_number,
             )
-            if value is not None:
-                values.append(value)
+
+        if len(page_numbers) <= 1 or self._page_read_concurrency == 1:
+            following = tuple(read_page(number) for number in page_numbers)
+        else:
+            # One broad partition can contain dozens of immutable API pages.
+            # Serial private-Blob GETs made a correctness barrier exceed the
+            # serverless 300 second budget even though every page already
+            # existed. Bound concurrency so latency scales by batches without
+            # increasing official API pressure or dropping any source page.
+            with ThreadPoolExecutor(
+                max_workers=min(self._page_read_concurrency, len(page_numbers)),
+                thread_name_prefix="kbd-page-read",
+            ) as executor:
+                following = tuple(executor.map(read_page, page_numbers))
+        values = [first, *(value for value in following if value is not None)]
         return tuple(values)
 
     def put_discovery(
@@ -261,6 +299,55 @@ class ArtifactResearchRunStore:
             expires_at=gateway.job.expires_at,
         )
 
+    def get_bill_discovery(
+        self, research_id: str, bill_number: str
+    ) -> BillDocumentDiscovery | None:
+        """Read one bill-document index result without listing its siblings."""
+
+        if not re.fullmatch(r"\d{7}", bill_number):
+            raise ValueError("bill discovery requires an exact bill number")
+        value = self._get_fixed(
+            research_id,
+            ArtifactKind.RESOLUTION,
+            f"run/bill-discovery/{bill_number}",
+            "bill_discovery",
+        )
+        if value is None:
+            return None
+        restored = self._expect(value, BillDocumentDiscovery, "bill discovery")
+        if restored.bill_number != bill_number:
+            raise ResearchRunStorageError("bill discovery identity is invalid")
+        return restored
+
+    def bill_discoveries_for(
+        self, research_id: str, bill_numbers: Sequence[str]
+    ) -> tuple[BillDocumentDiscovery, ...]:
+        """Read a planned bill set in bounded parallel without listing artifacts."""
+
+        numbers = tuple(sorted(bill_numbers))
+        if len(numbers) != len(set(numbers)):
+            raise ValueError("bill discovery numbers must be unique")
+        if not numbers:
+            return ()
+        if len(numbers) == 1 or self._page_read_concurrency == 1:
+            values = tuple(
+                self.get_bill_discovery(research_id, number) for number in numbers
+            )
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(self._page_read_concurrency, len(numbers)),
+                thread_name_prefix="kbd-bill-read",
+            ) as executor:
+                values = tuple(
+                    executor.map(
+                        lambda number: self.get_bill_discovery(
+                            research_id, number
+                        ),
+                        numbers,
+                    )
+                )
+        return tuple(value for value in values if value is not None)
+
     def bill_discoveries(
         self, research_id: str
     ) -> tuple[BillDocumentDiscovery, ...]:
@@ -290,7 +377,10 @@ class ArtifactResearchRunStore:
         discovery = self.get_discovery(research_id)
         if discovery is None or state.discovery != discovery:
             raise ValueError("metadata does not bind to the stored discovery")
-        stored_bill_discoveries = self.bill_discoveries(research_id)
+        stored_bill_discoveries = self.bill_discoveries_for(
+            research_id,
+            discovery.document_bill_numbers,
+        )
         if state.manifest.bill_discoveries != stored_bill_discoveries:
             raise ValueError("metadata manifest does not bind to bill discoveries")
         return self._put_fixed(

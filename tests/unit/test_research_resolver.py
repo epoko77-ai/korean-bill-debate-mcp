@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import kasm.research.resolver as resolver_module
 from kasm.research.collector import CollectionCoverage, MetadataCollection
 from kasm.research.planner import plan_research
 from kasm.research.resolver import (
@@ -168,6 +169,37 @@ def test_recent_ai_resolves_every_relevant_candidate_without_top_n_truncation() 
     ]
     assert forward.bills.to_dict() == reverse.bills.to_dict()
     assert forward.bills.rejection_reason_counts == (("below_minimum_score", 3),)
+
+
+def test_resolver_evaluates_each_candidate_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = plan_research("최근 AI 입법", as_of=AS_OF)
+    metadata = collection(
+        bills=[
+            {
+                "BILL_NO": f"{2210000 + number:07d}",
+                "BILL_NAME": (
+                    "인공지능 안전법안" if number == 1 else "민법 일부개정법률안"
+                ),
+            }
+            for number in range(1, 4)
+        ]
+    )
+    original = resolver_module.evaluate_candidate
+    calls = 0
+
+    def counted(candidate, criteria):
+        nonlocal calls
+        calls += 1
+        return original(candidate, criteria)
+
+    monkeypatch.setattr(resolver_module, "evaluate_candidate", counted)
+
+    resolved = resolve_metadata_candidates(plan, metadata)
+
+    assert resolved.bills.total_candidates == 3
+    assert calls == 3
 
 
 def test_threshold_rejections_preserve_partial_match_reason_and_score() -> None:

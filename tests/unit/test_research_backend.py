@@ -275,13 +275,24 @@ def test_status_uses_bounded_store_view_without_exhaustive_derivation(tmp_path) 
         def derive_status(self, research_id: str):
             raise AssertionError("bounded status must not scan run artifacts")
 
-    result = backend(tmp_path, BoundedEngine()).get_research_status("research_1")
+    research = backend(tmp_path, BoundedEngine())
+    result = research.get_research_status("research_1")
 
     assert result["status"] == "running"
     assert result["stage"] == "documents"
     assert result["work"]["metadata_pages_complete"] == 7
     assert result["work"]["documents_complete"] == 0
     assert result["work"]["snapshot_ready"] is False
+
+    # Early/optimistic tool calls must report the same compact checkpoint.
+    # Falling back to exhaustive derive_status here would rescan every hosted
+    # metadata page merely to construct a not-ready error.
+    with pytest.raises(RuntimeError, match="현재 단계: documents"):
+        research.get_research_overview("research_1")
+    with pytest.raises(RuntimeError, match="현재 단계: documents"):
+        research.get_research_page("research_1")
+    with pytest.raises(RuntimeError, match="현재 단계: documents"):
+        research.get_evidence_document("research_1", "missing")
 
 
 def test_pages_index_large_evidence_without_sending_a_false_preview(tmp_path) -> None:

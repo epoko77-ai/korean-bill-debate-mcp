@@ -410,6 +410,53 @@ def test_every_run_stage_survives_restart_and_preserves_120k_text(tmp_path: Path
     )
 
 
+def test_single_bill_discovery_read_never_lists_sibling_artifacts(tmp_path: Path) -> None:
+    state = _fixture()
+    artifacts = CountingFilesystemStore(tmp_path)
+    store = ArtifactResearchRunStore(artifacts, now=lambda: state.now[0])
+    research_id = state.gateway.job.id
+    store.put_gateway(research_id, state.gateway)
+    store.put_discovery(research_id, state.discovery)
+    store.put_bill_discovery(research_id, state.bill_discovery)
+    artifacts.reset_counts()
+
+    restored = store.get_bill_discovery(research_id, state.bill_discovery.bill_number)
+
+    assert restored == state.bill_discovery
+    assert artifacts.list_calls == 0
+    assert artifacts.read_calls == 0
+    assert artifacts.logical_read_calls == 1
+
+
+def test_single_metadata_page_read_never_scans_partition(tmp_path: Path) -> None:
+    state = _fixture()
+    artifacts = CountingFilesystemStore(tmp_path)
+    store = ArtifactResearchRunStore(artifacts, now=lambda: state.now[0])
+    research_id = state.gateway.job.id
+    partition = state.gateway.discovery_partitions[0]
+    expected = _page(partition)
+    store.put_gateway(research_id, state.gateway)
+    store.put_page(
+        research_id,
+        MetadataPhase.DISCOVERY,
+        partition.partition_id,
+        expected,
+    )
+    artifacts.reset_counts()
+
+    restored = store.get_page(
+        research_id,
+        MetadataPhase.DISCOVERY,
+        partition.partition_id,
+        1,
+    )
+
+    assert restored == expected
+    assert artifacts.list_calls == 0
+    assert artifacts.read_calls == 0
+    assert artifacts.logical_read_calls == 1
+
+
 def test_snapshot_summary_hot_read_does_not_load_the_large_snapshot(tmp_path: Path) -> None:
     state = _fixture()
     artifacts = CountingFilesystemStore(tmp_path)

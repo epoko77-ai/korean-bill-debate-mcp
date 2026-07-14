@@ -152,7 +152,7 @@ class DurableResearchBackend:
 
         discovery = self.engine.runs.get_discovery(research_id)
         if discovery is None:
-            status = self.engine.derive_status(research_id)
+            status = self._derived_status(research_id)
             raise RuntimeError(
                 "조사 자료 지도가 아직 준비되지 않았습니다. "
                 f"현재 단계: {status.stage}"
@@ -207,7 +207,7 @@ class DurableResearchBackend:
         # A result page is published only after every compact index shard is
         # durable.  Keep the error stage-specific instead of loading the giant
         # source-text snapshot as a hidden slow-path.
-        status = self.engine.derive_status(research_id)
+        status = self._derived_status(research_id)
         raise RuntimeError(
             f"조사 결과 인덱스가 아직 준비되지 않았습니다. 현재 단계: {status.stage}"
         )
@@ -227,7 +227,7 @@ class DurableResearchBackend:
             raise ValueError("scope must be selected, core, or all")
         evidence = self.engine.runs.get_evidence_index_entry(research_id, evidence_id)
         if evidence is None:
-            status = self.engine.derive_status(research_id)
+            status = self._derived_status(research_id)
             raise RuntimeError(
                 f"조사 결과 인덱스가 아직 준비되지 않았습니다. 현재 단계: {status.stage}"
             )
@@ -252,12 +252,36 @@ class DurableResearchBackend:
             evidence_id,
             _evidence_record_page(
                 research_id,
-                _required_overflow_evidence(self.engine, research_id, evidence_id),
+                self._required_overflow_evidence(research_id, evidence_id),
                 cursor=cursor,
                 max_characters=max_characters,
             ),
             scope=scope,
         )
+
+    def _derived_status(self, research_id: str) -> DerivedResearchStatus:
+        """Prefer constant-read hosted checkpoints on every status/error path."""
+
+        if isinstance(self.engine.runs, _BoundedStatusRunStore):
+            bounded = self.engine.runs.get_status_view(research_id)
+            if bounded is not None:
+                return bounded.derived
+        return self.engine.derive_status(research_id)
+
+    def _required_overflow_evidence(
+        self,
+        research_id: str,
+        evidence_id: str,
+    ) -> EvidenceRecord:
+        evidence = self.engine.runs.get_overflow_evidence_record(
+            research_id, evidence_id
+        )
+        if evidence is None:
+            status = self._derived_status(research_id)
+            raise RuntimeError(
+                f"조사가 아직 완료되지 않았습니다. 현재 단계: {status.stage}"
+            )
+        return evidence
 
     def _with_evidence_progress(
         self,
@@ -363,18 +387,6 @@ def _optional_date(value: str | None, name: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         raise ValueError(f"{name} must be an ISO date (YYYY-MM-DD)") from None
-
-
-def _required_overflow_evidence(
-    engine: ResearchEngine,
-    research_id: str,
-    evidence_id: str,
-) -> EvidenceRecord:
-    evidence = engine.runs.get_overflow_evidence_record(research_id, evidence_id)
-    if evidence is None:
-        status = engine.derive_status(research_id)
-        raise RuntimeError(f"조사가 아직 완료되지 않았습니다. 현재 단계: {status.stage}")
-    return evidence
 
 
 def _derived_payload(status: DerivedResearchStatus) -> dict[str, int | bool]:

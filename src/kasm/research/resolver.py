@@ -20,7 +20,7 @@ from .relevance import (
     RelevanceCriteria,
     RelevanceResult,
     evaluate_candidate,
-    rank_candidates,
+    rank_relevance_results,
 )
 
 
@@ -305,18 +305,25 @@ def _resolve_set(
     original_by_id = {
         candidate_id: original for candidate_id, original, _scored in prepared
     }
-    scored_candidates = tuple(scored for _candidate_id, _original, scored in prepared)
+    evaluated = tuple(
+        evaluate_candidate(scored, criteria)
+        for _candidate_id, _original, scored in prepared
+    )
+    if any(
+        result.candidate_id != candidate_id
+        for (candidate_id, _original, _scored), result in zip(
+            prepared, evaluated, strict=True
+        )
+    ):
+        raise ValueError("relevance result identity does not match its candidate")
 
-    ranked = rank_candidates(scored_candidates, criteria)
+    ranked = rank_relevance_results(evaluated)
     decision_by_id = {
-        result.candidate_id: _decision(kind, original_by_id[result.candidate_id], result)
-        for result in ranked
+        result.candidate_id: _decision(
+            kind, original_by_id[result.candidate_id], result
+        )
+        for result in evaluated
     }
-    for candidate_id, original, scored in prepared:
-        if candidate_id in decision_by_id:
-            continue
-        result = evaluate_candidate(scored, criteria)
-        decision_by_id[candidate_id] = _decision(kind, original, result)
 
     decisions = tuple(decision_by_id[key] for key in sorted(decision_by_id))
     accepted = tuple(decision_by_id[result.candidate_id] for result in ranked)

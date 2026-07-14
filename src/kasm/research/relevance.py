@@ -22,6 +22,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Final
 
 from kasm.search.terminology import (
@@ -49,7 +50,9 @@ _GENERIC_TERMS: Final = frozenset(
         "결과",
         "검색",
         "개선",
+        "공식",
         "국회",
+        "기준",
         "내용",
         "대상",
         "대책",
@@ -78,7 +81,11 @@ _GENERIC_TERMS: Final = frozenset(
         "정리",
         "지원",
         "조사",
+        "조사해",
+        "조사해줘",
+        "조사해주세요",
         "조회",
+        "주세요",
         "최근",
         "처리",
         "현재",
@@ -88,6 +95,7 @@ _GENERIC_TERMS: Final = frozenset(
         "보여줘",
         "회의",
         "회의록",
+        "위원회",
         "확보",
         "논의",
         "검토보고서",
@@ -316,14 +324,33 @@ class _CandidateText:
     body: str
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedCriteria:
+    bill_numbers: frozenset[str]
+    statutes: tuple[str, ...]
+    issues: tuple[str, ...]
+    related_statutes: tuple[str, ...]
+    related_issues: tuple[str, ...]
+
+    @property
+    def meaningful(self) -> bool:
+        return bool(
+            self.statutes
+            or self.issues
+            or self.related_statutes
+            or self.related_issues
+        )
+
+
 def evaluate_candidate(
     candidate: Mapping[str, object], criteria: RelevanceCriteria
 ) -> RelevanceResult:
     """Evaluate one candidate, applying structured filters before text scoring."""
 
     candidate_id = _candidate_id(candidate)
-    bill_numbers = _candidate_bill_numbers(candidate)
-    requested_numbers = set(criteria.bill_numbers)
+    prepared = _prepare_criteria(criteria)
+    requested_numbers = prepared.bill_numbers
+    bill_numbers = _candidate_bill_numbers(candidate) if requested_numbers else set()
     if requested_numbers and requested_numbers.isdisjoint(bill_numbers):
         return _rejected(candidate, candidate_id, "bill_no_mismatch")
 
@@ -331,9 +358,14 @@ def evaluate_candidate(
     if criteria.committees and matched_committee is None:
         return _rejected(candidate, candidate_id, "committee_mismatch")
 
-    candidate_dates = _candidate_dates(candidate)
-    matched_date = _matching_date(candidate_dates, criteria.date_from, criteria.date_to)
-    if (criteria.date_from or criteria.date_to) and matched_date is None:
+    has_date_scope = bool(criteria.date_from or criteria.date_to)
+    candidate_dates = _candidate_dates(candidate) if has_date_scope else ()
+    matched_date = (
+        _matching_date(candidate_dates, criteria.date_from, criteria.date_to)
+        if has_date_scope
+        else None
+    )
+    if has_date_scope and matched_date is None:
         reason = "date_missing" if not candidate_dates else "date_out_of_range"
         return _rejected(candidate, candidate_id, reason)
 
@@ -346,32 +378,28 @@ def evaluate_candidate(
 
     if matched_committee is not None:
         reasons.append(f"committee_exact:{matched_committee}")
-    if matched_date is not None and (criteria.date_from or criteria.date_to):
+    if matched_date is not None and has_date_scope:
         reasons.append(f"date_in_range:{matched_date.isoformat()}")
 
     texts = _candidate_text(candidate)
-    statutes = _meaningful_terms(criteria.statute_terms)
-    issues = _meaningful_terms(criteria.issue_terms)
-    related_statutes = _nonoverlapping_related(
-        _meaningful_terms(criteria.related_statute_terms), (*statutes, *issues)
-    )
-    related_issues = _nonoverlapping_related(
-        _meaningful_terms(criteria.related_issue_terms), (*statutes, *issues)
-    )
     for kind, terms, weights in (
         # A direct reviewed concept must outrank any combination of merely
         # related concepts.  This prevents a document mentioning both a nearby
         # statute and a neighboring issue from displacing an exact user term.
-        ("statute", statutes, {"title": 36, "agenda": 40, "body": 24}),
-        ("issue", issues, {"title": 30, "agenda": 34, "body": 22}),
+        (
+            "statute",
+            prepared.statutes,
+            {"title": 36, "agenda": 40, "body": 24},
+        ),
+        ("issue", prepared.issues, {"title": 30, "agenda": 34, "body": 22}),
         (
             "related_statute",
-            related_statutes,
+            prepared.related_statutes,
             {"title": 12, "agenda": 14, "body": 6},
         ),
         (
             "related_issue",
-            related_issues,
+            prepared.related_issues,
             {"title": 11, "agenda": 13, "body": 5},
         ),
     ):
@@ -384,16 +412,17 @@ def evaluate_candidate(
 
     # Bill-number lookup is itself conclusive.  All other searches require at
     # least one non-generic term and must clear the configured threshold.
-    meaningful = bool(statutes or issues or related_statutes or related_issues)
     if requested_numbers:
         relevant = score >= 100
-    elif not meaningful and (matched_committee is not None or matched_date is not None):
+    elif not prepared.meaningful and (
+        matched_committee is not None or matched_date is not None
+    ):
         # A topic-free structured request such as "법사위의 올해 회의록" is
         # intentionally exhaustive inside its hard committee/date scope.
         score = criteria.minimum_score
         reasons.append("structured_scope_only")
         relevant = True
-    elif not meaningful:
+    elif not prepared.meaningful:
         return RelevanceResult(
             candidate=candidate,
             candidate_id=candidate_id,
@@ -416,14 +445,48 @@ def evaluate_candidate(
     )
 
 
+@lru_cache(maxsize=256)
+def _prepare_criteria(criteria: RelevanceCriteria) -> _PreparedCriteria:
+    """Normalize immutable query terms once for every candidate universe."""
+
+    statutes = _meaningful_terms(criteria.statute_terms)
+    issues = _meaningful_terms(criteria.issue_terms)
+    return _PreparedCriteria(
+        bill_numbers=frozenset(criteria.bill_numbers),
+        statutes=statutes,
+        issues=issues,
+        related_statutes=_nonoverlapping_related(
+            _meaningful_terms(criteria.related_statute_terms),
+            (*statutes, *issues),
+        ),
+        related_issues=_nonoverlapping_related(
+            _meaningful_terms(criteria.related_issue_terms),
+            (*statutes, *issues),
+        ),
+    )
+
+
 def rank_candidates(
     candidates: Iterable[Mapping[str, object]], criteria: RelevanceCriteria
 ) -> tuple[RelevanceResult, ...]:
     """Return relevant candidates in a deterministic, evidence-first order."""
 
-    results = (evaluate_candidate(candidate, criteria) for candidate in candidates)
-    relevant = (result for result in results if result.relevant)
-    return tuple(sorted(relevant, key=_result_sort_key))
+    return rank_relevance_results(
+        evaluate_candidate(candidate, criteria) for candidate in candidates
+    )
+
+
+def rank_relevance_results(
+    results: Iterable[RelevanceResult],
+) -> tuple[RelevanceResult, ...]:
+    """Rank already-evaluated relevant results without scoring them again."""
+
+    return tuple(
+        sorted(
+            (result for result in results if result.relevant),
+            key=_result_sort_key,
+        )
+    )
 
 
 def _result_sort_key(result: RelevanceResult) -> tuple[object, ...]:
@@ -697,4 +760,5 @@ __all__ = [
     "RelevanceResult",
     "evaluate_candidate",
     "rank_candidates",
+    "rank_relevance_results",
 ]

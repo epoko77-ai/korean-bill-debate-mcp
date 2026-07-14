@@ -10,7 +10,11 @@ import pytest
 
 from kasm.adapters.korea.bills import BILL_STATUS_DATASET
 from kasm.adapters.korea.client import ApiPage
-from kasm.research.collector import CollectionCoverage, MetadataCollection
+from kasm.research.collector import (
+    CollectionCoverage,
+    MetadataCollection,
+    MetadataPartition,
+)
 from kasm.research.contracts import (
     CoverageLedger,
     EvidenceCoverage,
@@ -487,7 +491,7 @@ def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
     assert Credentials.capability not in public
 
 
-def test_phase_barrier_rechecks_with_unique_attempts_without_per_page_scan(
+def test_phase_barrier_rechecks_with_unique_attempts_and_single_assembly_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     value, queue, _client, _jobs, runs, _finalizer = engine(exact_responder)
@@ -497,14 +501,18 @@ def test_phase_barrier_rechecks_with_unique_attempts_without_per_page_scan(
         as_of=AS_OF,
         evidence_types=(EvidenceType.BILLS,),
     )
-    original = value._phase_complete
+    original = value._try_assemble_collection
     phase_checks: list[MetadataPhase] = []
 
-    def counted_phase_complete(research_id: str, phase: MetadataPhase) -> bool:
+    def counted_assembly(
+        research_id: str,
+        phase: MetadataPhase,
+        partitions: tuple[MetadataPartition, ...],
+    ) -> MetadataCollection | None:
         phase_checks.append(phase)
-        return original(research_id, phase)
+        return original(research_id, phase, partitions)
 
-    monkeypatch.setattr(value, "_phase_complete", counted_phase_complete)
+    monkeypatch.setattr(value, "_try_assemble_collection", counted_assembly)
 
     process_phase_barrier(value, queue, "discovery", attempt=1)
 
@@ -700,7 +708,9 @@ def test_one_worker_fetches_only_one_page_then_fans_out_every_remaining_page() -
     assert all(dict(task.payload)["expected_total"] == 237 for task in follow_ups)
 
 
-def test_large_page_expansion_is_chained_in_bounded_windows_without_loss() -> None:
+def test_large_page_expansion_is_chained_without_prior_page_rescans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def responder(
         dataset: str,
         number: int,
@@ -718,7 +728,7 @@ def test_large_page_expansion_is_chained_in_bounded_windows_without_loss() -> No
         ]
         return page(dataset, 1, page_size, 1_500, rows)
 
-    value, queue, client, _jobs, _runs, _finalizer = engine(
+    value, queue, client, _jobs, runs, _finalizer = engine(
         responder,
         partition_planner=ReducedPartitionPlanner(),
     )
@@ -729,6 +739,14 @@ def test_large_page_expansion_is_chained_in_bounded_windows_without_loss() -> No
         evidence_types=(EvidenceType.BILLS,),
     )
 
+    def forbidden_scan(
+        _research_id: str,
+        _phase: MetadataPhase,
+        _partition_id: str,
+    ) -> tuple[ApiPage, ...]:
+        raise AssertionError("page work must use its fixed O(1) identity")
+
+    monkeypatch.setattr(runs, "pages", forbidden_scan)
     value.process_metadata_task(queue.tasks[0])
 
     assert len(client.calls) == 1
@@ -958,6 +976,34 @@ def test_exact_status_document_pipeline_completes_and_is_idempotent() -> None:
     assert derived.overview_available is True
     assert derived.documents_expected == 1
     assert derived.documents_complete == 1
+
+
+def test_bill_document_task_uses_single_identity_lookup_not_sibling_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value, queue, _client, _jobs, runs, _finalizer = engine(exact_responder)
+    value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS, EvidenceType.REVIEW_REPORTS),
+    )
+    value.process_metadata_task(task_with(queue, work_kind="metadata_page", page=1))
+    process_phase_barrier(value, queue, "discovery")
+    bill_task = task_with(queue, work_kind="bill_documents")
+    original_scan = runs.bill_discoveries
+
+    def forbidden_scan(_research_id: str) -> tuple[BillDocumentDiscovery, ...]:
+        raise AssertionError("a single bill task must not scan sibling discoveries")
+
+    monkeypatch.setattr(runs, "bill_discoveries", forbidden_scan)
+    first = value.process_metadata_task(bill_task)
+    repeated = value.process_metadata_task(bill_task)
+    monkeypatch.setattr(runs, "bill_discoveries", original_scan)
+
+    assert first == repeated
+    assert isinstance(first, BillDocumentDiscovery)
+    assert first.bill_number == "2219564"
 
 
 def test_document_tasks_use_single_outcome_lookup_and_finalize_barrier_scan(

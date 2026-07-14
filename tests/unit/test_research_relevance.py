@@ -140,6 +140,29 @@ def test_ai_inputs_normalize_to_the_same_specific_issue(query: str) -> None:
     assert ranked[0].match_reasons == ("issue:인공지능@title",)
 
 
+def test_research_instruction_words_do_not_become_policy_subjects() -> None:
+    criteria = RelevanceCriteria.from_query(
+        "2026년 7월 인공지능 관련 법안과 위원회 논의를 "
+        "공식 원문 기준으로 조사해줘"
+    )
+
+    assert criteria.issue_terms == ("인공지능",)
+    assert evaluate_candidate(
+        {
+            "id": "procedural",
+            "name": "위원회 공식 조사 기준 개선 법률안",
+        },
+        criteria,
+    ).relevant is False
+    assert evaluate_candidate(
+        {
+            "id": "ai",
+            "name": "인공지능 산업 진흥에 관한 법률안",
+        },
+        criteria,
+    ).relevant is True
+
+
 def test_related_issue_is_discoverable_but_scored_below_an_equivalent() -> None:
     criteria = RelevanceCriteria.from_query("보완수사권 관련 법안")
     exact = {"id": "exact", "name": "보완수사권 정비 법안"}

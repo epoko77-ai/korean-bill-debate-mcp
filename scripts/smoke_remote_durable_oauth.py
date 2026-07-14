@@ -200,6 +200,7 @@ async def exercise() -> dict[str, object]:
 
             final_overview_verified = False
             exact_bill_verified = False
+            evidence_count = 0
             if status.get("status") in {"complete", "partial"}:
                 overview = _structured(
                     await session.call_tool(
@@ -213,6 +214,9 @@ async def exercise() -> dict[str, object]:
                     or overview.get("substantive_conclusion_available") is not True
                 ):
                     raise RuntimeError("terminal research did not expose its final overview")
+                evidence_count = int(overview.get("evidence_count") or 0)
+                if evidence_count < 1:
+                    raise RuntimeError("terminal research returned an empty evidence overview")
                 final_overview_verified = True
                 expected_bill = os.getenv(
                     "KBD_SMOKE_EXPECT_BILL_NUMBER", "2219564"
@@ -254,6 +258,7 @@ async def exercise() -> dict[str, object]:
         "terminal_status": status.get("status") if status else None,
         "final_overview_verified": final_overview_verified,
         "exact_bill_verified": exact_bill_verified,
+        "evidence_count": evidence_count,
         "passed": True,
     }
 
