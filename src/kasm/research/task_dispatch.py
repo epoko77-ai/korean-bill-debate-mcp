@@ -23,6 +23,7 @@ from .queue import ResearchTask, ResearchTaskStage
 INTERNAL_DISPATCH_PATH = "/_internal/research/dispatch"
 INTERNAL_DISPATCH_SECRET_HEADER = b"x-kbd-internal-secret"
 INTERNAL_DISPATCH_DELIVERY_COUNT_HEADER = b"x-kbd-delivery-count"
+INTERNAL_DISPATCH_RECOVERY_HEADER = b"x-kbd-recovery-dispatch"
 INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER = b"x-kbd-terminal-failure"
 INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE = b"task_retry_budget_exhausted"
 INTERNAL_DISPATCH_ERROR_CLASS_HEADER = b"x-kbd-dispatch-error-class"
@@ -68,11 +69,18 @@ class ResearchTaskDispatcher:
 
     engine: ResearchTaskEngine
 
-    def dispatch(self, task: ResearchTask, *, delivery_count: int) -> None:
-        # The first attempt avoids a remote receipt GET.  A redelivery checks
-        # the generic write-once receipt first so a lost ACK/response never
-        # repeats already-completed work or republishes its child tasks.
-        if delivery_count > 1 and self.engine.task_completed(task):
+    def dispatch(
+        self,
+        task: ResearchTask,
+        *,
+        delivery_count: int,
+        check_receipt: bool = False,
+    ) -> None:
+        # Primary push delivery one avoids a remote receipt GET. Redeliveries
+        # and same-group poll recovery check the generic write-once receipt
+        # first so an ACK loss or mixed-delivery race never repeats already-
+        # completed work or republishes its child tasks.
+        if (check_receipt or delivery_count > 1) and self.engine.task_completed(task):
             return
         if task.stage is ResearchTaskStage.COLLECT_METADATA:
             self.engine.process_metadata_task(task)
@@ -180,6 +188,11 @@ class ResearchTaskDispatchASGI:
         except ValueError:
             await _json_response(send, 400, "invalid_terminal_failure")
             return
+        try:
+            recovery_dispatch = _recovery_dispatch_requested(headers)
+        except ValueError:
+            await _json_response(send, 400, "invalid_recovery_dispatch")
+            return
         if delivery_count > MAX_RESEARCH_TASK_DELIVERIES and not terminal_failure:
             # Once the normal-attempt budget is exhausted, a later delivery may
             # only record/check terminal state.  Never execute the expensive
@@ -207,6 +220,7 @@ class ResearchTaskDispatchASGI:
                     self.dispatcher.dispatch,
                     task,
                     delivery_count=delivery_count,
+                    check_receipt=recovery_dispatch,
                 )
         except Exception as exc:
             _log_dispatch_failure(exc, task, delivery_count)
@@ -281,6 +295,15 @@ def _terminal_failure_requested(
     return True
 
 
+def _recovery_dispatch_requested(headers: dict[bytes, bytes]) -> bool:
+    raw = headers.get(INTERNAL_DISPATCH_RECOVERY_HEADER)
+    if raw is None:
+        return False
+    if raw != b"1":
+        raise ValueError("invalid recovery dispatch marker")
+    return True
+
+
 async def _read_bounded_body(receive: Any, limit: int) -> bytes | None:
     body = bytearray()
     while True:
@@ -342,6 +365,7 @@ __all__ = [
     "INTERNAL_DISPATCH_DELIVERY_COUNT_HEADER",
     "INTERNAL_DISPATCH_ERROR_CLASS_HEADER",
     "INTERNAL_DISPATCH_PERMANENT_TASK_ERROR_CLASS",
+    "INTERNAL_DISPATCH_RECOVERY_HEADER",
     "INTERNAL_DISPATCH_SECRET_HEADER",
     "INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE",
     "INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER",

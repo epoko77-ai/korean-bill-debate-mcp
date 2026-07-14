@@ -13,6 +13,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from kasm import __version__
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -37,6 +39,7 @@ async def exercise() -> None:
         ):
             initialized = await session.initialize()
             assert initialized.serverInfo.name == "Korean Bill & Debate MCP"
+            assert initialized.serverInfo.version == __version__
             tools = await session.list_tools()
             assert len(tools.tools) == 8
             started = time.perf_counter()
@@ -68,6 +71,7 @@ async def exercise() -> None:
             print(
                 {
                     "server": initialized.serverInfo.name,
+                    "version": initialized.serverInfo.version,
                     "tools": len(tools.tools),
                     "bills": len(result["bills"]),
                     "bill_matches": [

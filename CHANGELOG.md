@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.10.0] - 2026-07-14
+## [1.0.0] - 2026-07-14
 
 ### Added
 
@@ -29,7 +29,7 @@
   number, and relevance accounting. Coverage and pagination must both be complete before the tools
   permit a comprehensive claim.
 - Update the local installer, documentation, runtime version, lock file, and GitHub source pin to
-  `v0.10.0`.
+  `v1.0.0`.
 
 ### Fixed
 
@@ -98,7 +98,7 @@
   failing SDK compatibility checks or silently omitting objects beyond the first list page.
 - Treat a bodyless Vercel Queue HTTP 202 as a successful deferred publication, matching the
   official Queue SDK while retaining the task's idempotency identity for safe retries.
-- Align wheel dependency metadata and official-source User-Agent versions with the v0.10 runtime,
+- Align wheel dependency metadata and official-source User-Agent versions with the v1.0 runtime,
   including direct cryptography and MCP 1.28 requirements used by the hosted OAuth path.
 - Advertise every legislative research tool as read-only and non-destructive in MCP metadata, so
   ChatGPT plans and workspaces restricted to read/fetch actions can discover and enable them.
@@ -115,14 +115,14 @@
 
 - The full official-record corpus revision has not yet been built, deployed, and operationally
   verified for the public service. Queries whose universe cannot be proven remain partial with
-  explicit coverage gaps; `v0.10.0` does not claim a complete historical full-text index.
+  explicit coverage gaps; `v1.0.0` does not claim a complete historical full-text index.
 - Claude.ai and ChatGPT production-origin smoke tests cover dynamic registration, PKCE,
   `offline_access` refresh credentials, and the complete 13-tool read-only surface. Client plan
   entitlements, administrator policy, and approved-tool refresh behavior remain external.
-- In-flight artifacts created before the strict `v0.10.0` schema do not yet have a migration path.
+- In-flight artifacts created before the strict `v1.0.0` schema do not yet have a migration path.
   Do not claim zero-downtime resumption of older research jobs.
 
-## [0.9.3] - 2026-07-13
+## [0.9.3] - 2026-07-13 (untagged; included in 1.0.0)
 
 ### Fixed
 

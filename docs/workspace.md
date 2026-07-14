@@ -2,7 +2,7 @@
 
 The workspace is a no-account, bring-your-own-key alpha for people who want an answer without first
 mounting an MCP server in another AI product. It remains a bounded single-request path; the durable
-background research tools added in `v0.10.0` are currently an MCP-only surface.
+background research tools added in `v1.0.0` are currently an MCP-only surface.
 
 ## User flow
 

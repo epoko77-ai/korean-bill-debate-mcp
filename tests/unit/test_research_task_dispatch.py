@@ -13,6 +13,7 @@ from kasm.research.queue import ResearchTask, ResearchTaskStage
 from kasm.research.task_dispatch import (
     INTERNAL_DISPATCH_ERROR_CLASS_HEADER,
     INTERNAL_DISPATCH_PERMANENT_TASK_ERROR_CLASS,
+    INTERNAL_DISPATCH_RECOVERY_HEADER,
     INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE,
     INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER,
     ResearchTaskDispatchASGI,
@@ -297,6 +298,41 @@ def test_redelivery_with_completion_receipt_skips_processing_and_child_publish()
     assert engine.calls == [("metadata", task)]
     assert engine.completion_checks == [task]
     assert engine.completions == [task]
+
+
+def test_recovery_first_delivery_checks_receipt_before_any_work() -> None:
+    engine = _Engine()
+    task = _task(ResearchTaskStage.COLLECT_METADATA)
+    engine.completed_tasks.add(task)
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+
+    status, response, _ = _request(
+        app,
+        json.dumps(task.to_queue_payload()).encode(),
+        extra_headers=((INTERNAL_DISPATCH_RECOVERY_HEADER, b"1"),),
+    )
+
+    assert status == 200
+    assert response == {"ok": True, "stage": "collect_metadata"}
+    assert engine.completion_checks == [task]
+    assert engine.calls == []
+    assert engine.completions == []
+
+
+def test_invalid_recovery_marker_is_rejected_before_receipt_or_work() -> None:
+    engine = _Engine()
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+
+    status, response, _ = _request(
+        app,
+        json.dumps(_task(ResearchTaskStage.FINALIZE).to_queue_payload()).encode(),
+        extra_headers=((INTERNAL_DISPATCH_RECOVERY_HEADER, b"true"),),
+    )
+
+    assert status == 400
+    assert response == {"ok": False, "error": "invalid_recovery_dispatch"}
+    assert engine.completion_checks == []
+    assert engine.calls == []
 
 
 def test_redelivery_receipt_read_failure_is_retryable_and_skips_processing() -> None:

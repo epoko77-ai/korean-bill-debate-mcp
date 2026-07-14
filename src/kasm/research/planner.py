@@ -309,13 +309,44 @@ class ResearchContractPlanner:
         )
         if interpreted_term < 1:
             raise ValueError("assembly_term must be positive")
-        interpreted_terms = _assembly_terms_for_scope(
-            configured_term=interpreted_term,
-            explicit=term_is_explicit,
-            date_from=interpreted_from,
-            date_to=interpreted_to,
-            as_of=observed_at.date(),
+        bill_terms = tuple(sorted({int(number[:2]) for number in bill_numbers}))
+        unsupported_bill_terms = tuple(
+            term for term in bill_terms if term not in DEFAULT_ASSEMBLY_TERM_BOUNDS
         )
+        if unsupported_bill_terms:
+            raise ValueError("bill number belongs to an unsupported Assembly term")
+        if bill_terms:
+            if term_is_explicit and bill_terms != (interpreted_term,):
+                raise ValueError("bill number conflicts with the explicit Assembly term")
+            # The first two digits of an official seven-digit bill number bind
+            # its Assembly term. This exact identity outranks the configured
+            # current-term default and prevents a valid historical bill from
+            # being queried against the wrong AGE partition.
+            if interpreted_from is None and interpreted_to is None:
+                interpreted_terms = _contiguous_supported_terms(bill_terms)
+                term_is_explicit = True
+            else:
+                scoped_terms = _assembly_terms_for_scope(
+                    configured_term=interpreted_term,
+                    explicit=term_is_explicit,
+                    date_from=interpreted_from,
+                    date_to=interpreted_to,
+                    as_of=observed_at.date(),
+                )
+                interpreted_terms = (
+                    scoped_terms
+                    if term_is_explicit
+                    else _contiguous_supported_terms((*scoped_terms, *bill_terms))
+                )
+            interpreted_term = interpreted_terms[-1]
+        else:
+            interpreted_terms = _assembly_terms_for_scope(
+                configured_term=interpreted_term,
+                explicit=term_is_explicit,
+                date_from=interpreted_from,
+                date_to=interpreted_to,
+                as_of=observed_at.date(),
+            )
         # ``assembly_term`` remains the backwards-compatible primary term.  For
         # an unconstrained historical range it is the newest term in the actual
         # collection scope; ``assembly_terms`` is authoritative and lossless.
@@ -394,6 +425,18 @@ def _assembly_terms_for_scope(
     if overlapping:
         return overlapping
     raise ValueError("requested date range does not overlap a supported Assembly term")
+
+
+def _contiguous_supported_terms(values: Sequence[int]) -> tuple[int, ...]:
+    """Fill range gaps while exact partitions remain bound to bill prefixes."""
+
+    selected = tuple(sorted(set(values)))
+    if not selected:
+        raise ValueError("Assembly term scope must not be empty")
+    result = tuple(range(selected[0], selected[-1] + 1))
+    if any(term not in DEFAULT_ASSEMBLY_TERM_BOUNDS for term in result):
+        raise ValueError("Assembly term scope contains an unsupported term")
+    return result
 
 
 def plan_research(

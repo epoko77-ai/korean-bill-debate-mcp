@@ -4,13 +4,14 @@
   "type": "module",
   "scripts": {
     "typecheck:queue": "tsc --noEmit",
-    "test:queue": "node --test tests/node/kbd-research.test.mjs",
+    "test:queue": "node --test tests/node/*.test.mjs",
     "check:queue": "npm run typecheck:queue && npm run test:queue"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
+    "@vercel/oidc": "^3.8.0",
     "@vercel/queue": "0.3.1"
   },
   "devDependencies": {

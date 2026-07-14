@@ -10,8 +10,9 @@ from typing import Any
 
 import pytest
 
-from kasm.adapters.korea.bills import BILL_STATUS_DATASET
+from kasm.adapters.korea.bills import BILL_DATASET, BILL_STATUS_DATASET
 from kasm.adapters.korea.client import ApiPage
+from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
 from kasm.research.collector import (
     CollectionCoverage,
     MetadataCollection,
@@ -231,6 +232,30 @@ class ManyBillDocuments(BillDocuments):
         )
 
 
+class CompleteExactBillDocuments(BillDocuments):
+    def discover_one(self, plan: ResearchPlan, bill: Any) -> BillDocumentDiscovery:
+        assert plan.contract.query
+        number = str(bill.candidate["BILL_NO"])
+        self.bills.append(number)
+        return BillDocumentDiscovery(
+            number,
+            (
+                DocumentWorkItem.create(
+                    OfficialDocumentKind.BILL_TEXT,
+                    f"https://likms.assembly.go.kr/bill/original.pdf?id={number}",
+                    evidence_types=(EvidenceType.BILL_TEXT,),
+                    related_bill_numbers=(number,),
+                ),
+                DocumentWorkItem.create(
+                    OfficialDocumentKind.REVIEW_REPORT,
+                    REVIEW_URL.replace("2219564", number),
+                    evidence_types=(EvidenceType.REVIEW_REPORTS,),
+                    related_bill_numbers=(number,),
+                ),
+            ),
+        )
+
+
 class ManifestReadGuardRunStore(InMemoryResearchRunStore):
     """Fail when an engine hot path falls back to a full run manifest."""
 
@@ -306,6 +331,51 @@ class TransientThenWorker(Worker):
         if self.attempts == 1:
             raise TransientDocumentError("temporary upstream timeout", code="network_error")
         return super().process(kind, official_url, refresh=refresh)
+
+
+class CompleteExactWorker(Worker):
+    def process(
+        self,
+        kind: OfficialDocumentKind,
+        official_url: str,
+        *,
+        refresh: bool = False,
+    ) -> DocumentWorkResult:
+        if kind is not OfficialDocumentKind.MINUTES:
+            return super().process(kind, official_url, refresh=refresh)
+        assert refresh is False
+        self.calls.append((kind, official_url))
+        document = ParsedOfficialDocument(
+            kind=kind,
+            official_url=official_url,
+            source_hash="e" * 64,
+            parser_version="test-parser-v1",
+            parsed_at=AS_OF,
+            segments=(
+                TextSegment(
+                    "p.1",
+                    (
+                        "1. 형사소송법 일부개정법률안\n"
+                        "○김철수 위원: 보완수사권 통제 방안에 대한 정부 입장은 무엇입니까?\n"
+                        "○박영희 장관: 사후 통제 절차를 함께 두겠습니다."
+                    ),
+                ),
+            ),
+        )
+        return DocumentWorkResult(
+            kind=kind,
+            official_url=official_url,
+            parser_version=document.parser_version,
+            byte_count=len(document.full_text.encode()),
+            page_count=1,
+            character_count=len(document.full_text),
+            source_hash=document.source_hash,
+            text_hash=document.text_hash,
+            cache_hit=False,
+            raw_object_key="official/raw/minutes",
+            parsed_object_key="official/parsed/minutes.json",
+            document=document,
+        )
 
 
 class Finalizer:
@@ -528,6 +598,166 @@ def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
     public = repr(receipt.to_dict())
     assert "private-user-key" not in public
     assert Credentials.capability not in public
+
+
+def test_exact_identifier_gateway_replaces_56_way_scan_with_seven_bounded_tasks() -> None:
+    value, queue, client, _jobs, runs, _finalizer = engine(exact_responder)
+
+    receipt = value.gateway(
+        "2219564 법안 상태·회의록·검토보고서",
+        assembly_api_key="private-user-key",
+        as_of=AS_OF,
+    )
+
+    assert client.calls == []
+    assert receipt.metadata_task_count == 7
+    gateway = runs.get_gateway(receipt.research_id)
+    assert gateway is not None
+    meeting_partitions = tuple(
+        partition
+        for partition in gateway.discovery_partitions
+        if partition.kind.value == "meeting"
+    )
+    assert len(meeting_partitions) == 6
+    assert all(
+        partition.parameters_dict().get("SUB_NAME") == "2219564"
+        for partition in meeting_partitions
+    )
+    assert {
+        partition.parameters_dict().get("CONF_DATE")
+        for partition in meeting_partitions
+    } == {"2024", "2025", "2026"}
+    coordinator = task_with(queue, work_kind="discovery_fanout")
+    assert dict(coordinator.payload)["stop"] == 7
+
+
+def test_exact_fast_path_produces_overview_and_terminal_result_with_bounded_work() -> None:
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        if dataset == BILL_DATASET:
+            assert parameters == {"AGE": 22, "BILL_NO": "2219564"}
+            rows = [
+                {
+                    "BILL_NO": "2219564",
+                    "BILL_ID": "PRC_EXACT",
+                    "BILL_NAME": "형사소송법 일부개정법률안",
+                    "AGE": 22,
+                    "PROPOSE_DT": "2026-06-26",
+                }
+            ]
+        elif dataset == BILL_STATUS_DATASET:
+            assert parameters == {"AGE": 22, "BILL_NO": "2219564"}
+            rows = [
+                {
+                    "BILL_NO": "2219564",
+                    "AGE": 22,
+                    "PROC_RESULT": "위원회 심사",
+                }
+            ]
+        elif dataset == DATASET_BY_SOURCE[MeetingSource.PLENARY]:
+            assert parameters == {
+                "DAE_NUM": 22,
+                "CONF_DATE": "2026",
+                "SUB_NAME": "2219564",
+            }
+            rows = []
+        else:
+            assert dataset == DATASET_BY_SOURCE[MeetingSource.COMMITTEE]
+            assert parameters == {
+                "DAE_NUM": 22,
+                "CONF_DATE": "2026",
+                "SUB_NAME": "2219564",
+            }
+            # Even if the upstream filter over-returns a same-title neighbor,
+            # the exact resolver gate must keep only the requested identifier.
+            rows = [
+                {
+                    "DAE_NUM": 22,
+                    "CONF_ID": "exact-meeting",
+                    "CONF_DATE": "2026-07-08",
+                    "COMM_NAME": "법제사법위원회",
+                    "TITLE": "제22대 법제사법위원회 제1차 회의",
+                    "SUB_NAME": (
+                        "형사소송법 일부개정법률안(의안번호 2219564)"
+                    ),
+                    "PDF_LINK_URL": "https://record.assembly.go.kr/exact.pdf",
+                },
+                {
+                    "DAE_NUM": 22,
+                    "CONF_ID": "wrong-meeting",
+                    "CONF_DATE": "2026-07-08",
+                    "COMM_NAME": "법제사법위원회",
+                    "TITLE": "제22대 법제사법위원회 제2차 회의",
+                    "SUB_NAME": (
+                        "형사소송법 일부개정법률안(의안번호 2219614)"
+                    ),
+                    "PDF_LINK_URL": "https://record.assembly.go.kr/wrong.pdf",
+                },
+            ]
+        return page(dataset, number, page_size, len(rows), rows)
+
+    documents = CompleteExactBillDocuments()
+    worker = CompleteExactWorker()
+    value, queue, client, jobs, runs, _finalizer = engine(
+        responder,
+        bill_documents=documents,
+        document_worker=worker,
+    )
+    receipt = value.gateway(
+        "2026년 1월부터 현재까지 2219564 법안 상태·회의록·검토보고서",
+        assembly_api_key="private-user-key",
+        as_of=AS_OF,
+    )
+
+    discovery_pages = tuple(
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "metadata_page"
+        and dict(task.payload).get("phase") == "discovery"
+    )
+    assert receipt.metadata_task_count == len(discovery_pages) == 3
+    for task in discovery_pages:
+        value.process_metadata_task(task)
+    process_phase_barrier(value, queue, "discovery")
+
+    discovery = runs.get_discovery(receipt.research_id)
+    assert discovery is not None
+    assert [
+        item.candidate_id for item in discovery.resolution.meetings.accepted
+    ] == ["meeting:https://record.assembly.go.kr/exact.pdf"]
+    wrong = next(
+        item
+        for item in discovery.resolution.meetings.decisions
+        if item.candidate_id == "meeting:https://record.assembly.go.kr/wrong.pdf"
+    )
+    assert wrong.rejection_reasons == ("bill_no_mismatch",)
+    first = value.derive_status(receipt.research_id)
+    assert first.overview_available is True
+    assert first.stage == "deferred_metadata"
+
+    for task in tuple(queue.tasks):
+        payload = dict(task.payload)
+        if payload.get("phase") == "bill_status" or payload.get("work_kind") == (
+            "bill_documents"
+        ):
+            value.process_metadata_task(task)
+    process_phase_barrier(value, queue, "bill_status")
+    for task in tuple(queue.tasks):
+        if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT:
+            value.process_document_task(task)
+    process_finalize_barrier(value, queue)
+
+    snapshot = runs.get_snapshot(receipt.research_id)
+    assert snapshot is not None and snapshot.coverage.complete
+    assert jobs.get(receipt.research_id).status is JobStatus.COMPLETE  # type: ignore[union-attr]
+    assert len(client.calls) == 4
+    assert documents.bills == ["2219564"]
+    assert len(worker.calls) == 3
 
 
 def test_phase_barrier_rechecks_with_unique_attempts_and_single_assembly_pass(

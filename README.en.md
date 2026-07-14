@@ -1,6 +1,6 @@
 # Korean Bill & Debate MCP
 
-Current version: `v0.10.0`
+Current version: `v1.0.0`
 
 [한국어](README.md) · [MCP setup guide](docs/mcp-clients.md) ·
 [Data sources](docs/data-sources.md) · [Architecture](docs/architecture.md)
@@ -24,7 +24,7 @@ subcommittee negotiation records and committee expert review reports.
 ![One bill connected to its text, status, subcommittee minutes, expert review, and lawmakers' Q&A](assets/english-thumbnail-v1.png)
 
 The no-account web workspace is still a Korean-language, single-request alpha. The durable
-background workflow in `v0.10.0` is available through the MCP surface first. English users should
+background workflow in `v1.0.0` is available through the MCP surface first. English users should
 use the MCP connection below while the workspace workflow and credential boundary are validated.
 
 ## Ask in English, verify the Korean official record
@@ -116,7 +116,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #### 2. Install the pinned GitHub release
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.10.0
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.0.0
 ```
 
 #### 3. Run one command for the client you use
@@ -168,7 +168,7 @@ natural-language question
   → answer-ready evidence with official URLs and source locators
 ```
 
-For broad research, `v0.10.0` returns a `research_id` immediately, then guides the client through
+For broad research, `v1.0.0` returns a `research_id` immediately, then guides the client through
 status polling, a complete paginated bill/meeting/document map, prioritized core sources, and any
 additional sources selected by the user. Only an explicit exhaustive request walks the entire
 evidence index with `exhaustive=true` and every long source range. Long text is not replaced by a
@@ -178,7 +178,7 @@ In local mode, SQLite is a private cache rather than a bundled source database. 
 ephemeral cache storage. Current bill status is refreshed from the official status API. See the
 [Korean README](README.md) and [client guide](docs/mcp-clients.md).
 
-### Current `v0.10.0` limits
+### Current `v1.0.0` limits
 
 The optional revision-bound corpus path exists in code, but a complete official-record corpus has
 not yet been built, deployed, and operationally verified for the public service. If the configured

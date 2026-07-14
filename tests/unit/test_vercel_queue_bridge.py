@@ -9,14 +9,27 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
     root = Path(__file__).resolve().parents[2]
     config = json.loads((root / "vercel.json").read_text())
 
+    # The project was once detected as the monolithic `python` framework,
+    # which collapsed both Python entrypoints into one large MCP Lambda.  The
+    # generic Functions build must preserve index and worker as independent
+    # cold-start and CPU boundaries.
+    assert config["framework"] is None
+    assert config["outputDirectory"] == "public"
     assert config["regions"] == ["icn1"]
+    excluded = (
+        "{.git/**,.github/**,.venv/**,.uv-cache/**,.mypy_cache/**,.pytest_cache/**,"
+        ".ruff_cache/**,.vercel/**,node_modules/**,assets/**,benchmarks/**,build/**,"
+        "dist/**,docs/**,scripts/**,tests/**}"
+    )
     assert config["functions"]["api/index.py"] == {
         "maxDuration": 300,
         "includeFiles": "src/**",
+        "excludeFiles": excluded,
     }
     assert config["functions"]["api/research_dispatch.py"] == {
         "maxDuration": 300,
         "includeFiles": "src/**",
+        "excludeFiles": excluded,
     }
     queue_function = config["functions"]["api/queues/kbd-research.ts"]
     assert queue_function["maxDuration"] == 300
@@ -29,7 +42,20 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
             "maxConcurrency": 8,
         }
     ]
+    assert config["functions"]["api/queues/kbd-research-recovery.ts"] == {
+        "maxDuration": 300,
+    }
+    assert config["crons"] == [
+        {
+            "path": "/_internal/research/recover",
+            "schedule": "* * * * *",
+        }
+    ]
     assert config["rewrites"] == [
+        {
+            "source": "/_internal/research/recover",
+            "destination": "/api/queues/kbd-research-recovery",
+        },
         {
             "source": "/_internal/research/dispatch",
             "destination": "/api/research_dispatch",

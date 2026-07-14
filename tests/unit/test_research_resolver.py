@@ -63,6 +63,52 @@ def test_explicit_missing_bill_number_fails_closed_before_substitution() -> None
     assert "2219564" in str(raised.value)
 
 
+def test_exact_identifier_meeting_expansion_rejects_same_title_wrong_bill() -> None:
+    plan = plan_research("2219564번 의안 원문과 회의록", as_of=AS_OF)
+    metadata = collection(
+        bills=[
+            {
+                "BILL_NO": "2219564",
+                "BILL_NAME": "형사소송법 일부개정법률안",
+            }
+        ],
+        meetings=[
+            {
+                "PDF_LINK_URL": "https://record.assembly.go.kr/exact.pdf",
+                "agenda_items": [
+                    {
+                        "bill_no": "2219564",
+                        "title": "형사소송법 일부개정법률안",
+                    }
+                ],
+                "agenda_text": "2219564 형사소송법 일부개정법률안",
+            },
+            {
+                "PDF_LINK_URL": "https://record.assembly.go.kr/wrong.pdf",
+                "agenda_items": [
+                    {
+                        "bill_no": "2219614",
+                        "title": "형사소송법 일부개정법률안",
+                    }
+                ],
+                "agenda_text": "2219614 형사소송법 일부개정법률안",
+            },
+        ],
+    )
+
+    resolved = resolve_metadata_candidates(plan, metadata)
+
+    assert [item.candidate_id for item in resolved.meetings.accepted] == [
+        "meeting:https://record.assembly.go.kr/exact.pdf"
+    ]
+    wrong = next(
+        item
+        for item in resolved.meetings.decisions
+        if item.candidate_id == "meeting:https://record.assembly.go.kr/wrong.pdf"
+    )
+    assert wrong.rejection_reasons == ("bill_no_mismatch",)
+
+
 def test_resolves_all_agendas_and_rejects_maritime_false_positive() -> None:
     plan = plan_research("보완수사권 관련 법안과 회의록", as_of=AS_OF)
     metadata = collection(

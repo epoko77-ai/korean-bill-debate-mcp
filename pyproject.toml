@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "korean-bill-debate-mcp"
-version = "0.10.0"
+version = "1.0.0"
 description = "Evidence-linked research across Korean bills, status, debates, and context"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,7 +12,7 @@ license = "Apache-2.0"
 authors = [{ name = "Korean Bill & Debate MCP contributors" }]
 keywords = ["mcp", "korea", "parliament", "national-assembly", "semantic-search"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",

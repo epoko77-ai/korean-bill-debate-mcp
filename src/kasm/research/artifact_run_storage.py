@@ -2048,7 +2048,7 @@ class ArtifactResearchRunStore:
         research_id: str,
         gateway: GatewayPlanState,
     ) -> DiscoveryBoundaryReadiness | None:
-        """Adopt a pre-v0.10 discovery boundary into fixed routing artifacts once."""
+        """Adopt a pre-v1.0 discovery boundary into fixed routing artifacts once."""
 
         readiness = self._get_discovery_readiness(research_id, gateway)
         if readiness is not None:
@@ -2075,7 +2075,7 @@ class ArtifactResearchRunStore:
         research_id: str,
         gateway: GatewayPlanState,
     ) -> DocumentBoundaryReadiness | None:
-        """Adopt a pre-v0.10 metadata boundary without rewriting its old key."""
+        """Adopt a pre-v1.0 metadata boundary without rewriting its old key."""
 
         readiness = self._get_document_readiness(research_id, gateway)
         if readiness is not None:

@@ -3,6 +3,7 @@ import { handleCallback, QueueClient } from "@vercel/queue";
 const INTERNAL_PATH = "/_internal/research/dispatch";
 const SECRET_HEADER = "x-kbd-internal-secret";
 const DELIVERY_COUNT_HEADER = "x-kbd-delivery-count";
+const RECOVERY_DISPATCH_HEADER = "x-kbd-recovery-dispatch";
 const TERMINAL_FAILURE_HEADER = "x-kbd-terminal-failure";
 const TERMINAL_FAILURE_CODE = "task_retry_budget_exhausted";
 const ERROR_CLASS_HEADER = "x-kbd-dispatch-error-class";
@@ -40,7 +41,7 @@ type NodeQueueResponse = {
 
 const nodeQueueClient = new QueueClient();
 
-function currentDeploymentOrigin(request: Request): string {
+export function currentDeploymentOrigin(request: Request): string {
   const deploymentHost = (process.env.VERCEL_URL ?? "").trim();
   if (deploymentHost) {
     if (
@@ -79,7 +80,7 @@ function internalSecret(): string {
   return secret;
 }
 
-function validatedOidcToken(raw: string | null | undefined): string {
+export function validatedOidcToken(raw: string | null | undefined): string {
   const token = raw?.trim() ?? "";
   // Vercel workload identity is a compact JWT. Keep the check deliberately
   // shape-only: the Queue SDK and Vercel Queue API remain the trust boundary.
@@ -112,6 +113,7 @@ async function dispatchMessage(
   oidcToken: string,
   options: {
     terminalFailure?: boolean;
+    recoveryDispatch?: boolean;
     timeoutMs?: number;
   } = {},
 ): Promise<void> {
@@ -139,6 +141,9 @@ async function dispatchMessage(
         [DELIVERY_COUNT_HEADER]: String(deliveryCount),
         ...(options.terminalFailure
           ? { [TERMINAL_FAILURE_HEADER]: TERMINAL_FAILURE_CODE }
+          : {}),
+        ...(options.recoveryDispatch
+          ? { [RECOVERY_DISPATCH_HEADER]: "1" }
           : {}),
         // Python publishes follow-up tasks with this request-local identity.
         // The trusted-source form also supports same-project calls when
@@ -184,11 +189,13 @@ async function dispatchMessage(
   }
 }
 
-async function handleMessage(
+export async function handleMessage(
   message: unknown,
   deploymentOrigin: string,
   deliveryCount: number,
   oidcToken: string,
+  recoveryDispatch = false,
+  dispatchTimeoutMs = DISPATCH_TIMEOUT_MS,
 ): Promise<void> {
   if (deliveryCount > MAX_NORMAL_DELIVERY_ATTEMPTS) {
     // Never repeat the potentially expensive/ambiguous task after its ten
@@ -198,6 +205,7 @@ async function handleMessage(
     try {
       await dispatchMessage(message, deploymentOrigin, deliveryCount, oidcToken, {
         terminalFailure: true,
+        recoveryDispatch,
         timeoutMs: TERMINAL_FAILURE_TIMEOUT_MS,
       });
     } catch (error) {
@@ -217,10 +225,13 @@ async function handleMessage(
   // Attempts 1..10 are normal dispatches only.  Any transient failure is
   // thrown to the Queue SDK and rescheduled; the terminal marker begins on the
   // following delivery, never inside an aborted normal invocation.
-  await dispatchMessage(message, deploymentOrigin, deliveryCount, oidcToken);
+  await dispatchMessage(message, deploymentOrigin, deliveryCount, oidcToken, {
+    recoveryDispatch,
+    timeoutMs: dispatchTimeoutMs,
+  });
 }
 
-function retryDirective(
+export function retryDirective(
   error: unknown,
   metadata: { deliveryCount: number },
 ): { acknowledge: true } | { afterSeconds: number } {

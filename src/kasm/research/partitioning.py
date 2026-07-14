@@ -514,17 +514,30 @@ class ResearchPartitionPlanner:
                     )
                 )
         if needs_meetings:
-            for term_range in term_ranges:
-                planned.extend(
-                    self._meeting_partitions(
-                        term_range.assembly_term,
-                        contract.committees,
-                        term_range.months,
-                        term_range.date_from,
-                        term_range.date_to,
-                        include_plenary=needs_all_minutes,
+            if exact_numbers:
+                for term_range in term_ranges:
+                    planned.extend(
+                        self._exact_bill_meeting_partitions(
+                            term_range.assembly_term,
+                            exact_numbers,
+                            contract.committees,
+                            term_range.date_from,
+                            term_range.date_to,
+                            include_plenary=needs_all_minutes,
+                        )
                     )
-                )
+            else:
+                for term_range in term_ranges:
+                    planned.extend(
+                        self._meeting_partitions(
+                            term_range.assembly_term,
+                            contract.committees,
+                            term_range.months,
+                            term_range.date_from,
+                            term_range.date_to,
+                            include_plenary=needs_all_minutes,
+                        )
+                    )
         planned = _deduplicate_partitions(planned)
 
         source_kinds: list[OfficialSourceKind] = []
@@ -535,12 +548,9 @@ class ResearchPartitionPlanner:
         if needs_meetings:
             if needs_all_minutes:
                 source_kinds.append(OfficialSourceKind.PLENARY_MINUTES)
-            source_kinds.extend(
-                (
-                    OfficialSourceKind.COMMITTEE_MINUTES,
-                    OfficialSourceKind.SUBCOMMITTEE_MINUTES,
-                )
-            )
+            source_kinds.append(OfficialSourceKind.COMMITTEE_MINUTES)
+            if not exact_numbers:
+                source_kinds.append(OfficialSourceKind.SUBCOMMITTEE_MINUTES)
         if needs_reviews:
             source_kinds.extend(
                 (
@@ -617,6 +627,8 @@ class ResearchPartitionPlanner:
         result: list[PlannedMetadataPartition] = []
         if exact_numbers:
             for bill_no in exact_numbers:
+                if int(bill_no[:2]) != assembly_term:
+                    continue
                 result.append(
                     _planned_partition(
                         OfficialSourceKind.BILL_METADATA,
@@ -659,6 +671,75 @@ class ResearchPartitionPlanner:
         # BILL_STATUS intentionally has no BILL_NAME partitions.  That endpoint
         # ignores topic-name filtering; exact candidate numbers are materialized
         # from the deferred requirement after bill discovery and relevance gates.
+        return result
+
+    def _exact_bill_meeting_partitions(
+        self,
+        assembly_term: int,
+        exact_numbers: tuple[str, ...],
+        committees: tuple[str, ...],
+        date_from: date,
+        date_to: date,
+        *,
+        include_plenary: bool,
+    ) -> list[PlannedMetadataPartition]:
+        """Fetch only agenda rows that carry an explicit requested bill number.
+
+        Both minutes endpoints require ``CONF_DATE`` but accept a calendar year,
+        and their ``SUB_NAME`` filter matches the exact seven-digit number in the
+        official agenda label. One query per source/year is therefore complete
+        for an explicit identifier without scanning every month. Committee rows
+        also contain subcommittee agendas, so the unfilterable full-term
+        subcommittee listing is deliberately excluded from this fast path.
+        Every returned row still passes the resolver's independent bill-number
+        gate; an upstream partial/fuzzy match can never substitute another bill.
+        """
+
+        numbers = tuple(
+            number for number in exact_numbers if int(number[:2]) == assembly_term
+        )
+        if not numbers:
+            return []
+        result: list[PlannedMetadataPartition] = []
+        committee_scopes: tuple[str | None, ...] = committees or (None,)
+        for year in range(date_from.year, date_to.year + 1):
+            for bill_no in numbers:
+                base: dict[str, str | int] = {
+                    "DAE_NUM": assembly_term,
+                    "CONF_DATE": str(year),
+                    "SUB_NAME": bill_no,
+                }
+                if include_plenary:
+                    result.append(
+                        _planned_partition(
+                            OfficialSourceKind.PLENARY_MINUTES,
+                            MetadataKind.MEETING,
+                            DATASET_BY_SOURCE[MeetingSource.PLENARY],
+                            base,
+                            self.page_size,
+                            exact_bill_no=bill_no,
+                            local_date_from=date_from,
+                            local_date_to=date_to,
+                            local_committees=committees,
+                        )
+                    )
+                for committee in committee_scopes:
+                    parameters = dict(base)
+                    if committee:
+                        parameters["COMM_NAME"] = committee
+                    result.append(
+                        _planned_partition(
+                            OfficialSourceKind.COMMITTEE_MINUTES,
+                            MetadataKind.MEETING,
+                            DATASET_BY_SOURCE[MeetingSource.COMMITTEE],
+                            parameters,
+                            self.page_size,
+                            exact_bill_no=bill_no,
+                            local_date_from=date_from,
+                            local_date_to=date_to,
+                            local_committees=(committee,) if committee else (),
+                        )
+                    )
         return result
 
     def _meeting_partitions(

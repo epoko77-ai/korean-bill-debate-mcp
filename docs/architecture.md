@@ -1,6 +1,6 @@
 # Architecture
 
-`v0.10.0` has three user-keyed surfaces with deliberately different execution boundaries.
+`v1.0.0` has three user-keyed surfaces with deliberately different execution boundaries.
 
 ```text
 Hosted durable MCP

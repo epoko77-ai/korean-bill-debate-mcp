@@ -319,6 +319,21 @@ def test_ambiguous_request_defaults_to_discovery_and_preserves_original_scope() 
     )
 
 
+def test_exact_bill_number_selects_its_own_assembly_term() -> None:
+    plan = plan_research("2112345 의안 상태와 회의록", as_of=AS_OF)
+
+    assert plan.contract.bill_numbers == ("2112345",)
+    assert plan.contract.assembly_term == 21
+    assert plan.contract.assembly_terms == (21,)
+    assert plan.interpreted_scope.assembly_terms == (21,)
+    assert plan.interpreted_scope.assembly_term_explicit
+
+
+def test_explicit_assembly_term_cannot_conflict_with_exact_bill_number() -> None:
+    with pytest.raises(ValueError, match="bill number.*Assembly term"):
+        plan_research("제22대 국회 2112345 의안", as_of=AS_OF)
+
+
 def test_interpreted_scope_serializes_intent_and_its_query_evidence() -> None:
     scope = plan_research("왜 막혔고 누가 반대했어", as_of=AS_OF).interpreted_scope.to_dict()
 

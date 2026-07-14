@@ -21,7 +21,7 @@ def _plan(query: str, **kwargs):
     return plan_partitions(plan_research(query, as_of=AS_OF, **kwargs), page_size=100)
 
 
-def test_exact_bill_number_is_separate_from_terms_and_all_sources_are_covered() -> None:
+def test_exact_bill_number_uses_bounded_identifier_meeting_expansion() -> None:
     plan = _plan(
         "2026년 1월 1일부터 현재까지 2219564 보완수사권 법안·회의록·검토보고서"
     )
@@ -44,7 +44,14 @@ def test_exact_bill_number_is_separate_from_terms_and_all_sources_are_covered() 
     ]
 
     kinds = {source.kind for source in plan.official_sources}
-    assert kinds == set(OfficialSourceKind)
+    assert kinds == {
+        OfficialSourceKind.BILL_METADATA,
+        OfficialSourceKind.BILL_STATUS,
+        OfficialSourceKind.PLENARY_MINUTES,
+        OfficialSourceKind.COMMITTEE_MINUTES,
+        OfficialSourceKind.REVIEW_REPORT_INDEX,
+        OfficialSourceKind.REVIEW_REPORT_PDF,
+    }
     bill_partitions = [
         item
         for item in plan.planned_partitions
@@ -61,10 +68,30 @@ def test_exact_bill_number_is_separate_from_terms_and_all_sources_are_covered() 
     )
     assert all(item.search_term is None for item in bill_partitions)
 
-    # Seven plenary months + seven committee months + one full-term
-    # subcommittee endpoint, plus the two exact bill partitions.
-    assert plan.coverage.metadata_partition_count == 17
-    assert plan.coverage.meeting_partition_count == 15
+    meeting_partitions = [
+        item
+        for item in plan.planned_partitions
+        if item.partition.kind.value == "meeting"
+    ]
+    assert len(meeting_partitions) == 2
+    assert {
+        tuple(sorted(item.partition.parameters_dict().items()))
+        for item in meeting_partitions
+    } == {
+        (("CONF_DATE", "2026"), ("DAE_NUM", 22), ("SUB_NAME", "2219564")),
+    }
+    assert {item.source for item in meeting_partitions} == {
+        OfficialSourceKind.PLENARY_MINUTES,
+        OfficialSourceKind.COMMITTEE_MINUTES,
+    }
+    # The committee endpoint includes its exact matching subcommittee agenda
+    # rows, so the unfilterable full-term subcommittee listing is unnecessary.
+    assert all(
+        item.source is not OfficialSourceKind.SUBCOMMITTEE_MINUTES
+        for item in plan.planned_partitions
+    )
+    assert plan.coverage.metadata_partition_count == 4
+    assert plan.coverage.meeting_partition_count == 2
     assert plan.coverage.bill_metadata_partition_count == 1
     assert plan.coverage.bill_status_partition_count == 1
     assert plan.coverage.exact_review_bill_count == 1
@@ -81,6 +108,34 @@ def test_exact_bill_number_is_separate_from_terms_and_all_sources_are_covered() 
     assert "BILL_ID" in review_index.required_fields[1]
     assert len(plan.metadata_partitions) == len(
         {partition.partition_id for partition in plan.metadata_partitions}
+    )
+
+
+def test_unbounded_exact_identifier_stays_bounded_without_narrowing_broad_recall() -> None:
+    exact = _plan("2219564 법안 상태·회의록·검토보고서")
+    broad = _plan("보완수사권 쟁점")
+
+    assert exact.coverage.month_bucket_count == 27
+    assert exact.coverage.metadata_partition_count == 8
+    assert exact.coverage.meeting_partition_count == 6
+    assert {
+        item.partition.parameters_dict()["CONF_DATE"]
+        for item in exact.planned_partitions
+        if item.partition.kind.value == "meeting"
+    } == {"2024", "2025", "2026"}
+    assert all(
+        item.partition.parameters_dict().get("SUB_NAME") == "2219564"
+        for item in exact.planned_partitions
+        if item.partition.kind.value == "meeting"
+    )
+
+    # A natural-language scope without an exact identifier retains the full
+    # Assembly-term bill universe and every monthly minutes partition.
+    assert broad.coverage.metadata_partition_count == 56
+    assert broad.coverage.meeting_partition_count == 55
+    assert any(
+        item.source is OfficialSourceKind.SUBCOMMITTEE_MINUTES
+        for item in broad.planned_partitions
     )
 
 

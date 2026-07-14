@@ -1,14 +1,18 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "outputDirectory": "public",
   "regions": ["icn1"],
   "functions": {
     "api/index.py": {
       "maxDuration": 300,
-      "includeFiles": "src/**"
+      "includeFiles": "src/**",
+      "excludeFiles": "{.git/**,.github/**,.venv/**,.uv-cache/**,.mypy_cache/**,.pytest_cache/**,.ruff_cache/**,.vercel/**,node_modules/**,assets/**,benchmarks/**,build/**,dist/**,docs/**,scripts/**,tests/**}"
     },
     "api/research_dispatch.py": {
       "maxDuration": 300,
-      "includeFiles": "src/**"
+      "includeFiles": "src/**",
+      "excludeFiles": "{.git/**,.github/**,.venv/**,.uv-cache/**,.mypy_cache/**,.pytest_cache/**,.ruff_cache/**,.vercel/**,node_modules/**,assets/**,benchmarks/**,build/**,dist/**,docs/**,scripts/**,tests/**}"
     },
     "api/queues/kbd-research.ts": {
       "maxDuration": 300,
@@ -21,9 +25,22 @@
           "maxConcurrency": 8
         }
       ]
+    },
+    "api/queues/kbd-research-recovery.ts": {
+      "maxDuration": 300
     }
   },
+  "crons": [
+    {
+      "path": "/_internal/research/recover",
+      "schedule": "* * * * *"
+    }
+  ],
   "rewrites": [
+    {
+      "source": "/_internal/research/recover",
+      "destination": "/api/queues/kbd-research-recovery"
+    },
     {
       "source": "/_internal/research/dispatch",
       "destination": "/api/research_dispatch"

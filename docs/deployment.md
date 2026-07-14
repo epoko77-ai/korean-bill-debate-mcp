@@ -7,7 +7,7 @@ query cache on the user's machine.
 
 ```bash
 export ASSEMBLY_OPEN_API_KEY='YOUR_KEY'
-uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v0.10.0 kbd mcp
+uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.0.0 kbd mcp
 ```
 
 ## Hosted user-keyed Streamable HTTP
@@ -39,16 +39,29 @@ Before deploying the 13-tool surface:
    `KBD_RESEARCH_CREDENTIAL_SECRET`; when omitted, the remote-token secret is reused.
 3. Set `KBD_INTERNAL_TASK_SECRET` to an independent 32–512 byte printable ASCII secret. It protects
    the queue bridge's same-deployment Python dispatch boundary and must not be a user API key.
-4. Enable Vercel **Secure Backend Access with OIDC** and automatic System Environment Variables.
+4. Set `CRON_SECRET` to another independent 32–512 byte printable ASCII value. The once-per-minute
+   recovery route uses Vercel Queues poll mode to lease work still available in the primary push
+   consumer group. Vercel Pro or Enterprise is required for this cadence; Hobby projects cannot
+   deploy a once-per-minute cron expression.
+5. Enable Vercel **Secure Backend Access with OIDC** and automatic System Environment Variables.
    Runtime requests need the `x-vercel-oidc-token` identity and the application requires the
    system-provided `VERCEL_DEPLOYMENT_ID` to keep queue messages deployment-bound. The queue bridge
    uses the system-provided `VERCEL_URL` for its same-deployment internal dispatch target; it never
    trusts an inbound Host header for that secret-bearing request.
-5. Keep the queue topic at `kbd-research`, or change `KBD_RESEARCH_QUEUE_TOPIC` and the
+6. Keep the queue topic at `kbd-research`, or change `KBD_RESEARCH_QUEUE_TOPIC` and the
    `experimentalTriggers[].topic` value in `vercel.json` together.
-6. Allow the production host and the web-client origins in `KASM_ALLOWED_HOSTS` and
+7. Allow the production host and the web-client origins in `KASM_ALLOWED_HOSTS` and
    `KASM_ALLOWED_ORIGINS`. The production smoke must cover both `https://claude.ai` and
    `https://chatgpt.com`.
+
+Push delivery remains the primary path. Poll recovery uses that route's exact auto-derived consumer
+group, `api_Squeues_Skbd-research_Dts`, rather than creating a second group that would receive another
+copy of every task. It is deployment-pinned, leases at most four available messages concurrently,
+and immediately sends each through the same private dispatcher with a mandatory completion-receipt
+check. It processes at most 16 independently bounded messages per cron invocation and never
+collapses a research job into one synchronous operation. Push and recovery races therefore converge
+through the same immutable artifacts, queue idempotency keys, and write-once task receipts without
+adding a receipt lookup to the normal first push delivery.
 
 Do not set `KBD_RESEARCH_CORPUS_REVISION` merely to make the health field true. Set it only to a
 published, complete revision whose readiness marker and referenced objects have been verified. It

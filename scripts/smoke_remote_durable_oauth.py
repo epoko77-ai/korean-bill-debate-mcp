@@ -16,6 +16,7 @@ import os
 import re
 import time
 import urllib.parse
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -28,6 +29,8 @@ from mcp.shared.auth import (
     OAuthToken,
 )
 from pydantic import AnyUrl
+
+from kasm import __version__
 
 EXPECTED_TOOLS = {
     "search_speeches",
@@ -506,7 +509,7 @@ async def exercise() -> dict[str, object]:
     _LAST_RESEARCH_ID = None
     _LAST_STATUS = None
 
-    event_hooks = {
+    event_hooks: dict[str, list[Callable[..., Any]]] = {
         "request": [http_metrics.on_request],
         "response": [http_metrics.on_response],
     }
@@ -582,7 +585,10 @@ async def exercise() -> dict[str, object]:
             ) as streams,
             ClientSession(streams[0], streams[1]) as session,
         ):
-            await session.initialize()
+            initialized = await session.initialize()
+            expected_version = os.getenv("KBD_EXPECTED_VERSION", __version__).strip()
+            if initialized.serverInfo.version != expected_version:
+                raise RuntimeError("deployed MCP server version does not match the release")
             listed_tools = (await session.list_tools()).tools
             names = {tool.name for tool in listed_tools}
             if names != EXPECTED_TOOLS:
@@ -627,31 +633,42 @@ async def exercise() -> dict[str, object]:
                 }
             started = time.perf_counter()
             research_started = started
-            query = os.getenv("KBD_SMOKE_QUERY", "").strip() or (
-                "2219564번 의안의 처리상태, 회의록, 전문위원 검토보고서를 "
-                "공식 원문 기준으로 조사해줘"
-            )
-            research_arguments: dict[str, Any] = {"query": query}
-            raw_assembly_term = os.getenv("KBD_SMOKE_ASSEMBLY_TERM", "22").strip()
-            if raw_assembly_term:
-                research_arguments["assembly_term"] = int(raw_assembly_term)
-            date_from = os.getenv("KBD_SMOKE_DATE_FROM", "").strip()
-            date_to = os.getenv("KBD_SMOKE_DATE_TO", "").strip()
-            if date_from:
-                research_arguments["date_from"] = date_from
-            if date_to:
-                research_arguments["date_to"] = date_to
-            receipt = _structured(
-                await session.call_tool(
+            existing_research_id = os.getenv(
+                "KBD_SMOKE_EXISTING_RESEARCH_ID", ""
+            ).strip()
+            if existing_research_id:
+                if not re.fullmatch(r"research_[0-9a-f]{32}", existing_research_id):
+                    raise RuntimeError("KBD_SMOKE_EXISTING_RESEARCH_ID is invalid")
+                research_id = existing_research_id
+                receipt_seconds = 0.0
+            else:
+                query = os.getenv("KBD_SMOKE_QUERY", "").strip() or (
+                    "2219564번 의안의 처리상태, 회의록, 전문위원 검토보고서를 "
+                    "공식 원문 기준으로 조사해줘"
+                )
+                research_arguments: dict[str, Any] = {"query": query}
+                raw_assembly_term = os.getenv(
+                    "KBD_SMOKE_ASSEMBLY_TERM", "22"
+                ).strip()
+                if raw_assembly_term:
+                    research_arguments["assembly_term"] = int(raw_assembly_term)
+                date_from = os.getenv("KBD_SMOKE_DATE_FROM", "").strip()
+                date_to = os.getenv("KBD_SMOKE_DATE_TO", "").strip()
+                if date_from:
+                    research_arguments["date_from"] = date_from
+                if date_to:
+                    research_arguments["date_to"] = date_to
+                receipt = _structured(
+                    await session.call_tool(
+                        "start_research",
+                        research_arguments,
+                    ),
                     "start_research",
-                    research_arguments,
-                ),
-                "start_research",
-            )
-            receipt_seconds = time.perf_counter() - started
-            research_id = str(receipt.get("research_id") or "")
-            if not research_id or receipt_seconds > 15:
-                raise RuntimeError("durable research receipt was missing or too slow")
+                )
+                receipt_seconds = time.perf_counter() - started
+                research_id = str(receipt.get("research_id") or "")
+                if not research_id or receipt_seconds > 15:
+                    raise RuntimeError("durable research receipt was missing or too slow")
             _LAST_RESEARCH_ID = research_id
 
             status: dict[str, Any] = {}
@@ -817,6 +834,7 @@ async def exercise() -> dict[str, object]:
             "authorization_seconds": round(authorization_seconds, 3),
         },
         "tool_count": len(EXPECTED_TOOLS),
+        "server_version": initialized.serverInfo.version,
         "all_tools_read_only": True,
         "connection_only": False,
         "http": http_metrics.summary(),
