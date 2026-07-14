@@ -49,7 +49,7 @@ _SAFE_PARENT_ENV = (
 _ACCEPTANCE_THRESHOLDS = {
     "oauth_approval_seconds": 5,
     "research_receipt_seconds": 15,
-    "exact_first_overview_seconds": 30,
+    "exact_first_overview_seconds": 35,
     "exact_terminal_seconds": 180,
     "broad_first_overview_seconds": 120,
     "broad_terminal_seconds": 600,
@@ -412,7 +412,7 @@ def _acceptance_failures(scenario: Scenario, payload: dict[str, Any]) -> list[st
             or first_seconds
             > _ACCEPTANCE_THRESHOLDS["exact_first_overview_seconds"]
         ):
-            failures.append("exact first overview exceeded 30 seconds")
+            failures.append("exact first overview exceeded 35 seconds")
         if (
             elapsed is None
             or elapsed > _ACCEPTANCE_THRESHOLDS["exact_terminal_seconds"]

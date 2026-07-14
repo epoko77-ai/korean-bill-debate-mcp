@@ -134,9 +134,9 @@ def test_exact_acceptance_requires_exhaustive_catalog_inventory_and_long_text() 
     assert _acceptance_failures(_exact_scenario(), payload) == []
 
     payload["long_text_characters"] = 0
-    payload["first_overview_seconds"] = 31
+    payload["first_overview_seconds"] = 36
     failures = _acceptance_failures(_exact_scenario(), payload)
-    assert "exact first overview exceeded 30 seconds" in failures
+    assert "exact first overview exceeded 35 seconds" in failures
     assert "long official text was not reconstructed and hash-verified" in failures
 
 

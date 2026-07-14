@@ -600,7 +600,7 @@ def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
     assert Credentials.capability not in public
 
 
-def test_exact_identifier_gateway_replaces_56_way_scan_with_seven_direct_tasks() -> None:
+def test_exact_identifier_gateway_replaces_56_way_scan_with_seven_bounded_tasks() -> None:
     value, queue, client, _jobs, runs, _finalizer = engine(exact_responder)
 
     receipt = value.gateway(
@@ -633,12 +633,15 @@ def test_exact_identifier_gateway_replaces_56_way_scan_with_seven_direct_tasks()
         if dict(task.payload).get("work_kind") == "metadata_page"
         and dict(task.payload).get("phase") == "discovery"
     )
-    assert len(direct) == 7
-    assert not [
+    assert direct == ()
+    coordinators = [
         task
         for task in queue.tasks
         if dict(task.payload).get("work_kind") == "discovery_fanout"
     ]
+    assert len(coordinators) == 1
+    assert dict(coordinators[0].payload)["start"] == 0
+    assert dict(coordinators[0].payload)["stop"] == 7
 
 
 def test_exact_fast_path_produces_overview_and_terminal_result_with_bounded_work() -> None:
