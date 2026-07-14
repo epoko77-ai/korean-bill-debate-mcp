@@ -63,6 +63,11 @@ collapses a research job into one synchronous operation. Push and recovery races
 through the same immutable artifacts, queue idempotency keys, and write-once task receipts without
 adding a receipt lookup to the normal first push delivery.
 
+Both Node entry points import `serverless/kbd-research-shared.mjs`. Keep that deployable JavaScript
+module and its `kbd-research-shared.d.mts` type contract together outside `api/`: importing one
+generated TypeScript function entry from the other leaves no sibling module in Vercel's isolated
+bundle, while placing the shared module under `api/` incorrectly creates a fifth public function.
+
 The hosted defaults publish at most seven page tasks directly from the request; together with the
 delayed phase barrier, an exact investigation seeds no more than eight initial Queue messages. This
 removes a coordinator round trip for the complete seven-part exact-bill plan while preserving the

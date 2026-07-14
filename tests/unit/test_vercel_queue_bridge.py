@@ -9,6 +9,9 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
     root = Path(__file__).resolve().parents[2]
     config = json.loads((root / "vercel.json").read_text())
 
+    assert (root / "serverless/kbd-research-shared.mjs").is_file()
+    assert not (root / "api/queues/kbd-research-shared.mjs").exists()
+
     # The project was once detected as the monolithic `python` framework,
     # which collapsed both Python entrypoints into one large MCP Lambda.  The
     # generic Functions build must preserve index and worker as independent
@@ -66,12 +69,15 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
 
 def test_queue_bridge_never_reads_failure_body_or_logs_task() -> None:
     root = Path(__file__).resolve().parents[2]
-    source = (root / "api/queues/kbd-research.ts").read_text()
+    entry = (root / "api/queues/kbd-research.ts").read_text()
+    shared = (root / "serverless/kbd-research-shared.mjs").read_text()
+    source = entry + shared
 
-    assert 'handleCallback<unknown>' in source
-    assert 'handleNodeCallback<unknown>' in source
-    assert "export default nodeQueueRoute" in source
-    assert 'currentDeploymentOrigin(request)' in source
+    assert 'handleCallback<unknown>' in entry
+    assert 'handleNodeCallback<unknown>' in entry
+    assert "export default nodeQueueRoute" in entry
+    assert 'currentDeploymentOrigin(request)' in entry
+    assert '../../serverless/kbd-research-shared.mjs' in entry
     assert 'new URL(INTERNAL_PATH, deploymentOrigin)' in source
     assert 'response.body?.cancel()' in source
     assert 'const error = `research dispatch failed (${response.status})`' in source

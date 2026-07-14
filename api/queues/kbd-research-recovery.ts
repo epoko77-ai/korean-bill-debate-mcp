@@ -14,7 +14,7 @@ import {
   handleMessage,
   retryDirective,
   validatedOidcToken,
-} from "./kbd-research.ts";
+} from "../../serverless/kbd-research-shared.mjs";
 
 const DEFAULT_TOPIC = "kbd-research";
 // Vercel derives this consumer group from api/queues/kbd-research.ts. Polling

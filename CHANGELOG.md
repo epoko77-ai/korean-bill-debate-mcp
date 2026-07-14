@@ -118,6 +118,8 @@
   to show useful progress without another serverless round trip while full source work continues.
 - Seed the seven-part exact-bill plan directly and reserve the eighth initial Queue message for its
   delayed barrier, removing a measured coordinator hop without exceeding the worker ceiling.
+- Package the push callback and cron recovery bridge through one real JavaScript runtime module so
+  Vercel recovery no longer imports a missing TypeScript function entry after compilation.
 
 ### Known limitations
 

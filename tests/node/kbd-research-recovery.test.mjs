@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 process.env.KBD_INTERNAL_TASK_SECRET = "i".repeat(48);
@@ -18,6 +19,20 @@ const recoveryModule = await import(
 );
 const { GET, runRecovery } = recoveryModule;
 const NODE_HANDLER = recoveryModule.default;
+
+test("recovery imports a deployable shared runtime instead of another TS function", async () => {
+  const source = await readFile(
+    new URL("../../api/queues/kbd-research-recovery.ts", import.meta.url),
+    "utf8",
+  );
+  const shared = await readFile(
+    new URL("../../serverless/kbd-research-shared.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /from "\.\.\/\.\.\/serverless\/kbd-research-shared\.mjs"/);
+  assert.doesNotMatch(source, /from "\.\/kbd-research\.ts"/);
+  assert.match(shared, /export async function handleMessage/);
+});
 
 const TASK = {
   schema_version: 1,
