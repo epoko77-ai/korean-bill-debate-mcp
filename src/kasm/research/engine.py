@@ -1758,7 +1758,7 @@ class ResearchEngine:
         runs: ResearchRunStore,
         status_page_size: int = 100,
         task_retention_seconds: int = 86_400,
-        direct_fanout_limit: int = 4,
+        direct_fanout_limit: int = 8,
         fanout_chunk_size: int = 8,
         fanout_delay_seconds: int = 0,
         corpus_recall_provider: CorpusRecallProvider | None = None,

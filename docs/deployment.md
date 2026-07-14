@@ -63,7 +63,7 @@ collapses a research job into one synchronous operation. Push and recovery races
 through the same immutable artifacts, queue idempotency keys, and write-once task receipts without
 adding a receipt lookup to the normal first push delivery.
 
-The hosted defaults publish at most four tasks directly from the request and let each durable
+The hosted defaults publish at most eight tasks directly from the request and let each durable
 coordinator expose an eight-item window with no artificial inter-window delay. This matches the
 Queue trigger's concurrency ceiling: it removes serial four-item hops without creating unbounded
 fan-out. Override `KBD_RESEARCH_DIRECT_FANOUT_LIMIT`, `KBD_RESEARCH_FANOUT_CHUNK_SIZE`, and

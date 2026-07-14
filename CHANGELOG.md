@@ -116,6 +116,8 @@
   between bounded windows, preserving complete traversal while eliminating serial four-item hops.
 - Inline the bounded first candidate-map page in ready status responses, allowing web MCP clients
   to show useful progress without another serverless round trip while full source work continues.
+- Seed exact investigations directly when their complete initial plan fits the eight-worker Queue
+  ceiling, avoiding an unnecessary coordinator hop while broader plans remain durably chained.
 
 ### Known limitations
 
