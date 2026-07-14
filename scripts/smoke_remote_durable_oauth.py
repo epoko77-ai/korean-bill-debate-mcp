@@ -111,12 +111,20 @@ class HTTPMetrics:
 
 
 _LAST_HTTP_METRICS: HTTPMetrics | None = None
+_LAST_RESEARCH_ID: str | None = None
+_LAST_STATUS: dict[str, Any] | None = None
 
 
 def _safe_failure_message(exc: Exception) -> str:
     """Keep smoke failures useful without ever echoing credentials or one-time codes."""
 
-    value = str(exc)
+    def messages(error: BaseException) -> list[str]:
+        if isinstance(error, BaseExceptionGroup):
+            return [message for item in error.exceptions for message in messages(item)]
+        detail = str(error).strip() or type(error).__name__
+        return [f"{type(error).__name__}: {detail}"]
+
+    value = " | ".join(messages(exc))
     api_key = os.getenv("ASSEMBLY_OPEN_API_KEY", "").strip()
     if api_key and api_key in value:
         return "failure detail contained the Open Assembly credential and was suppressed"
@@ -463,7 +471,7 @@ async def _verify_long_text(
 
 
 async def exercise() -> dict[str, object]:
-    global _LAST_HTTP_METRICS
+    global _LAST_HTTP_METRICS, _LAST_RESEARCH_ID, _LAST_STATUS
 
     base_url = os.getenv(
         "KBD_REMOTE_BASE_URL", "https://korean-bill-debate-mcp.vercel.app"
@@ -495,6 +503,8 @@ async def exercise() -> dict[str, object]:
     storage = MemoryTokenStorage()
     http_metrics = HTTPMetrics()
     _LAST_HTTP_METRICS = http_metrics
+    _LAST_RESEARCH_ID = None
+    _LAST_STATUS = None
 
     event_hooks = {
         "request": [http_metrics.on_request],
@@ -642,6 +652,7 @@ async def exercise() -> dict[str, object]:
             research_id = str(receipt.get("research_id") or "")
             if not research_id or receipt_seconds > 15:
                 raise RuntimeError("durable research receipt was missing or too slow")
+            _LAST_RESEARCH_ID = research_id
 
             status: dict[str, Any] = {}
             deadline = time.monotonic() + wait_seconds
@@ -660,6 +671,7 @@ async def exercise() -> dict[str, object]:
                     ),
                     "get_research_status",
                 )
+                _LAST_STATUS = status
                 status_poll_count += 1
                 slowest_status_seconds = max(
                     slowest_status_seconds,
@@ -850,6 +862,22 @@ def main() -> int:
             "passed": False,
             "error_type": type(exc).__name__,
             "error": _safe_failure_message(exc),
+            "research_id": _LAST_RESEARCH_ID,
+            "last_status": (
+                {
+                    name: _LAST_STATUS.get(name)
+                    for name in (
+                        "status",
+                        "stage",
+                        "progress",
+                        "overview_available",
+                        "overview_phase",
+                        "work",
+                    )
+                }
+                if _LAST_STATUS is not None
+                else None
+            ),
             "http": (
                 _LAST_HTTP_METRICS.summary()
                 if _LAST_HTTP_METRICS is not None

@@ -46,6 +46,9 @@
   messages never execute the expensive task again, and only a durable terminal marker permits an
   acknowledgement. Boundary-proven malformed messages and markers whose run has expired are
   acknowledged idempotently instead of being rescheduled until retention expires.
+- Export the Queue consumer through the SDK's Connect-style Node callback required by a plain
+  Vercel `api/*.ts` function. The previous Web-handler object built successfully but was never
+  invoked by the production trigger, leaving accepted research jobs at zero completed pages.
 - Write independent snapshot text, index, lookup, and overview shards with bounded concurrency,
   keep their manifests behind the completed shard set, and publish the summary as the final sole
   readiness marker. This removes the sequential Blob-write timeout while preserving idempotent

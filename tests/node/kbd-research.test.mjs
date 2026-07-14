@@ -14,7 +14,8 @@ process.env.VERCEL_OIDC_TOKEN = TEST_OIDC_TOKEN;
 
 const queueModule = await import("../../api/queues/kbd-research.ts");
 const { POST } = queueModule;
-const FETCH = queueModule.default.fetch;
+const NODE_HANDLER = queueModule.default;
+const FETCH = POST;
 
 const TASK = {
   schema_version: 1,
@@ -49,6 +50,29 @@ function callbackRequest(deliveryCount) {
       body: JSON.stringify(TASK),
     },
   );
+}
+
+function nodeCallback(deliveryCount) {
+  const request = callbackRequest(deliveryCount);
+  const result = { statusCode: 0, body: null };
+  return {
+    request: {
+      method: "POST",
+      headers: Object.fromEntries(request.headers.entries()),
+      body: TASK,
+    },
+    response: {
+      status(code) {
+        result.statusCode = code;
+        return this;
+      },
+      json(body) {
+        result.body = body;
+      },
+      end() {},
+    },
+    result,
+  };
 }
 
 function installFetch(internalResponses) {
@@ -126,6 +150,29 @@ test("forwards request OIDC identity and acknowledges successful Python work", a
       "header.queue.request.token.value",
     );
     assert.deepEqual(JSON.parse(internal.body), TASK);
+    assert.ok(
+      fake.calls.some(
+        (call) =>
+          call.url.includes("vercel-queue.com") && call.method === "DELETE",
+      ),
+    );
+  } finally {
+    fake.restore();
+  }
+});
+
+test("plain api default export consumes the production Node callback shape", async () => {
+  const fake = installFetch(200);
+  const callback = nodeCallback(1);
+  try {
+    await NODE_HANDLER(callback.request, callback.response);
+    assert.equal(callback.result.statusCode, 200);
+    assert.deepEqual(callback.result.body, { status: "success" });
+    const internal = fake.calls.find((call) =>
+      call.url.endsWith("/_internal/research/dispatch"),
+    );
+    assert.ok(internal);
+    assert.equal(internal.headers.get("x-kbd-delivery-count"), "1");
     assert.ok(
       fake.calls.some(
         (call) =>

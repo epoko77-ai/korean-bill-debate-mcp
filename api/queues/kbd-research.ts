@@ -1,4 +1,4 @@
-import { handleCallback } from "@vercel/queue";
+import { handleCallback, QueueClient } from "@vercel/queue";
 
 const INTERNAL_PATH = "/_internal/research/dispatch";
 const SECRET_HEADER = "x-kbd-internal-secret";
@@ -23,6 +23,22 @@ const MAX_PERMANENT_DELIVERY_ATTEMPTS = 3;
 class PermanentDispatchError extends Error {}
 class AmbiguousDispatchError extends Error {}
 class TerminalFailureDispatchError extends Error {}
+
+type NodeQueueRequest = {
+  method?: string;
+  headers: Record<string, string | string[] | undefined>;
+  body?: unknown;
+};
+
+type NodeQueueResponse = {
+  status(code: number): {
+    json(data: unknown): void;
+    end(): void;
+  };
+  end(): void;
+};
+
+const nodeQueueClient = new QueueClient();
 
 function currentDeploymentOrigin(request: Request): string {
   const deploymentHost = (process.env.VERCEL_URL ?? "").trim();
@@ -63,8 +79,8 @@ function internalSecret(): string {
   return secret;
 }
 
-function requestOidcToken(request: Request): string {
-  const token = request.headers.get(OIDC_HEADER)?.trim() ?? "";
+function validatedOidcToken(raw: string | null | undefined): string {
+  const token = raw?.trim() ?? "";
   // Vercel workload identity is a compact JWT. Keep the check deliberately
   // shape-only: the Queue SDK and Vercel Queue API remain the trust boundary.
   if (
@@ -75,6 +91,18 @@ function requestOidcToken(request: Request): string {
     throw new Error("research dispatch identity is unavailable");
   }
   return token;
+}
+
+function requestOidcToken(request: Request): string {
+  return validatedOidcToken(request.headers.get(OIDC_HEADER));
+}
+
+function nodeHeader(
+  request: NodeQueueRequest,
+  name: string,
+): string | undefined {
+  const value = request.headers[name];
+  return Array.isArray(value) ? value[0] : value;
 }
 
 async function dispatchMessage(
@@ -192,55 +220,80 @@ async function handleMessage(
   await dispatchMessage(message, deploymentOrigin, deliveryCount, oidcToken);
 }
 
+function retryDirective(
+  error: unknown,
+  metadata: { deliveryCount: number },
+): { acknowledge: true } | { afterSeconds: number } {
+  // Only a proven permanent 4xx/task-shape failure may be discarded by this
+  // bridge. Transient failures are acknowledged by normal handler completion
+  // only after the dedicated terminal marker succeeds.
+  if (
+    error instanceof PermanentDispatchError &&
+    metadata.deliveryCount >= MAX_PERMANENT_DELIVERY_ATTEMPTS
+  ) {
+    return { acknowledge: true };
+  }
+  if (error instanceof TerminalFailureDispatchError) {
+    return { afterSeconds: 300 };
+  }
+  if (error instanceof AmbiguousDispatchError) {
+    return { afterSeconds: 600 };
+  }
+  if (metadata.deliveryCount === MAX_NORMAL_DELIVERY_ATTEMPTS) {
+    // The bridge can lose its response immediately after Python accepts the
+    // tenth task. Wait beyond that target's 300s max duration so its write-once
+    // completion receipt cannot race the marker-only delivery.
+    return { afterSeconds: 600 };
+  }
+  return {
+    afterSeconds: Math.min(
+      300,
+      2 ** Math.min(metadata.deliveryCount, 6) * 5,
+    ),
+  };
+}
+
+function messageHandler(deploymentOrigin: string, oidcToken: string) {
+  return async (message: unknown, metadata: { deliveryCount: number }) =>
+    handleMessage(message, deploymentOrigin, metadata.deliveryCount, oidcToken);
+}
+
+const callbackOptions = {
+  visibilityTimeoutSeconds: 600,
+  retry: retryDirective,
+};
+
 async function queueRoute(request: Request): Promise<Response> {
-  const deploymentOrigin = currentDeploymentOrigin(request);
-  const oidcToken = requestOidcToken(request);
   const queueCallback = handleCallback<unknown>(
-    async (message, metadata) =>
-      handleMessage(
-        message,
-        deploymentOrigin,
-        metadata.deliveryCount,
-        oidcToken,
-      ),
-    {
-      visibilityTimeoutSeconds: 600,
-      retry: (error, metadata) => {
-        // Only a proven permanent 4xx/task-shape failure may be discarded by
-        // this bridge.  Transient failures are acknowledged by normal handler
-        // completion only after the dedicated terminal marker succeeds.
-        if (
-          error instanceof PermanentDispatchError &&
-          metadata.deliveryCount >= MAX_PERMANENT_DELIVERY_ATTEMPTS
-        ) {
-          return { acknowledge: true };
-        }
-        if (error instanceof TerminalFailureDispatchError) {
-          return { afterSeconds: 300 };
-        }
-        if (error instanceof AmbiguousDispatchError) {
-          return { afterSeconds: 600 };
-        }
-        if (metadata.deliveryCount === MAX_NORMAL_DELIVERY_ATTEMPTS) {
-          // The bridge can lose its response immediately after Python accepts
-          // the tenth task.  Wait beyond that target's 300s max duration so its
-          // write-once completion receipt cannot race the marker-only delivery.
-          return { afterSeconds: 600 };
-        }
-        return {
-          afterSeconds: Math.min(
-            300,
-            2 ** Math.min(metadata.deliveryCount, 6) * 5,
-          ),
-        };
-      },
-    },
+    messageHandler(currentDeploymentOrigin(request), requestOidcToken(request)),
+    callbackOptions,
   );
   return queueCallback(request);
 }
 
-// `POST` follows the official handleCallback route pattern.  The default Web
-// fetch export also lets this route run as a standalone TypeScript Vercel
-// Function beside the existing Python ASGI function.
+async function nodeQueueRoute(
+  request: NodeQueueRequest,
+  response: NodeQueueResponse,
+): Promise<void> {
+  try {
+    // `api/*.ts` is a plain Vercel Node Function, not a framework Web route.
+    // Vercel's Queue SDK requires its Connect-style adapter here; exporting a
+    // Web `fetch` object builds successfully but is never discovered/invoked by
+    // the production queue trigger.
+    const callback = nodeQueueClient.handleNodeCallback<unknown>(
+      messageHandler(
+        currentDeploymentOrigin(new Request("https://queue-callback.invalid")),
+        validatedOidcToken(nodeHeader(request, OIDC_HEADER)),
+      ),
+      callbackOptions,
+    );
+    await callback(request, response);
+  } catch {
+    response.status(500).json({ error: "queue callback unavailable" });
+  }
+}
+
+// Keep the Web handler as a named export for contract tests/framework reuse.
+// The default Connect-style export is the production `api/*.ts` entry point.
 export const POST = queueRoute;
-export default { fetch: queueRoute };
+export default nodeQueueRoute;

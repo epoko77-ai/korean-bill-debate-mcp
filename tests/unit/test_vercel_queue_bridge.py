@@ -43,6 +43,8 @@ def test_queue_bridge_never_reads_failure_body_or_logs_task() -> None:
     source = (root / "api/queues/kbd-research.ts").read_text()
 
     assert 'handleCallback<unknown>' in source
+    assert 'handleNodeCallback<unknown>' in source
+    assert "export default nodeQueueRoute" in source
     assert 'currentDeploymentOrigin(request)' in source
     assert 'new URL(INTERNAL_PATH, deploymentOrigin)' in source
     assert 'response.body?.cancel()' in source
