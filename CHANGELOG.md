@@ -33,6 +33,23 @@
 
 ### Fixed
 
+- Replace per-page and per-document whole-run completion scans with delayed, uniquely identified
+  phase and finalization barriers. Concurrent workers can no longer all observe one another as
+  incomplete and leave a research job permanently waiting after the last write.
+- Bound hosted fan-out and Queue concurrency, chain broad partition/page/document publication, and
+  run the worker in Seoul near the Open Assembly service. Excess work waits durably instead of
+  creating an unbounded burst of Vercel Functions and Blob reads.
+- Publish small write-once stage checkpoints for hosted status polling. New jobs require only three
+  to five logical reads per poll and never scan partition pages, bill discoveries, or document
+  outcomes merely to report progress; pre-checkpoint jobs retain the validated legacy fallback.
+- Store the immutable research-job DAG in its own `job_state` artifact namespace, while reading and
+  extending legacy `outcome` histories in place. Document inventories no longer amplify every job
+  lookup, and orphan job events remain fail-closed.
+- Read terminal document outcomes by their exact logical key and finalize the complete manifest in
+  one barrier pass, eliminating quadratic outcome scans without dropping retry history or failed
+  source coverage.
+- Preserve legitimate duplicate-looking official agenda rows and reject only repeated complete
+  pages, matching the Open Assembly client's source semantics without hiding pagination loops.
 - Use the actual Vercel Blob 0.6 `list_objects` API and exhaust every cursor page for official
   document pointers and research artifact inventories, preventing hosted document jobs from
   failing SDK compatibility checks or silently omitting objects beyond the first list page.
@@ -56,8 +73,9 @@
 - The full official-record corpus revision has not yet been built, deployed, and operationally
   verified for the public service. Queries whose universe cannot be proven remain partial with
   explicit coverage gaps; `v0.10.0` does not claim a complete historical full-text index.
-- Claude.ai OAuth has automated integration coverage, but a real ChatGPT web-account callback and
-  the 13-tool public deployment still require post-deployment smoke testing.
+- Claude.ai and ChatGPT production-origin smoke tests cover dynamic registration, PKCE,
+  `offline_access` refresh credentials, and the complete 13-tool read-only surface. Client plan
+  entitlements, administrator policy, and approved-tool refresh behavior remain external.
 - In-flight artifacts created before the strict `v0.10.0` schema do not yet have a migration path.
   Do not claim zero-downtime resumption of older research jobs.
 

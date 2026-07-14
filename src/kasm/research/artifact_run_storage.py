@@ -368,6 +368,15 @@ class ArtifactResearchRunStore:
             expires_at=gateway.job.expires_at,
         )
 
+    def get_document_outcome(
+        self, research_id: str, work_id: str
+    ) -> DocumentOutcome | None:
+        """Read one terminal outcome by its fixed logical key without a run scan."""
+
+        if not work_id.strip():
+            raise ValueError("document work_id is required")
+        return self._terminal_outcome(research_id, work_id)
+
     def document_outcomes(self, research_id: str) -> tuple[DocumentOutcome, ...]:
         history = self.document_outcome_history(research_id)
         by_work: dict[str, list[DocumentOutcome]] = {}

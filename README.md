@@ -331,7 +331,7 @@ corpus revision이 없거나 조사 범위 전체를 증명하지 못하면 broa
 과장하지 않고 `partial`과 coverage gap을 반환합니다. 따라서 현재 버전은 “국회 전체 기록을
 항상 빠짐없이 검색하는 완성 인덱스”를 주장하지 않습니다.
 
-또한 Claude.ai OAuth는 자동 통합 테스트가 있지만, ChatGPT 실제 웹 계정의 OAuth callback과
-13개 도구 노출은 공개 배포 후 수동·자동 smoke가 남아 있습니다. 연결 문서는 표준 OAuth 코드
-경로와 OpenAI의 현재 공식 UI 안내를 반영한 것이며, 운영 검증 전에는 ChatGPT 실연결 완료를
-과장하지 않습니다.
+공개 `/mcp` 주소는 Claude.ai와 ChatGPT 각각의 Origin으로 동적 클라이언트 등록, PKCE 승인,
+refresh token, 13개 read-only 도구 노출까지 운영 smoke를 통과했습니다. 다만 각 서비스의
+요금제·관리자 정책·승인된 도구 스냅샷은 외부 설정이므로, 새 도구가 보이지 않으면 기존 연결을
+새로고침하거나 삭제 후 다시 등록해야 합니다.

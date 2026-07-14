@@ -32,9 +32,11 @@ _SAFE_WORK_KINDS = frozenset(
         "deferred_fanout",
         "discovery_fanout",
         "document",
+        "document_finalize_barrier",
         "document_fanout",
         "metadata_page",
         "page_fanout",
+        "phase_barrier",
     }
 )
 

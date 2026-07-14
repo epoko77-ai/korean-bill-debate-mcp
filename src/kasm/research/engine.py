@@ -71,7 +71,10 @@ _DISCOVERY_FANOUT = "discovery_fanout"
 _DEFERRED_FANOUT = "deferred_fanout"
 _DOCUMENT_FANOUT = "document_fanout"
 _PAGE_FANOUT = "page_fanout"
+_PHASE_BARRIER = "phase_barrier"
+_DOCUMENT_FINALIZE_BARRIER = "document_finalize_barrier"
 _PHASE = "phase"
+_ATTEMPT = "attempt"
 _PARTITION_ID = "partition_id"
 _PAGE = "page"
 _EXPECTED_TOTAL = "expected_total"
@@ -613,6 +616,10 @@ class ResearchRunStore(Protocol):
         self, research_id: str, outcome: DocumentOutcome
     ) -> DocumentOutcome: ...
 
+    def get_document_outcome(
+        self, research_id: str, work_id: str
+    ) -> DocumentOutcome | None: ...
+
     def document_outcomes(self, research_id: str) -> tuple[DocumentOutcome, ...]: ...
 
     def put_snapshot(
@@ -744,6 +751,13 @@ class InMemoryResearchRunStore:
                 return current
             self._outcomes[key] = outcome
             return outcome
+
+    def get_document_outcome(
+        self, research_id: str, work_id: str
+    ) -> DocumentOutcome | None:
+        with self._lock:
+            outcome = self._outcomes.get((research_id, work_id))
+            return outcome if outcome is not None and outcome.terminal else None
 
     def document_outcomes(self, research_id: str) -> tuple[DocumentOutcome, ...]:
         with self._lock:
@@ -1132,6 +1146,13 @@ class ResearchEngine:
                     len(discovery),
                     credential_capability=capability,
                 )
+            self._publish_phase_barrier(
+                job,
+                MetadataPhase.DISCOVERY,
+                attempt=1,
+                credential_capability=capability,
+                delay_seconds=self._barrier_delay_seconds(1),
+            )
         except Exception:
             with suppress(Exception):
                 self.jobs.transition(
@@ -1244,6 +1265,9 @@ class ResearchEngine:
         if work_kind == _PAGE_FANOUT:
             self._process_page_fanout(task, payload)
             return None
+        if work_kind == _PHASE_BARRIER:
+            self._process_phase_barrier(task, payload)
+            return None
         raise ValueError("unknown metadata work kind")
 
     def _process_discovery_fanout(
@@ -1307,7 +1331,6 @@ class ResearchEngine:
             stop,
             credential_capability=task.credential_capability,
         )
-        self._complete_metadata(task.research_id)
 
     def _process_document_fanout(
         self, task: ResearchTask, payload: Mapping[str, Any]
@@ -1379,6 +1402,35 @@ class ResearchEngine:
                 delay_seconds=self.fanout_delay_seconds,
             )
 
+    def _process_phase_barrier(
+        self, task: ResearchTask, payload: Mapping[str, Any]
+    ) -> None:
+        phase = MetadataPhase(str(payload.get(_PHASE) or ""))
+        attempt = self._validate_barrier_task(
+            task,
+            payload,
+            _PHASE_BARRIER,
+            phase.value,
+        )
+        complete = (
+            self._phase_complete(task.research_id, phase)
+            if phase is MetadataPhase.DISCOVERY
+            else self._deferred_metadata_complete(task.research_id)
+        )
+        if not complete:
+            self._publish_phase_barrier(
+                self._required_job(task.research_id),
+                phase,
+                attempt=attempt + 1,
+                credential_capability=task.credential_capability,
+                delay_seconds=self._barrier_delay_seconds(attempt + 1),
+            )
+            return
+        if phase is MetadataPhase.DISCOVERY:
+            self._complete_discovery(task.research_id, task.credential_capability)
+        else:
+            self._complete_metadata(task.research_id, prerequisites_verified=True)
+
     def process_document_task(self, task: ResearchTask) -> DocumentOutcome:
         self._validate_task(task, ResearchTaskStage.HYDRATE_DOCUMENT)
         metadata = self._required_metadata(task.research_id)
@@ -1393,12 +1445,8 @@ class ResearchEngine:
         ) != item.official_url:
             raise ValueError("document task payload does not match the stored manifest")
 
-        existing = {
-            outcome.work_id: outcome
-            for outcome in self.runs.document_outcomes(task.research_id)
-        }.get(item.work_id)
-        if existing is not None and existing.terminal:
-            self.try_finalize(task.research_id)
+        existing = self.runs.get_document_outcome(task.research_id, item.work_id)
+        if existing is not None:
             return existing
         retry_error: DocumentWorkerError | None = None
         try:
@@ -1427,21 +1475,39 @@ class ResearchEngine:
             # retryable outcome remains observable, and redelivery may replace it
             # with a terminal success or permanent failure.
             raise retry_error
-        if stored.terminal:
-            self._update_document_progress(task.research_id, metadata)
-            self.try_finalize(task.research_id)
         return stored
 
     def process_finalize_task(self, task: ResearchTask) -> ResearchSnapshot | None:
         self._validate_task(task, ResearchTaskStage.FINALIZE)
-        return self.try_finalize(task.research_id)
+        payload = dict(task.payload)
+        attempt = self._validate_barrier_task(
+            task,
+            payload,
+            _DOCUMENT_FINALIZE_BARRIER,
+            "documents",
+        )
+        metadata = self._required_metadata(task.research_id)
+        outcomes = self.runs.document_outcomes(task.research_id)
+        outcome_by_id = {item.work_id: item for item in outcomes}
+        required_ids = tuple(item.work_id for item in metadata.manifest.items)
+        if any(
+            work_id not in outcome_by_id or not outcome_by_id[work_id].terminal
+            for work_id in required_ids
+        ):
+            self._publish_document_finalize_barrier(
+                self._required_job(task.research_id),
+                attempt=attempt + 1,
+                delay_seconds=self._barrier_delay_seconds(attempt + 1),
+            )
+            return None
+        return self.try_finalize(task.research_id, outcomes=outcomes)
 
     def fail_task(self, task: ResearchTask, *, error_code: str) -> ResearchJob:
         """End a poisoned durable task after the queue retry budget is spent."""
 
         if not error_code.strip():
             raise ValueError("task failure requires an error code")
-        job = self._required_job(task.research_id)
+        job = self._required_current_job(task.research_id)
         if (
             task.query_fingerprint != job.query_fingerprint
             or task.index_revision != job.index_revision
@@ -1458,13 +1524,23 @@ class ResearchEngine:
             error_message="research task failed after the retry budget was exhausted",
         )
 
-    def try_finalize(self, research_id: str) -> ResearchSnapshot | None:
+    def try_finalize(
+        self,
+        research_id: str,
+        *,
+        outcomes: Sequence[DocumentOutcome] | None = None,
+    ) -> ResearchSnapshot | None:
         if self.runs.get_snapshot_summary(research_id) is not None:
             return None
         gateway = self._required_gateway(research_id)
         metadata = self._required_metadata(research_id)
+        current_outcomes = (
+            tuple(outcomes)
+            if outcomes is not None
+            else self.runs.document_outcomes(research_id)
+        )
         outcome_by_id = {
-            item.work_id: item for item in self.runs.document_outcomes(research_id)
+            item.work_id: item for item in current_outcomes
         }
         required_ids = tuple(item.work_id for item in metadata.manifest.items)
         if any(
@@ -1570,21 +1646,7 @@ class ResearchEngine:
                         follow_up,
                         task.credential_capability,
                     )
-        self._advance_phase(task.research_id, phase, task.credential_capability)
         return existing
-
-    def _advance_phase(
-        self,
-        research_id: str,
-        phase: MetadataPhase,
-        credential_capability: str | None,
-    ) -> None:
-        if not self._phase_complete(research_id, phase):
-            return
-        if phase is MetadataPhase.DISCOVERY:
-            self._complete_discovery(research_id, credential_capability)
-        else:
-            self._complete_metadata(research_id)
 
     def _complete_discovery(
         self, research_id: str, credential_capability: str | None
@@ -1743,7 +1805,15 @@ class ResearchEngine:
             stage="deferred_metadata",
             progress=0.25,
         )
-        self._complete_metadata(research_id)
+        if deferred_count:
+            self._publish_phase_barrier(
+                job,
+                MetadataPhase.BILL_STATUS,
+                attempt=1,
+                delay_seconds=self._barrier_delay_seconds(1),
+            )
+        else:
+            self._complete_metadata(research_id, prerequisites_verified=True)
 
     def _recall_from_corpus(
         self,
@@ -1831,10 +1901,27 @@ class ResearchEngine:
             if discovered.bill_number != bill_number:
                 raise ValueError("bill document discovery returned another bill")
             existing = self.runs.put_bill_discovery(task.research_id, discovered)
-        self._complete_metadata(task.research_id)
         return existing
 
-    def _complete_metadata(self, research_id: str) -> MetadataStageState | None:
+    def _deferred_metadata_complete(self, research_id: str) -> bool:
+        discovery = self._required_discovery(research_id)
+        if discovery.status_partitions and not self._phase_complete(
+            research_id, MetadataPhase.BILL_STATUS
+        ):
+            return False
+        discovered_numbers = {
+            item.bill_number for item in self.runs.bill_discoveries(research_id)
+        }
+        return all(
+            number in discovered_numbers for number in discovery.document_bill_numbers
+        )
+
+    def _complete_metadata(
+        self,
+        research_id: str,
+        *,
+        prerequisites_verified: bool = False,
+    ) -> MetadataStageState | None:
         existing = self.runs.get_metadata(research_id)
         if existing is not None:
             self._publish_document_manifest(research_id, existing.manifest)
@@ -1842,17 +1929,9 @@ class ResearchEngine:
         discovery = self.runs.get_discovery(research_id)
         if discovery is None:
             return None
-        if discovery.status_partitions and not self._phase_complete(
-            research_id, MetadataPhase.BILL_STATUS
-        ):
+        if not prerequisites_verified and not self._deferred_metadata_complete(research_id):
             return None
         bill_discoveries = self.runs.bill_discoveries(research_id)
-        discovered_numbers = {item.bill_number for item in bill_discoveries}
-        if any(
-            number not in discovered_numbers
-            for number in discovery.document_bill_numbers
-        ):
-            return None
 
         status_collection = (
             self._assemble_collection(
@@ -1888,18 +1967,21 @@ class ResearchEngine:
             stage="documents",
             progress=0.4,
         )
-        if not existing.manifest.items:
-            self.try_finalize(research_id)
         return existing
 
     def _publish_document_manifest(
         self, research_id: str, manifest: DocumentWorkManifest
     ) -> None:
+        job = self._required_job(research_id)
         if len(manifest.items) > self.direct_fanout_limit:
-            job = self._required_job(research_id)
             self._publish_fanout(job, _DOCUMENT_FANOUT, 0, len(manifest.items))
-            return
-        self._publish_document_items(research_id, manifest.items)
+        else:
+            self._publish_document_items(research_id, manifest.items)
+        self._publish_document_finalize_barrier(
+            job,
+            attempt=1,
+            delay_seconds=self._barrier_delay_seconds(1),
+        )
 
     def _publish_document_items(
         self, research_id: str, items: Sequence[DocumentWorkItem]
@@ -1933,6 +2015,64 @@ class ResearchEngine:
             payload=((_WORK_KIND, _BILL_DOCUMENTS), (_BILL_NO, bill_number)),
         )
         self.queue.publish(task, retention_seconds=self.task_retention_seconds)
+
+    def _publish_phase_barrier(
+        self,
+        job: ResearchJob,
+        phase: MetadataPhase,
+        *,
+        attempt: int,
+        credential_capability: str | None = None,
+        delay_seconds: int = 0,
+    ) -> None:
+        task = ResearchTask(
+            research_id=job.id,
+            stage=ResearchTaskStage.COLLECT_METADATA,
+            work_id=f"{_PHASE_BARRIER}:{phase.value}:{attempt}",
+            query_fingerprint=job.query_fingerprint,
+            index_revision=job.index_revision,
+            payload=(
+                (_WORK_KIND, _PHASE_BARRIER),
+                (_PHASE, phase.value),
+                (_ATTEMPT, attempt),
+            ),
+            credential_capability=credential_capability,
+        )
+        self.queue.publish(
+            task,
+            retention_seconds=self.task_retention_seconds,
+            delay_seconds=delay_seconds,
+        )
+
+    def _publish_document_finalize_barrier(
+        self,
+        job: ResearchJob,
+        *,
+        attempt: int,
+        delay_seconds: int = 0,
+    ) -> None:
+        task = ResearchTask(
+            research_id=job.id,
+            stage=ResearchTaskStage.FINALIZE,
+            work_id=f"{_DOCUMENT_FINALIZE_BARRIER}:documents:{attempt}",
+            query_fingerprint=job.query_fingerprint,
+            index_revision=job.index_revision,
+            payload=(
+                (_WORK_KIND, _DOCUMENT_FINALIZE_BARRIER),
+                (_ATTEMPT, attempt),
+            ),
+        )
+        self.queue.publish(
+            task,
+            retention_seconds=self.task_retention_seconds,
+            delay_seconds=delay_seconds,
+        )
+
+    def _barrier_delay_seconds(self, attempt: int) -> int:
+        if attempt < 1:
+            raise ValueError("research barrier attempt must be positive")
+        base = max(1, self.fanout_delay_seconds)
+        return min(60, base * min(attempt, 60))
 
     def _publish_fanout(
         self,
@@ -2035,6 +2175,22 @@ class ResearchEngine:
         if task.work_id != f"{work_kind}:{start}:{stop}":
             raise ValueError("research fan-out task identity does not match")
         return start, stop
+
+    @staticmethod
+    def _validate_barrier_task(
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+        work_kind: str,
+        scope: str,
+    ) -> int:
+        attempt = int(payload.get(_ATTEMPT, 0))
+        if not 1 <= attempt <= 1_000_000:
+            raise ValueError("research barrier attempt is invalid")
+        if payload.get(_WORK_KIND) != work_kind:
+            raise ValueError("research barrier work kind does not match")
+        if task.work_id != f"{work_kind}:{scope}:{attempt}":
+            raise ValueError("research barrier task identity does not match")
+        return attempt
 
     @staticmethod
     def _validate_page_fanout_task(
@@ -2143,29 +2299,10 @@ class ResearchEngine:
         ):
             raise ValueError("research task does not match its persisted job")
         if (
-            self.runs.get_snapshot_summary(task.research_id) is None
-            and datetime.now(UTC) >= job.expires_at
+            datetime.now(UTC) >= job.expires_at
+            and self.runs.get_snapshot_summary(task.research_id) is None
         ):
             raise ValueError("research task belongs to an expired job")
-
-    def _update_document_progress(
-        self, research_id: str, metadata: MetadataStageState
-    ) -> None:
-        total = len(metadata.manifest.items)
-        if total == 0:
-            return
-        terminal = sum(
-            outcome.terminal for outcome in self.runs.document_outcomes(research_id)
-        )
-        progress = min(0.95, 0.4 + (0.5 * terminal / total))
-        current = self.jobs.get(research_id)
-        if current is not None and not current.terminal:
-            self._transition_job_if_present(
-                research_id,
-                JobStatus.RUNNING,
-                stage="documents",
-                progress=progress,
-            )
 
     def _validate_snapshot(
         self, snapshot: ResearchSnapshot, context: FinalizationContext
@@ -2206,13 +2343,19 @@ class ResearchEngine:
         return result
 
     def _required_job(self, research_id: str) -> ResearchJob:
-        result = self.jobs.get(research_id)
-        if result is not None:
-            return result
         gateway = self.runs.get_gateway(research_id)
-        if gateway is None:
+        if gateway is not None:
+            return gateway.job
+        result = self.jobs.get(research_id)
+        if result is None:
             raise LookupError(f"research job not found: {research_id}")
-        return gateway.job
+        return result
+
+    def _required_current_job(self, research_id: str) -> ResearchJob:
+        result = self.jobs.get(research_id)
+        if result is None:
+            raise LookupError(f"current research job not found: {research_id}")
+        return result
 
     def _transition_job_if_present(
         self,

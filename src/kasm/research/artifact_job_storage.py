@@ -89,6 +89,7 @@ class _StoredEvent:
 class _History:
     initial: ResearchJob
     events: tuple[_StoredEvent, ...]
+    artifact_kind: ArtifactKind
 
 
 class ArtifactResearchJobStore:
@@ -154,7 +155,7 @@ class ArtifactResearchJobStore:
             try:
                 self.artifacts.write(
                     research_id,
-                    ArtifactKind.OUTCOME,
+                    ArtifactKind.JOB_STATE,
                     payload,
                     logical_key=_INITIAL_KEY,
                 )
@@ -233,7 +234,7 @@ class ArtifactResearchJobStore:
             try:
                 self.artifacts.write(
                     research_id,
-                    ArtifactKind.OUTCOME,
+                    history.artifact_kind,
                     _event_payload(research_id, event),
                     logical_key=f"{_EVENT_KEY_PREFIX}{event_id}",
                 )
@@ -256,22 +257,40 @@ class ArtifactResearchJobStore:
             return _derive_expiry(result, self._checked_now())
 
     def _load_history(self, research_id: str) -> _History | None:
-        refs = self.artifacts.list(research_id, ArtifactKind.OUTCOME)
+        artifact_kind = ArtifactKind.JOB_STATE
+        initial_artifact = self.artifacts.read_logical(
+            research_id,
+            artifact_kind,
+            _INITIAL_KEY,
+        )
+        if initial_artifact is None:
+            # Deployments before the dedicated job-state namespace stored the
+            # state DAG beside document outcomes.  Keep those jobs readable
+            # and continue their event history in the legacy namespace, while
+            # ensuring newly-created jobs never list unrelated outcomes.
+            artifact_kind = ArtifactKind.OUTCOME
+            initial_artifact = self.artifacts.read_logical(
+                research_id,
+                artifact_kind,
+                _INITIAL_KEY,
+            )
+        if initial_artifact is None:
+            orphan_refs = self.artifacts.list(research_id, ArtifactKind.JOB_STATE)
+            if any(
+                ref.logical_key is not None
+                and ref.logical_key.startswith(_EVENT_KEY_PREFIX)
+                for ref in orphan_refs
+            ):
+                raise ArtifactIntegrityError("research job events have no initial state")
+            return None
+
+        refs = self.artifacts.list(research_id, artifact_kind)
         event_refs = tuple(
             ref
             for ref in refs
             if ref.logical_key is not None
             and ref.logical_key.startswith(_EVENT_KEY_PREFIX)
         )
-        initial_artifact = self.artifacts.read_logical(
-            research_id,
-            ArtifactKind.OUTCOME,
-            _INITIAL_KEY,
-        )
-        if initial_artifact is None:
-            if event_refs:
-                raise ArtifactIntegrityError("research job events have no initial state")
-            return None
         initial_payload = initial_artifact.payload
         if not isinstance(initial_payload, Mapping):
             raise ArtifactIntegrityError("research job artifact payload must be an object")
@@ -292,16 +311,22 @@ class ArtifactResearchJobStore:
         identifiers = [item.event_id for item in events]
         if len(identifiers) != len(set(identifiers)):
             raise ArtifactIntegrityError("research job contains duplicate event identifiers")
-        history = _History(initial, events)
+        history = _History(initial, events, artifact_kind)
         _validate_history(history)
         return history
 
     def _initial_ref(self, research_id: str) -> ArtifactRef | None:
         stored = self.artifacts.read_logical(
             research_id,
-            ArtifactKind.OUTCOME,
+            ArtifactKind.JOB_STATE,
             _INITIAL_KEY,
         )
+        if stored is None:
+            stored = self.artifacts.read_logical(
+                research_id,
+                ArtifactKind.OUTCOME,
+                _INITIAL_KEY,
+            )
         return stored.ref if stored is not None else None
 
     def _read_payload(self, ref: ArtifactRef) -> Mapping[str, Any]:

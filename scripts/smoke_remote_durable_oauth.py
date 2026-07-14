@@ -147,16 +147,24 @@ async def exercise() -> dict[str, object]:
             ):
                 raise RuntimeError("deployed MCP tools are not declared read-only")
             started = time.perf_counter()
+            query = os.getenv("KBD_SMOKE_QUERY", "").strip() or (
+                "2219564번 의안의 처리상태, 회의록, 전문위원 검토보고서를 "
+                "공식 원문 기준으로 조사해줘"
+            )
+            research_arguments: dict[str, Any] = {"query": query}
+            raw_assembly_term = os.getenv("KBD_SMOKE_ASSEMBLY_TERM", "22").strip()
+            if raw_assembly_term:
+                research_arguments["assembly_term"] = int(raw_assembly_term)
+            date_from = os.getenv("KBD_SMOKE_DATE_FROM", "").strip()
+            date_to = os.getenv("KBD_SMOKE_DATE_TO", "").strip()
+            if date_from:
+                research_arguments["date_from"] = date_from
+            if date_to:
+                research_arguments["date_to"] = date_to
             receipt = _structured(
                 await session.call_tool(
                     "start_research",
-                    {
-                        "query": (
-                            "2219564번 의안의 처리상태, 회의록, 전문위원 검토보고서를 "
-                            "공식 원문 기준으로 조사해줘"
-                        ),
-                        "assembly_term": 22,
-                    },
+                    research_arguments,
                 ),
                 "start_research",
             )
@@ -167,12 +175,20 @@ async def exercise() -> dict[str, object]:
 
             status: dict[str, Any] = {}
             deadline = time.monotonic() + wait_seconds
+            status_poll_count = 0
+            slowest_status_seconds = 0.0
             while wait_seconds > 0:
+                status_started = time.perf_counter()
                 status = _structured(
                     await session.call_tool(
                         "get_research_status", {"research_id": research_id}
                     ),
                     "get_research_status",
+                )
+                status_poll_count += 1
+                slowest_status_seconds = max(
+                    slowest_status_seconds,
+                    time.perf_counter() - status_started,
                 )
                 if status.get("status") in {"complete", "partial", "failed"}:
                     break
@@ -181,6 +197,34 @@ async def exercise() -> dict[str, object]:
                 await asyncio.sleep(min(float(status.get("retry_after_seconds") or 2), 5))
             if status.get("status") == "failed":
                 raise RuntimeError("durable research reached a failed terminal state")
+
+            final_overview_verified = False
+            exact_bill_verified = False
+            if status.get("status") in {"complete", "partial"}:
+                overview = _structured(
+                    await session.call_tool(
+                        "get_research_overview",
+                        {"research_id": research_id, "page_size": 100},
+                    ),
+                    "get_research_overview",
+                )
+                if (
+                    overview.get("phase") != "final"
+                    or overview.get("substantive_conclusion_available") is not True
+                ):
+                    raise RuntimeError("terminal research did not expose its final overview")
+                final_overview_verified = True
+                expected_bill = os.getenv(
+                    "KBD_SMOKE_EXPECT_BILL_NUMBER", "2219564"
+                ).strip()
+                if expected_bill:
+                    exact_bill_verified = expected_bill in json.dumps(
+                        overview, ensure_ascii=False, sort_keys=True
+                    )
+                    if not exact_bill_verified:
+                        raise RuntimeError(
+                            "final overview lost the expected exact bill identity"
+                        )
 
     if storage.tokens is None or not storage.tokens.refresh_token:
         raise RuntimeError("OAuth flow did not issue refresh credentials")
@@ -203,8 +247,13 @@ async def exercise() -> dict[str, object]:
         },
         "tool_count": len(EXPECTED_TOOLS),
         "all_tools_read_only": True,
+        "research_id": research_id,
         "research_receipt_seconds": round(receipt_seconds, 3),
+        "status_poll_count": status_poll_count,
+        "slowest_status_seconds": round(slowest_status_seconds, 3),
         "terminal_status": status.get("status") if status else None,
+        "final_overview_verified": final_overview_verified,
+        "exact_bill_verified": exact_bill_verified,
         "passed": True,
     }
 

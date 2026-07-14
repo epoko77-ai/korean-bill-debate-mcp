@@ -62,6 +62,7 @@ from kasm.research.results import (
     ResearchSnapshot,
     ResearchSnapshotSummary,
 )
+from kasm.research.status_storage import StatusSnapshotResearchRunStore
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
 REVIEW_URL = "https://likms.assembly.go.kr/filegate/review.pdf?id=2219564"
@@ -685,10 +686,13 @@ def test_retryable_outcomes_are_append_only_then_terminal_becomes_current(
         result=_result(state, text),
     )
 
+    assert store.get_document_outcome(research_id, state.work_item.work_id) is None
     assert store.put_document_outcome(research_id, first_retry) == first_retry
     assert store.put_document_outcome(research_id, first_retry) == first_retry
     assert store.put_document_outcome(research_id, second_retry) == second_retry
+    assert store.get_document_outcome(research_id, state.work_item.work_id) is None
     assert store.put_document_outcome(research_id, terminal) == terminal
+    assert store.get_document_outcome(research_id, state.work_item.work_id) == terminal
 
     assert store.document_outcomes(research_id) == (terminal,)
     history = store.document_outcome_history(research_id)
@@ -814,3 +818,60 @@ def test_artifacts_do_not_contain_a_queue_capability_or_api_key(tmp_path: Path) 
     assert b"private-user-open-assembly-key" not in encoded
     assert b"credential_capability" not in encoded
     assert b"assembly_api_key" not in encoded
+
+
+def test_status_snapshots_avoid_page_and_outcome_scans_and_remain_conservative(
+    tmp_path: Path,
+) -> None:
+    state = _fixture()
+    artifacts = CountingFilesystemStore(tmp_path)
+    store = StatusSnapshotResearchRunStore(artifacts, now=lambda: state.now[0])
+    _seed_through_metadata(store, state)
+    research_id = state.gateway.job.id
+    artifacts.reset_counts()
+
+    running = store.get_status_view(research_id)
+
+    assert running is not None
+    assert running.summary is None
+    assert running.derived.stage == "documents"
+    assert running.derived.documents_expected == 1
+    assert running.derived.documents_complete == 0
+    assert running.derived.snapshot_ready is False
+    assert running.derived.complete is False
+    assert artifacts.list_calls == 0
+    assert artifacts.read_calls == 0
+    # Gateway, snapshot-summary miss, then the metadata checkpoint.  No page,
+    # bill-discovery, or document-outcome artifact is opened by the poll.
+    assert artifacts.logical_read_calls == 3
+
+    outcome = DocumentOutcome(
+        state.work_item.work_id,
+        DocumentOutcomeStatus.SUCCEEDED,
+        result=_result(state, "전문위원 검토 원문"),
+    )
+    store.put_document_outcome(research_id, outcome)
+    snapshot = _snapshot(state, "전문위원 검토 원문")
+    store.put_snapshot(research_id, snapshot)
+    artifacts.reset_counts()
+
+    terminal = store.get_status_view(research_id)
+
+    assert terminal is not None
+    assert terminal.summary == ResearchSnapshotSummary.from_snapshot(snapshot)
+    assert terminal.derived.documents_complete == 1
+    assert terminal.derived.snapshot_ready is True
+    assert terminal.derived.complete is True
+    assert artifacts.list_calls == 0
+    assert artifacts.read_calls == 0
+    assert artifacts.logical_read_calls == 3
+
+
+def test_status_snapshot_store_falls_back_for_legacy_runs(tmp_path: Path) -> None:
+    state = _fixture()
+    artifacts = CountingFilesystemStore(tmp_path)
+    legacy = ArtifactResearchRunStore(artifacts, now=lambda: state.now[0])
+    legacy.put_gateway(state.gateway.job.id, state.gateway)
+    restarted = StatusSnapshotResearchRunStore(artifacts, now=lambda: state.now[0])
+
+    assert restarted.get_status_view(state.gateway.job.id) is None

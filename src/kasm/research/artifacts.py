@@ -63,6 +63,7 @@ class ArtifactKind(StrEnum):
     METADATA = "metadata"
     RESOLUTION = "resolution"
     MANIFEST = "manifest"
+    JOB_STATE = "job_state"
     OUTCOME = "outcome"
     RESULT_PAGE = "result_page"
 

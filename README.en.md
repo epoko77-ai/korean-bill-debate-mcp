@@ -185,7 +185,8 @@ not yet been built, deployed, and operationally verified for the public service.
 revision cannot prove the requested universe, coverage remains `partial` with explicit gaps; this
 release does not claim a complete historical full-text index.
 
-Claude.ai OAuth has automated integration coverage. A real ChatGPT web-account OAuth callback and
-the 13-tool production surface still require post-deployment smoke testing. The instructions above
-match the server's standard OAuth implementation and OpenAI's current official UI guidance, not a
-claim that the public ChatGPT connection has already passed that live test.
+The public `/mcp` endpoint has passed production smoke tests for both Claude.ai and ChatGPT origins,
+including dynamic client registration, PKCE authorization, refresh credentials, and all 13
+read-only tools. Client plan entitlements, administrator policy, and previously approved tool
+snapshots remain external settings; refresh or recreate the connection if a newly deployed tool is
+not visible.

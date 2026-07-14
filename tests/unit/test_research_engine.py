@@ -31,6 +31,7 @@ from kasm.research.engine import (
     FinalizationContext,
     GatewayPlanState,
     InMemoryResearchRunStore,
+    MetadataPhase,
     MetadataStageState,
     ResearchEngine,
     StrictFilterReport,
@@ -422,6 +423,38 @@ def task_with(queue: Queue, **payload: object) -> ResearchTask:
     )
 
 
+def process_phase_barrier(
+    value: ResearchEngine,
+    queue: Queue,
+    phase: str,
+    *,
+    attempt: int = 1,
+) -> None:
+    value.process_metadata_task(
+        task_with(
+            queue,
+            work_kind="phase_barrier",
+            phase=phase,
+            attempt=attempt,
+        )
+    )
+
+
+def process_finalize_barrier(
+    value: ResearchEngine,
+    queue: Queue,
+    *,
+    attempt: int = 1,
+) -> None:
+    value.process_finalize_task(
+        task_with(
+            queue,
+            work_kind="document_finalize_barrier",
+            attempt=attempt,
+        )
+    )
+
+
 def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
     value, queue, client, _jobs, _runs, _finalizer = engine(exact_responder)
 
@@ -438,8 +471,11 @@ def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
 
     assert client.calls == []
     assert receipt.metadata_task_count == 1
-    assert len(queue.tasks) == 1
+    assert len(queue.tasks) == 2
     assert dict(queue.tasks[0].payload)["page"] == 1
+    barrier = task_with(queue, work_kind="phase_barrier", attempt=1)
+    assert dict(barrier.payload)["phase"] == "discovery"
+    assert queue.delays[barrier.idempotency_key] == value._barrier_delay_seconds(1)
     derived = value.derive_status(receipt.research_id)
     assert derived.stage == "metadata_discovery"
     assert derived.metadata_partitions_expected == 1
@@ -449,6 +485,46 @@ def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
     public = repr(receipt.to_dict())
     assert "private-user-key" not in public
     assert Credentials.capability not in public
+
+
+def test_phase_barrier_rechecks_with_unique_attempts_without_per_page_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value, queue, _client, _jobs, runs, _finalizer = engine(exact_responder)
+    receipt = value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+    original = value._phase_complete
+    phase_checks: list[MetadataPhase] = []
+
+    def counted_phase_complete(research_id: str, phase: MetadataPhase) -> bool:
+        phase_checks.append(phase)
+        return original(research_id, phase)
+
+    monkeypatch.setattr(value, "_phase_complete", counted_phase_complete)
+
+    process_phase_barrier(value, queue, "discovery", attempt=1)
+
+    assert phase_checks == [MetadataPhase.DISCOVERY]
+    assert runs.get_discovery(receipt.research_id) is None
+    retry = task_with(
+        queue,
+        work_kind="phase_barrier",
+        phase="discovery",
+        attempt=2,
+    )
+    assert retry.work_id == "phase_barrier:discovery:2"
+    assert queue.delays[retry.idempotency_key] == value._barrier_delay_seconds(2)
+
+    value.process_metadata_task(task_with(queue, work_kind="metadata_page", page=1))
+
+    assert phase_checks == [MetadataPhase.DISCOVERY]
+    process_phase_barrier(value, queue, "discovery", attempt=2)
+    assert phase_checks == [MetadataPhase.DISCOVERY, MetadataPhase.DISCOVERY]
+    assert runs.get_discovery(receipt.research_id) is not None
 
 
 def test_broad_gateway_uses_bounded_coordinators_instead_of_serial_queue_fanout() -> None:
@@ -549,11 +625,37 @@ def test_worker_recovers_plan_and_identity_when_process_local_job_store_is_empty
     )
 
     worker_invocation.process_metadata_task(queue.tasks[0])
+    process_phase_barrier(worker_invocation, queue, "discovery")
 
     assert runs.get_discovery(receipt.research_id) is not None
     derived = worker_invocation.derive_status(receipt.research_id)
     assert derived.stage == "deferred_metadata"
     assert derived.overview_available is True
+
+
+def test_active_page_task_uses_immutable_gateway_identity_without_status_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value, queue, _client, jobs, runs, _finalizer = engine(exact_responder)
+    value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+
+    def unexpected_job_read(_research_id: str) -> ResearchJob | None:
+        raise AssertionError("an active page task must not read mutable job history")
+
+    def unexpected_snapshot_read(_research_id: str) -> Any:
+        raise AssertionError("an unexpired task must not probe snapshot storage")
+
+    monkeypatch.setattr(jobs, "get", unexpected_job_read)
+    monkeypatch.setattr(runs, "get_snapshot_summary", unexpected_snapshot_read)
+
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="discovery", page=1)
+    )
 
 
 def test_one_worker_fetches_only_one_page_then_fans_out_every_remaining_page() -> None:
@@ -738,6 +840,7 @@ def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss()
     value.process_metadata_task(queue.tasks[0])
     second_page = task_with(queue, work_kind="metadata_page", page=2)
     value.process_metadata_task(second_page)
+    process_phase_barrier(value, queue, "discovery")
 
     discovery = runs.get_discovery(receipt.research_id)
     assert discovery is not None
@@ -755,7 +858,8 @@ def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss()
     assert not [
         task
         for task in queue.tasks
-        if dict(task.payload).get("phase") == "bill_status"
+        if dict(task.payload).get("work_kind") == "metadata_page"
+        and dict(task.payload).get("phase") == "bill_status"
     ]
     processed: set[str] = set()
     while True:
@@ -830,14 +934,17 @@ def test_exact_status_document_pipeline_completes_and_is_idempotent() -> None:
         ),
     )
     value.process_metadata_task(queue.tasks[0])
+    process_phase_barrier(value, queue, "discovery")
     value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
     value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
+    process_phase_barrier(value, queue, "bill_status")
     document_task = next(
         task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
     )
 
     outcome = value.process_document_task(document_task)
     repeated = value.process_document_task(document_task)
+    process_finalize_barrier(value, queue)
 
     assert outcome.status is DocumentOutcomeStatus.SUCCEEDED
     assert repeated == outcome
@@ -853,6 +960,71 @@ def test_exact_status_document_pipeline_completes_and_is_idempotent() -> None:
     assert derived.documents_complete == 1
 
 
+def test_document_tasks_use_single_outcome_lookup_and_finalize_barrier_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = Worker()
+    value, queue, _client, jobs, runs, _finalizer = engine(
+        exact_responder,
+        document_worker=worker,
+    )
+    receipt = value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(task_with(queue, work_kind="metadata_page", page=1))
+    process_phase_barrier(value, queue, "discovery")
+    value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
+    value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
+    process_phase_barrier(value, queue, "bill_status")
+    document_task = next(
+        task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
+    )
+    original = runs.document_outcomes
+    outcome_scans = 0
+
+    def counted_document_outcomes(research_id: str) -> tuple[DocumentOutcome, ...]:
+        nonlocal outcome_scans
+        outcome_scans += 1
+        return original(research_id)
+
+    monkeypatch.setattr(runs, "document_outcomes", counted_document_outcomes)
+
+    process_finalize_barrier(value, queue, attempt=1)
+    assert outcome_scans == 1
+    current = jobs.get(receipt.research_id)
+    assert current is not None
+    assert current.stage == "documents"
+    assert current.progress == 0.4
+    retry = task_with(
+        queue,
+        work_kind="document_finalize_barrier",
+        attempt=2,
+    )
+    assert retry.work_id == "document_finalize_barrier:documents:2"
+    assert queue.delays[retry.idempotency_key] == value._barrier_delay_seconds(2)
+
+    first = value.process_document_task(document_task)
+    repeated = value.process_document_task(document_task)
+
+    assert first == repeated
+    assert len(worker.calls) == 1
+    assert outcome_scans == 1
+    current = jobs.get(receipt.research_id)
+    assert current is not None
+    assert current.stage == "documents"
+    assert current.progress == 0.4
+    process_finalize_barrier(value, queue, attempt=2)
+    assert outcome_scans == 2
+    assert runs.get_snapshot(receipt.research_id) is not None
+
+
 def test_cross_term_date_scope_collects_every_term_without_a_false_gap() -> None:
     value, queue, _client, jobs, runs, finalizer = engine(exact_responder)
     receipt = value.gateway(
@@ -864,6 +1036,7 @@ def test_cross_term_date_scope_collects_every_term_without_a_false_gap() -> None
 
     for task in tuple(queue.tasks):
         value.process_metadata_task(task)
+    process_finalize_barrier(value, queue)
 
     snapshot = runs.get_snapshot(receipt.research_id)
     assert snapshot is not None and snapshot.coverage.complete
@@ -883,6 +1056,8 @@ def test_explicit_assembly_term_clipping_finishes_partial_with_explicit_gap() ->
     )
 
     value.process_metadata_task(queue.tasks[0])
+    process_phase_barrier(value, queue, "discovery")
+    process_finalize_barrier(value, queue)
 
     expected = (
         "requested_date_scope_not_fully_represented:"
@@ -935,11 +1110,14 @@ def test_cross_term_status_requests_use_each_accepted_bills_own_term() -> None:
     status_tasks = [
         task
         for task in queue.tasks
-        if dict(task.payload).get("phase") == "bill_status"
+        if dict(task.payload).get("work_kind") == "metadata_page"
+        and dict(task.payload).get("phase") == "bill_status"
     ]
     assert len(status_tasks) == 2
     for task in status_tasks:
         value.process_metadata_task(task)
+    process_phase_barrier(value, queue, "bill_status")
+    process_finalize_barrier(value, queue)
 
     status_parameters = {
         tuple(sorted(parameters.items()))
@@ -977,8 +1155,11 @@ def test_document_discovery_failure_finishes_partial_with_explicit_coverage_gap(
         ),
     )
     value.process_metadata_task(queue.tasks[0])
+    process_phase_barrier(value, queue, "discovery")
     value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
     value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
+    process_phase_barrier(value, queue, "bill_status")
+    process_finalize_barrier(value, queue)
 
     snapshot = runs.get_snapshot(receipt.research_id)
     assert snapshot is not None and not snapshot.coverage.complete
@@ -1011,8 +1192,10 @@ def test_transient_document_failure_is_not_acked_and_redelivery_can_finalize() -
         ),
     )
     value.process_metadata_task(queue.tasks[0])
+    process_phase_barrier(value, queue, "discovery")
     value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
     value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
+    process_phase_barrier(value, queue, "bill_status")
     document_task = next(
         task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
     )
@@ -1024,6 +1207,7 @@ def test_transient_document_failure_is_not_acked_and_redelivery_can_finalize() -
     assert first.status is DocumentOutcomeStatus.RETRYABLE_FAILURE
     assert runs.get_snapshot(receipt.research_id) is None
     outcome = value.process_document_task(document_task)
+    process_finalize_barrier(value, queue)
 
     assert outcome.status is DocumentOutcomeStatus.SUCCEEDED
     assert worker.attempts == 2

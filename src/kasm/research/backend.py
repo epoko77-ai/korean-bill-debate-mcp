@@ -10,13 +10,19 @@ import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import date
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from .documents import OfficialDocumentStore
 from .engine import DerivedResearchStatus, ResearchEngine
 from .jobs import JobStatus
 from .overview import build_provisional_research_overview
 from .results import EvidenceIndexEntry, EvidenceRecord
+from .status_storage import BoundedResearchStatusView
+
+
+@runtime_checkable
+class _BoundedStatusRunStore(Protocol):
+    def get_status_view(self, research_id: str) -> BoundedResearchStatusView | None: ...
 
 
 class DurableResearchBackend:
@@ -64,8 +70,16 @@ class DurableResearchBackend:
         return {**receipt.to_dict(), "retry_after_seconds": 1}
 
     def get_research_status(self, research_id: str) -> dict[str, Any]:
-        derived = self.engine.derive_status(research_id)
-        summary = self.engine.runs.get_snapshot_summary(research_id)
+        if isinstance(self.engine.runs, _BoundedStatusRunStore):
+            bounded = self.engine.runs.get_status_view(research_id)
+        else:
+            bounded = None
+        if bounded is None:
+            derived = self.engine.derive_status(research_id)
+            summary = self.engine.runs.get_snapshot_summary(research_id)
+        else:
+            derived = bounded.derived
+            summary = bounded.summary
         job = self.engine.jobs.get(research_id)
         if summary is not None:
             status = JobStatus.COMPLETE if summary.coverage.complete else JobStatus.PARTIAL

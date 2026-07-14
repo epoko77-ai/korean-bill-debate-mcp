@@ -25,6 +25,7 @@ from kasm.research.results import (
     ResearchSnapshot,
     ResearchSnapshotSummary,
 )
+from kasm.research.status_storage import BoundedResearchStatusView
 
 NOW = datetime(2026, 7, 13, tzinfo=UTC)
 
@@ -237,6 +238,50 @@ def test_start_preserves_missing_scope_as_none_for_natural_language_planner(tmp_
 def test_start_requires_request_scoped_assembly_key(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="인증키"):
         backend(tmp_path, Engine(), key=None).start_research("AI 입법")
+
+
+def test_status_uses_bounded_store_view_without_exhaustive_derivation(tmp_path) -> None:
+    class BoundedRuns(Runs):
+        def get_status_view(self, research_id: str) -> BoundedResearchStatusView:
+            assert research_id == "research_1"
+            return BoundedResearchStatusView(
+                DerivedResearchStatus(
+                    research_id,
+                    "documents",
+                    4,
+                    4,
+                    7,
+                    7,
+                    2,
+                    2,
+                    3,
+                    0,
+                    0,
+                    True,
+                    False,
+                    False,
+                ),
+                None,
+            )
+
+        def get_snapshot_summary(self, research_id: str):
+            raise AssertionError("bounded status must reuse its summary result")
+
+    class BoundedEngine(Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.runs = BoundedRuns()
+
+        def derive_status(self, research_id: str):
+            raise AssertionError("bounded status must not scan run artifacts")
+
+    result = backend(tmp_path, BoundedEngine()).get_research_status("research_1")
+
+    assert result["status"] == "running"
+    assert result["stage"] == "documents"
+    assert result["work"]["metadata_pages_complete"] == 7
+    assert result["work"]["documents_complete"] == 0
+    assert result["work"]["snapshot_ready"] is False
 
 
 def test_pages_index_large_evidence_without_sending_a_false_preview(tmp_path) -> None:

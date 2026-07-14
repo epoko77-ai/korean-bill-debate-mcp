@@ -89,6 +89,12 @@ def test_filesystem_store_writes_reads_and_lists_every_artifact_kind(tmp_path: P
         store.write_manifest(research_id, {"documents": 9}),
         store.write_outcome(research_id, {"complete": True}),
         store.write_result_page(research_id, 1, {"items": [1, 2, 3]}),
+        store.write(
+            research_id,
+            ArtifactKind.JOB_STATE,
+            {"status": "queued"},
+            logical_key="state",
+        ),
     )
 
     assert {ref.kind for ref in refs} == set(ArtifactKind)

@@ -352,7 +352,9 @@ class _DrainingBackend(DurableResearchBackend):
             first_poll = research_id not in self._seen_status
             self._seen_status.add(research_id)
         if first_poll:
-            self._drain(max_tasks=1)
+            # One page delivery plus its delayed phase barrier exposes the
+            # provisional discovery overview without draining later stages.
+            self._drain(max_tasks=2)
         else:
             self._drain()
         return super().get_research_status(research_id)

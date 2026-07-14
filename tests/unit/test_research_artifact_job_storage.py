@@ -64,6 +64,8 @@ class CountingFilesystemStore(FilesystemResearchArtifactStore):
         self.read_calls = 0
         self.logical_read_calls = 0
         self.list_calls = 0
+        self.logical_read_kinds: list[ArtifactKind] = []
+        self.list_kinds: list[ArtifactKind | None] = []
 
     def read(self, ref: ArtifactRef) -> StoredArtifact | None:
         self.read_calls += 1
@@ -76,18 +78,22 @@ class CountingFilesystemStore(FilesystemResearchArtifactStore):
         logical_key: str,
     ) -> StoredArtifact | None:
         self.logical_read_calls += 1
+        self.logical_read_kinds.append(kind)
         return super().read_logical(research_id, kind, logical_key)
 
     def list(
         self, research_id: str, kind: ArtifactKind | None = None
     ) -> tuple[ArtifactRef, ...]:
         self.list_calls += 1
+        self.list_kinds.append(kind)
         return super().list(research_id, kind)
 
     def reset_counts(self) -> None:
         self.read_calls = 0
         self.logical_read_calls = 0
         self.list_calls = 0
+        self.logical_read_kinds.clear()
+        self.list_kinds.clear()
 
 
 def contract(
@@ -135,10 +141,14 @@ def assert_job_store(_store: ResearchJobStore) -> None:
     """Static protocol assertion for mypy users."""
 
 
-def event_refs(store: FilesystemResearchArtifactStore, research_id: str):
+def event_refs(
+    store: FilesystemResearchArtifactStore,
+    research_id: str,
+    kind: ArtifactKind = ArtifactKind.JOB_STATE,
+):
     return tuple(
         ref
-        for ref in store.list(research_id, ArtifactKind.OUTCOME)
+        for ref in store.list(research_id, kind)
         if ref.logical_key is not None and ref.logical_key.startswith("job-event-v1-")
     )
 
@@ -207,6 +217,8 @@ def test_job_fixed_state_and_history_skip_unrelated_outcome_reads(
     assert restored == running
     assert artifacts.list_calls == 1
     assert artifacts.logical_read_calls == 1
+    assert artifacts.list_kinds == [ArtifactKind.JOB_STATE]
+    assert artifacts.logical_read_kinds == [ArtifactKind.JOB_STATE]
     # Only the single job event is read; 100 unrelated outcomes are not.
     assert artifacts.read_calls == 1
 
@@ -222,6 +234,91 @@ def test_job_fixed_state_and_history_skip_unrelated_outcome_reads(
     assert artifacts.list_calls == 0
     assert artifacts.read_calls == 0
     assert artifacts.logical_read_calls == 1
+    assert artifacts.logical_read_kinds == [ArtifactKind.JOB_STATE]
+
+
+def test_legacy_outcome_history_is_read_and_continued_in_place(tmp_path: Path) -> None:
+    clock = Clock()
+    source_artifacts = FilesystemResearchArtifactStore(tmp_path / "source")
+    source = ArtifactResearchJobStore(
+        source_artifacts,
+        now=clock,
+        id_factory=lambda: "research_legacy_outcome",
+        creation_id_factory=lambda: "0" * 32,
+    )
+    job = source.create(contract(), "revision")
+    clock.value += timedelta(seconds=1)
+    running = source.transition(
+        job.id,
+        JobStatus.RUNNING,
+        stage="collecting",
+        progress=0.25,
+    )
+
+    legacy_artifacts = CountingFilesystemStore(tmp_path / "legacy")
+    for ref in source_artifacts.list(job.id, ArtifactKind.JOB_STATE):
+        stored = source_artifacts.read(ref)
+        assert stored is not None
+        legacy_artifacts.write(
+            job.id,
+            ArtifactKind.OUTCOME,
+            stored.payload,
+            logical_key=ref.logical_key,
+        )
+    legacy_artifacts.reset_counts()
+
+    restored_store = ArtifactResearchJobStore(legacy_artifacts, now=clock)
+    assert restored_store.get(job.id) == running
+    assert legacy_artifacts.logical_read_kinds == [
+        ArtifactKind.JOB_STATE,
+        ArtifactKind.OUTCOME,
+    ]
+    assert legacy_artifacts.list_kinds == [ArtifactKind.OUTCOME]
+
+    legacy_artifacts.reset_counts()
+    clock.value += timedelta(seconds=1)
+    continued = restored_store.transition(
+        job.id,
+        JobStatus.RUNNING,
+        stage="resolving",
+        progress=0.5,
+    )
+
+    assert continued.stage == "resolving"
+    assert legacy_artifacts.list(job.id, ArtifactKind.JOB_STATE) == ()
+    assert len(event_refs(legacy_artifacts, job.id, ArtifactKind.OUTCOME)) == 2
+
+
+def test_missing_job_fallback_lists_only_job_state(tmp_path: Path) -> None:
+    artifacts = CountingFilesystemStore(tmp_path)
+
+    assert ArtifactResearchJobStore(artifacts).get("research_missing") is None
+    assert artifacts.logical_read_kinds == [
+        ArtifactKind.JOB_STATE,
+        ArtifactKind.OUTCOME,
+    ]
+    assert artifacts.list_kinds == [ArtifactKind.JOB_STATE]
+
+
+def test_missing_job_rejects_orphan_job_state_events(tmp_path: Path) -> None:
+    artifacts = CountingFilesystemStore(tmp_path)
+    event_id = "a" * 64
+    artifacts.write(
+        "research_orphan",
+        ArtifactKind.JOB_STATE,
+        {"orphan": True},
+        logical_key=f"job-event-v1-{event_id}",
+    )
+    artifacts.reset_counts()
+
+    with pytest.raises(ArtifactIntegrityError, match="events have no initial state"):
+        ArtifactResearchJobStore(artifacts).get("research_orphan")
+
+    assert artifacts.logical_read_kinds == [
+        ArtifactKind.JOB_STATE,
+        ArtifactKind.OUTCOME,
+    ]
+    assert artifacts.list_kinds == [ArtifactKind.JOB_STATE]
 
 
 def test_duplicate_transition_intent_is_idempotent_across_instances(
@@ -409,7 +506,7 @@ def test_ttl_expiry_is_derived_without_writing_an_event(tmp_path: Path) -> None:
         creation_id_factory=lambda: "6" * 32,
     )
     job = store.create(contract(), "revision", ttl=timedelta(minutes=5))
-    refs_before = artifacts.list(job.id, ArtifactKind.OUTCOME)
+    refs_before = artifacts.list(job.id, ArtifactKind.JOB_STATE)
     clock.value += timedelta(minutes=5)
 
     expired = ArtifactResearchJobStore(artifacts, now=clock).get(job.id)
@@ -418,7 +515,7 @@ def test_ttl_expiry_is_derived_without_writing_an_event(tmp_path: Path) -> None:
     assert expired.status is JobStatus.EXPIRED
     assert expired.stage == "expired"
     assert expired.updated_at == job.expires_at
-    assert artifacts.list(job.id, ArtifactKind.OUTCOME) == refs_before
+    assert artifacts.list(job.id, ArtifactKind.JOB_STATE) == refs_before
     with pytest.raises(ValueError, match="invalid research job transition"):
         store.transition(job.id, JobStatus.RUNNING, stage="late", progress=0.1)
     with pytest.raises(ValueError, match="derived"):
@@ -509,7 +606,7 @@ def test_every_job_event_is_validated_and_unrelated_outcomes_are_ignored(
     bad_id = "b" * 64
     artifacts.write(
         job.id,
-        ArtifactKind.OUTCOME,
+        ArtifactKind.JOB_STATE,
         {
             "schema_version": 1,
             "artifact_type": "research_job_event_v1",

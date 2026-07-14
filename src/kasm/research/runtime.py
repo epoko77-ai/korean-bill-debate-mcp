@@ -13,7 +13,6 @@ from kasm.corpus import CorpusRepository, VercelBlobCorpusObjectStore
 from kasm.search.terminology import TERMINOLOGY_VERSION
 
 from .artifact_job_storage import ArtifactResearchJobStore
-from .artifact_run_storage import ArtifactResearchRunStore
 from .artifacts import VercelBlobResearchArtifactStore
 from .backend import DurableResearchBackend
 from .bill_documents import OfficialBillDocumentDiscoverer
@@ -27,6 +26,7 @@ from .partitioning import ResearchPartitionPlanner
 from .planner import ResearchContractPlanner
 from .queue import VercelResearchTaskQueue
 from .resolver import MetadataCandidateResolver
+from .status_storage import StatusSnapshotResearchRunStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +131,7 @@ def create_hosted_research_runtime(
             ),
         ),
         finalizer=ConnectedResearchFinalizer(build_sha=build_sha),
-        runs=ArtifactResearchRunStore(artifacts),
+        runs=StatusSnapshotResearchRunStore(artifacts),
         status_page_size=int(os.getenv("KBD_RESEARCH_STATUS_PAGE_SIZE", "100")),
         direct_fanout_limit=int(os.getenv("KBD_RESEARCH_DIRECT_FANOUT_LIMIT", "4")),
         fanout_chunk_size=int(os.getenv("KBD_RESEARCH_FANOUT_CHUNK_SIZE", "4")),

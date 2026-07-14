@@ -253,6 +253,46 @@ def test_engine_failure_log_contains_only_bounded_structured_diagnostics(
     assert "api_key" not in rendered
 
 
+@pytest.mark.parametrize(
+    ("stage", "work_kind"),
+    (
+        (ResearchTaskStage.COLLECT_METADATA, "phase_barrier"),
+        (ResearchTaskStage.FINALIZE, "document_finalize_barrier"),
+    ),
+)
+def test_barrier_work_kinds_remain_visible_in_safe_failure_logs(
+    caplog: pytest.LogCaptureFixture,
+    stage: ResearchTaskStage,
+    work_kind: str,
+) -> None:
+    task = ResearchTask(
+        research_id="research_barrier_log",
+        stage=stage,
+        work_id=f"{work_kind}:scope:1",
+        query_fingerprint="c" * 64,
+        index_revision="index-test",
+        payload=(("work_kind", work_kind), ("attempt", 1)),
+    )
+    engine = _Engine()
+    engine.failure = RuntimeError(f"must not log {_CAPABILITY}")
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+
+    with caplog.at_level(logging.ERROR, logger=dispatch_module.__name__):
+        status, _response, _headers = _request(
+            app,
+            json.dumps(task.to_queue_payload()).encode(),
+        )
+
+    assert status == 503
+    record = next(
+        item
+        for item in caplog.records
+        if item.name == dispatch_module.__name__
+    )
+    assert record.work_kind == work_kind
+    assert _CAPABILITY not in caplog.text
+
+
 def test_final_failed_delivery_is_recorded_and_acknowledged() -> None:
     engine = _Engine()
     engine.failure = RuntimeError(f"persistent {_CAPABILITY} {_BODY_MARKER}")

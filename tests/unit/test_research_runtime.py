@@ -8,6 +8,7 @@ from kasm.research.artifact_run_storage import ArtifactResearchRunStore
 from kasm.research.backend import DurableResearchBackend
 from kasm.research.corpus_runtime import RevisionCorpusRecallProvider
 from kasm.research.runtime import create_hosted_research_runtime
+from kasm.research.status_storage import StatusSnapshotResearchRunStore
 
 
 def test_hosted_runtime_is_composed_lazily_without_network_or_user_key(monkeypatch) -> None:
@@ -25,6 +26,7 @@ def test_hosted_runtime_is_composed_lazily_without_network_or_user_key(monkeypat
     assert isinstance(runtime.backend, DurableResearchBackend)
     assert isinstance(runtime.engine.jobs, ArtifactResearchJobStore)
     assert isinstance(runtime.engine.runs, ArtifactResearchRunStore)
+    assert isinstance(runtime.engine.runs, StatusSnapshotResearchRunStore)
     assert runtime.engine.index_revision.startswith("research-v1+")
     assert runtime.engine.partition_planner.page_size == 1000
 

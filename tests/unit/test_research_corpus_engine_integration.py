@@ -280,8 +280,28 @@ def _run(engine: ResearchEngine, queue: Queue, query: str = "AI 입법") -> str:
         as_of=AS_OF,
         evidence_types=(EvidenceType.BILLS,),
     )
-    assert len(queue.tasks) == 1
-    engine.process_metadata_task(queue.tasks[0])
+    assert len(queue.tasks) == 2
+    engine.process_metadata_task(
+        next(
+            task
+            for task in queue.tasks
+            if dict(task.payload).get("work_kind") == "metadata_page"
+        )
+    )
+    engine.process_metadata_task(
+        next(
+            task
+            for task in queue.tasks
+            if dict(task.payload).get("work_kind") == "phase_barrier"
+        )
+    )
+    engine.process_finalize_task(
+        next(
+            task
+            for task in queue.tasks
+            if dict(task.payload).get("work_kind") == "document_finalize_barrier"
+        )
+    )
     return receipt.research_id
 
 
@@ -359,7 +379,27 @@ def test_worker_with_another_corpus_revision_fails_closed_in_flight() -> None:
         queue=queue,
     )
 
-    worker.process_metadata_task(queue.tasks[0])
+    worker.process_metadata_task(
+        next(
+            task
+            for task in queue.tasks
+            if dict(task.payload).get("work_kind") == "metadata_page"
+        )
+    )
+    worker.process_metadata_task(
+        next(
+            task
+            for task in queue.tasks
+            if dict(task.payload).get("work_kind") == "phase_barrier"
+        )
+    )
+    worker.process_finalize_task(
+        next(
+            task
+            for task in queue.tasks
+            if dict(task.payload).get("work_kind") == "document_finalize_barrier"
+        )
+    )
 
     discovery = runs.get_discovery(receipt.research_id)
     assert discovery is not None and discovery.corpus_recall is not None
