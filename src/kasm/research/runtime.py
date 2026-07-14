@@ -138,10 +138,9 @@ def create_hosted_research_runtime(
             ),
         ),
         status_page_size=int(os.getenv("KBD_RESEARCH_STATUS_PAGE_SIZE", "100")),
-        direct_fanout_limit=int(os.getenv("KBD_RESEARCH_DIRECT_FANOUT_LIMIT", "4")),
-        # Match the Queue trigger's bounded concurrency. One coordinator can
-        # expose a complete eight-item window without serial four-item hops;
-        # larger work still chains durably in bounded windows.
+        direct_fanout_limit=int(os.getenv("KBD_RESEARCH_DIRECT_FANOUT_LIMIT", "7")),
+        # Seven direct pages plus the delayed barrier fit the eight-worker
+        # ceiling. Larger work uses durable eight-item coordinator windows.
         fanout_chunk_size=int(os.getenv("KBD_RESEARCH_FANOUT_CHUNK_SIZE", "8")),
         fanout_delay_seconds=int(
             os.getenv("KBD_RESEARCH_FANOUT_DELAY_SECONDS", "0")

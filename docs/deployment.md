@@ -63,10 +63,11 @@ collapses a research job into one synchronous operation. Push and recovery races
 through the same immutable artifacts, queue idempotency keys, and write-once task receipts without
 adding a receipt lookup to the normal first push delivery.
 
-The hosted defaults publish at most four tasks directly from the request and let each durable
-coordinator expose an eight-item window with no artificial inter-window delay. The smaller direct
-limit keeps the interactive request responsive; the coordinator window then matches the Queue
-trigger's concurrency ceiling without creating unbounded fan-out. Override
+The hosted defaults publish at most seven page tasks directly from the request; together with the
+delayed phase barrier, an exact investigation seeds no more than eight initial Queue messages. This
+removes a coordinator round trip for the complete seven-part exact-bill plan while preserving the
+Queue trigger's concurrency ceiling. Larger plans use durable eight-item coordinator windows with
+no artificial inter-window delay and no unbounded fan-out. Override
 `KBD_RESEARCH_DIRECT_FANOUT_LIMIT`, `KBD_RESEARCH_FANOUT_CHUNK_SIZE`, and
 `KBD_RESEARCH_FANOUT_DELAY_SECONDS` only together with a measured Queue concurrency change.
 

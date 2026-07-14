@@ -116,8 +116,8 @@
   between bounded windows, preserving complete traversal while eliminating serial four-item hops.
 - Inline the bounded first candidate-map page in ready status responses, allowing web MCP clients
   to show useful progress without another serverless round trip while full source work continues.
-- Keep interactive requests to four direct publications while eight-item durable coordinator
-  windows use the full Queue ceiling; production measurements showed this lowers receipt latency.
+- Seed the seven-part exact-bill plan directly and reserve the eighth initial Queue message for its
+  delayed barrier, removing a measured coordinator hop without exceeding the worker ceiling.
 
 ### Known limitations
 

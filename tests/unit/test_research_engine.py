@@ -633,15 +633,21 @@ def test_exact_identifier_gateway_replaces_56_way_scan_with_seven_bounded_tasks(
         if dict(task.payload).get("work_kind") == "metadata_page"
         and dict(task.payload).get("phase") == "discovery"
     )
-    assert direct == ()
+    assert len(direct) == 7
     coordinators = [
         task
         for task in queue.tasks
         if dict(task.payload).get("work_kind") == "discovery_fanout"
     ]
-    assert len(coordinators) == 1
-    assert dict(coordinators[0].payload)["start"] == 0
-    assert dict(coordinators[0].payload)["stop"] == 7
+    assert coordinators == []
+    assert len(queue.tasks) == 8
+    assert len(
+        [
+            task
+            for task in queue.tasks
+            if dict(task.payload).get("work_kind") == "phase_barrier"
+        ]
+    ) == 1
 
 
 def test_exact_fast_path_produces_overview_and_terminal_result_with_bounded_work() -> None:
