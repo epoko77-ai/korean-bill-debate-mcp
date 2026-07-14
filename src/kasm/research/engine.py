@@ -1020,7 +1020,7 @@ class ResearchEngine:
         task_retention_seconds: int = 86_400,
         direct_fanout_limit: int = 4,
         fanout_chunk_size: int = 4,
-        fanout_delay_seconds: int = 3,
+        fanout_delay_seconds: int = 1,
         corpus_recall_provider: CorpusRecallProvider | None = None,
     ) -> None:
         if not index_revision.strip():
