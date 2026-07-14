@@ -124,9 +124,7 @@ class OverviewEntityGroup:
             "entity_id": self.entity_id,
             "evidence_count": self.evidence_count,
             "evidence_ids": list(self.evidence_ids),
-            "evidence_type_counts": [
-                item.to_dict() for item in self.evidence_type_counts
-            ],
+            "evidence_type_counts": [item.to_dict() for item in self.evidence_type_counts],
             "date_from": self.date_from.isoformat() if self.date_from else None,
             "date_to": self.date_to.isoformat() if self.date_to else None,
             "undated_evidence_ids": list(self.undated_evidence_ids),
@@ -197,9 +195,7 @@ class EvidenceInventory:
         return {
             "evidence_count": self.evidence_count,
             "evidence_ids": list(self.evidence_ids),
-            "evidence_type_counts": [
-                item.to_dict() for item in self.evidence_type_counts
-            ],
+            "evidence_type_counts": [item.to_dict() for item in self.evidence_type_counts],
             "date_from": self.date_from.isoformat() if self.date_from else None,
             "date_to": self.date_to.isoformat() if self.date_to else None,
             "undated_evidence_ids": list(self.undated_evidence_ids),
@@ -505,8 +501,17 @@ def build_research_overview(
     if not 1 <= core_limit <= _MAX_CORE_LIMIT:
         raise ValueError(f"core_limit must be between 1 and {_MAX_CORE_LIMIT}")
     records = tuple(snapshot.evidence)
-    inventory = _inventory(records)
-    core = _core(records, snapshot.coverage, core_limit)
+    canonical_bill_numbers = _canonical_bill_numbers(records)
+    inventory = _inventory(
+        records,
+        canonical_bill_numbers=canonical_bill_numbers,
+    )
+    core = _core(
+        records,
+        snapshot.coverage,
+        core_limit,
+        canonical_bill_numbers=canonical_bill_numbers,
+    )
     provisional_reasons = _provisional_reasons(snapshot.coverage)
     return ResearchOverview(
         research_id=snapshot.research_id,
@@ -514,9 +519,7 @@ def build_research_overview(
         index_revision=snapshot.index_revision,
         build_sha=snapshot.build_sha,
         status=(
-            OverviewStatus.COMPLETE
-            if snapshot.coverage.complete
-            else OverviewStatus.PROVISIONAL
+            OverviewStatus.COMPLETE if snapshot.coverage.complete else OverviewStatus.PROVISIONAL
         ),
         coverage=snapshot.coverage,
         provisional_reasons=provisional_reasons,
@@ -538,15 +541,18 @@ def build_provisional_research_overview(
     if isinstance(source, DiscoveryStageState):
         resolution = source.resolution
         collection = source.collection
-        filtered = source.filtered_collection
         source_accounting = ProvisionalSourceAccounting(
             source_complete=collection.coverage.source_complete,
             source_rows_expected=collection.coverage.source_rows_expected,
             source_rows_fetched=collection.coverage.source_rows_fetched,
-            bills_collected=len(collection.bills),
-            bills_after_strict_filter=len(filtered.bills),
-            meetings_collected=len(collection.meetings),
-            meetings_after_strict_filter=len(filtered.meetings),
+            # Hosted discovery artifacts intentionally omit duplicated row
+            # payloads: immutable page artifacts preserve every official row.
+            # Coverage and strict-filter accounting remain authoritative for
+            # the complete provisional map in both compact and memory stores.
+            bills_collected=collection.coverage.bill_unique_records,
+            bills_after_strict_filter=source.filter_report.bills.kept_count,
+            meetings_collected=collection.coverage.meeting_unique_pdfs,
+            meetings_after_strict_filter=source.filter_report.meetings.kept_count,
         )
     else:
         resolution = source
@@ -567,8 +573,7 @@ def build_provisional_research_overview(
         )
     )
     entries = tuple(
-        _provisional_entry(position, decision)
-        for position, decision in enumerate(accepted)
+        _provisional_entry(position, decision) for position, decision in enumerate(accepted)
     )
     return ProvisionalResearchOverview(
         query=resolution.query,
@@ -582,28 +587,32 @@ def build_provisional_research_overview(
     )
 
 
-def _inventory(records: Sequence[EvidenceRecord]) -> EvidenceInventory:
-    bindings = {record.id: _entity_bindings(record) for record in records}
+def _inventory(
+    records: Sequence[EvidenceRecord],
+    *,
+    canonical_bill_numbers: frozenset[str],
+) -> EvidenceInventory:
+    bindings = {
+        record.id: _entity_bindings(
+            record,
+            canonical_bill_numbers=canonical_bill_numbers,
+        )
+        for record in records
+    }
     grouped: dict[OverviewEntityType, dict[str, list[EvidenceRecord]]] = {
         entity_type: defaultdict(list) for entity_type in OverviewEntityType
     }
     for record in records:
         for entity_type, entity_id in bindings[record.id]:
             grouped[entity_type][entity_id].append(record)
-    assigned = {
-        record.id
-        for record in records
-        if bindings[record.id]
-    }
+    assigned = {record.id for record in records if bindings[record.id]}
     dates = tuple(value for record in records if (value := _event_date(record)) is not None)
     return EvidenceInventory(
         evidence_ids=tuple(record.id for record in records),
         evidence_type_counts=_type_counts(records),
         date_from=min(dates) if dates else None,
         date_to=max(dates) if dates else None,
-        undated_evidence_ids=tuple(
-            record.id for record in records if _event_date(record) is None
-        ),
+        undated_evidence_ids=tuple(record.id for record in records if _event_date(record) is None),
         bill_groups=_groups(OverviewEntityType.BILL, grouped[OverviewEntityType.BILL]),
         meeting_groups=_groups(
             OverviewEntityType.MEETING,
@@ -617,9 +626,7 @@ def _inventory(records: Sequence[EvidenceRecord]) -> EvidenceInventory:
             OverviewEntityType.SPEECH,
             grouped[OverviewEntityType.SPEECH],
         ),
-        unassigned_evidence_ids=tuple(
-            record.id for record in records if record.id not in assigned
-        ),
+        unassigned_evidence_ids=tuple(record.id for record in records if record.id not in assigned),
     )
 
 
@@ -645,7 +652,8 @@ def _provisional_entry(
         if (
             not meeting_url
             or parsed.scheme != "https"
-            or parsed.hostname not in {
+            or parsed.hostname
+            not in {
                 "open.assembly.go.kr",
                 "record.assembly.go.kr",
             }
@@ -698,9 +706,7 @@ def _groups(
     groups: list[OverviewEntityGroup] = []
     for entity_id in sorted(values):
         records = tuple(sorted(values[entity_id], key=_record_key))
-        dates = tuple(
-            value for record in records if (value := _event_date(record)) is not None
-        )
+        dates = tuple(value for record in records if (value := _event_date(record)) is not None)
         groups.append(
             OverviewEntityGroup(
                 entity_type=entity_type,
@@ -721,6 +727,8 @@ def _core(
     records: Sequence[EvidenceRecord],
     coverage: CoverageLedger,
     limit: int,
+    *,
+    canonical_bill_numbers: frozenset[str],
 ) -> tuple[CoreEvidence, ...]:
     by_type: dict[EvidenceType, list[EvidenceRecord]] = defaultdict(list)
     for record in records:
@@ -730,22 +738,21 @@ def _core(
 
     selected: list[tuple[EvidenceRecord, tuple[str, ...]]] = []
     selected_ids: set[str] = set()
-    complete_axes = {
-        entry.evidence_type: entry.complete for entry in coverage.entries
-    }
+    complete_axes = {entry.evidence_type: entry.complete for entry in coverage.entries}
     for evidence_type in _CORE_ORDER:
-        candidates = by_type.get(evidence_type, [])
+        candidates = [
+            record
+            for record in by_type.get(evidence_type, [])
+            if _eligible_for_core(
+                record,
+                canonical_bill_numbers=canonical_bill_numbers,
+            )
+        ]
         if not candidates or len(selected) >= limit:
             continue
-        record = (
-            candidates[-1]
-            if evidence_type is EvidenceType.BILL_STATUS
-            else candidates[0]
-        )
+        record = candidates[-1] if evidence_type is EvidenceType.BILL_STATUS else candidates[0]
         selection = (
-            "latest_in_axis"
-            if evidence_type is EvidenceType.BILL_STATUS
-            else "earliest_in_axis"
+            "latest_in_axis" if evidence_type is EvidenceType.BILL_STATUS else "earliest_in_axis"
         )
         selected.append(
             (
@@ -764,7 +771,15 @@ def _core(
         selected_ids.add(record.id)
 
     remaining = sorted(
-        (record for record in records if record.id not in selected_ids),
+        (
+            record
+            for record in records
+            if record.id not in selected_ids
+            and _eligible_for_core(
+                record,
+                canonical_bill_numbers=canonical_bill_numbers,
+            )
+        ),
         key=lambda record: (
             _CORE_PRIORITY.get(record.evidence_type, len(_CORE_PRIORITY)),
             record.sort_key,
@@ -792,7 +807,10 @@ def _core(
             evidence_id=record.id,
             evidence_type=record.evidence_type,
             reasons=reasons,
-            entity_bindings=_entity_bindings(record),
+            entity_bindings=_entity_bindings(
+                record,
+                canonical_bill_numbers=canonical_bill_numbers,
+            ),
         )
         for rank, (record, reasons) in enumerate(selected, start=1)
     )
@@ -800,24 +818,20 @@ def _core(
 
 def _entity_bindings(
     record: EvidenceRecord,
+    *,
+    canonical_bill_numbers: frozenset[str],
 ) -> tuple[tuple[OverviewEntityType, str], ...]:
     metadata = dict(record.metadata)
     values: list[tuple[OverviewEntityType, str]] = []
-    bill_numbers = set(_metadata_identifiers(metadata, "related_bill_numbers"))
-    if (bill_number := _metadata_identifier(metadata, "bill_no")) is not None:
-        bill_numbers.add(bill_number)
     values.extend(
         (OverviewEntityType.BILL, bill_number)
-        for bill_number in sorted(bill_numbers)
-        if _BILL_NUMBER.fullmatch(bill_number)
+        for bill_number in _record_bill_numbers(record)
+        if bill_number in canonical_bill_numbers
     )
     meeting_ids = set(_metadata_identifiers(metadata, "related_meeting_ids"))
     if (meeting_id := _metadata_identifier(metadata, "meeting_id")) is not None:
         meeting_ids.add(meeting_id)
-    values.extend(
-        (OverviewEntityType.MEETING, meeting_id)
-        for meeting_id in sorted(meeting_ids)
-    )
+    values.extend((OverviewEntityType.MEETING, meeting_id) for meeting_id in sorted(meeting_ids))
     work_id = _metadata_identifier(metadata, "work_id")
     if work_id is not None:
         values.append((OverviewEntityType.DOCUMENT, work_id))
@@ -835,11 +849,58 @@ def _entity_bindings(
     )
     if direct_id:
         speech_ids.add(direct_id)
-    values.extend(
-        (OverviewEntityType.SPEECH, speech_id)
-        for speech_id in sorted(speech_ids)
-    )
+    values.extend((OverviewEntityType.SPEECH, speech_id) for speech_id in sorted(speech_ids))
     return tuple(sorted(set(values), key=lambda item: (item[0].value, item[1])))
+
+
+def _eligible_for_core(
+    record: EvidenceRecord,
+    *,
+    canonical_bill_numbers: frozenset[str],
+) -> bool:
+    """Keep context-only rejected bill agenda items out of the quick core.
+
+    The complete evidence inventory still retains every record. When accepted
+    bill evidence exists, however, a record that explicitly names only other
+    bill numbers is context for a mixed meeting rather than a target source.
+    """
+
+    if not canonical_bill_numbers:
+        return True
+    mentioned = set(_record_bill_numbers(record))
+    return not mentioned or not mentioned.isdisjoint(canonical_bill_numbers)
+
+
+def _record_bill_numbers(record: EvidenceRecord) -> tuple[str, ...]:
+    metadata = dict(record.metadata)
+    values = set(_metadata_identifiers(metadata, "related_bill_numbers"))
+    if (bill_number := _metadata_identifier(metadata, "bill_no")) is not None:
+        values.add(bill_number)
+    return tuple(sorted(value for value in values if _BILL_NUMBER.fullmatch(value)))
+
+
+def _canonical_bill_numbers(records: Sequence[EvidenceRecord]) -> frozenset[str]:
+    """Return only bill identities proven by finalized official bill evidence.
+
+    Minutes and speeches can mention additional agenda numbers from the same
+    meeting.  Those exact mentions remain in their immutable metadata and the
+    evidence graph, but they must not resurrect a resolver-rejected bill as a
+    canonical final-catalog entity.  ``EvidenceType.BILLS`` records are created
+    only from accepted official bill metadata, so they are the authority for
+    final overview bill grouping.
+    """
+
+    numbers: list[str] = []
+    for record in records:
+        if record.evidence_type is not EvidenceType.BILLS:
+            continue
+        bill_number = _metadata_identifier(dict(record.metadata), "bill_no")
+        if bill_number is None or not _BILL_NUMBER.fullmatch(bill_number):
+            raise ValueError("bill evidence lacks an exact seven-digit bill number")
+        numbers.append(bill_number)
+    if len(numbers) != len(set(numbers)):
+        raise ValueError("bill evidence contains duplicate canonical bill numbers")
+    return frozenset(numbers)
 
 
 def _metadata_identifier(
@@ -899,17 +960,12 @@ def _provisional_reasons(coverage: CoverageLedger) -> tuple[str, ...]:
             continue
         reasons.append(f"axis_incomplete:{entry.evidence_type.value}")
         reasons.extend(
-            f"axis_gap:{entry.evidence_type.value}:{reason}"
-            for reason in entry.gap_reasons
+            f"axis_gap:{entry.evidence_type.value}:{reason}" for reason in entry.gap_reasons
         )
         if entry.failed_count:
-            reasons.append(
-                f"axis_failed:{entry.evidence_type.value}:{entry.failed_count}"
-            )
+            reasons.append(f"axis_failed:{entry.evidence_type.value}:{entry.failed_count}")
         if entry.pending_count:
-            reasons.append(
-                f"axis_pending:{entry.evidence_type.value}:{entry.pending_count}"
-            )
+            reasons.append(f"axis_pending:{entry.evidence_type.value}:{entry.pending_count}")
         if entry.candidate_total is None:
             reasons.append(f"axis_total_unknown:{entry.evidence_type.value}")
     return tuple(dict.fromkeys(reasons))

@@ -23,8 +23,13 @@ from .queue import ResearchTask, ResearchTaskStage
 INTERNAL_DISPATCH_PATH = "/_internal/research/dispatch"
 INTERNAL_DISPATCH_SECRET_HEADER = b"x-kbd-internal-secret"
 INTERNAL_DISPATCH_DELIVERY_COUNT_HEADER = b"x-kbd-delivery-count"
+INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER = b"x-kbd-terminal-failure"
+INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE = b"task_retry_budget_exhausted"
+INTERNAL_DISPATCH_ERROR_CLASS_HEADER = b"x-kbd-dispatch-error-class"
+INTERNAL_DISPATCH_PERMANENT_TASK_ERROR_CLASS = b"permanent-task"
 MAX_RESEARCH_TASK_BYTES = 64 * 1024
 MAX_RESEARCH_TASK_DELIVERIES = 10
+_PERMANENT_TASK_ERROR_CODES = frozenset({"invalid_task", "request_too_large"})
 _LOGGER = logging.getLogger(__name__)
 _SAFE_WORK_KINDS = frozenset(
     {
@@ -50,6 +55,10 @@ class ResearchTaskEngine(Protocol):
 
     def process_finalize_task(self, task: ResearchTask) -> object: ...
 
+    def task_completed(self, task: ResearchTask) -> bool: ...
+
+    def complete_task(self, task: ResearchTask) -> object: ...
+
     def fail_task(self, task: ResearchTask, *, error_code: str) -> object: ...
 
 
@@ -59,17 +68,24 @@ class ResearchTaskDispatcher:
 
     engine: ResearchTaskEngine
 
-    def dispatch(self, task: ResearchTask) -> None:
+    def dispatch(self, task: ResearchTask, *, delivery_count: int) -> None:
+        # The first attempt avoids a remote receipt GET.  A redelivery checks
+        # the generic write-once receipt first so a lost ACK/response never
+        # repeats already-completed work or republishes its child tasks.
+        if delivery_count > 1 and self.engine.task_completed(task):
+            return
         if task.stage is ResearchTaskStage.COLLECT_METADATA:
             self.engine.process_metadata_task(task)
-            return
-        if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT:
+        elif task.stage is ResearchTaskStage.HYDRATE_DOCUMENT:
             self.engine.process_document_task(task)
-            return
-        if task.stage is ResearchTaskStage.FINALIZE:
+        elif task.stage is ResearchTaskStage.FINALIZE:
             self.engine.process_finalize_task(task)
-            return
-        raise ValueError("unsupported research task stage")  # pragma: no cover
+        else:
+            raise ValueError("unsupported research task stage")  # pragma: no cover
+        # A normal delivery is acknowledged only after this generic write-once
+        # receipt proves that its stage/work_id completed durably.  If the
+        # receipt write fails, the exception propagates and Vercel retries.
+        self.engine.complete_task(task)
 
     def fail(self, task: ResearchTask, *, error_code: str) -> None:
         self.engine.fail_task(task, error_code=error_code)
@@ -159,26 +175,41 @@ class ResearchTaskDispatchASGI:
         except ValueError:
             await _json_response(send, 400, "invalid_delivery_count")
             return
+        try:
+            terminal_failure = _terminal_failure_requested(headers, delivery_count)
+        except ValueError:
+            await _json_response(send, 400, "invalid_terminal_failure")
+            return
+        if delivery_count > MAX_RESEARCH_TASK_DELIVERIES and not terminal_failure:
+            # Once the normal-attempt budget is exhausted, a later delivery may
+            # only record/check terminal state.  Never execute the expensive
+            # task again after an ambiguous timeout.
+            await _json_response(send, 400, "terminal_failure_required")
+            return
         oidc_token = headers.get(b"x-vercel-oidc-token", b"").decode("latin-1")
+        if terminal_failure:
+            try:
+                with bind_vercel_oidc_token(oidc_token):
+                    await asyncio.to_thread(
+                        self.dispatcher.fail,
+                        task,
+                        error_code="task_retry_budget_exhausted",
+                    )
+            except Exception as exc:
+                _log_dispatch_failure(exc, task, delivery_count)
+                await _json_response(send, 503, "dispatch_failed")
+                return
+            await _json_response(send, 200, "failed", stage=task.stage.value)
+            return
         try:
             with bind_vercel_oidc_token(oidc_token):
-                await asyncio.to_thread(self.dispatcher.dispatch, task)
+                await asyncio.to_thread(
+                    self.dispatcher.dispatch,
+                    task,
+                    delivery_count=delivery_count,
+                )
         except Exception as exc:
             _log_dispatch_failure(exc, task, delivery_count)
-            if delivery_count >= MAX_RESEARCH_TASK_DELIVERIES:
-                try:
-                    with bind_vercel_oidc_token(oidc_token):
-                        await asyncio.to_thread(
-                            self.dispatcher.fail,
-                            task,
-                            error_code="task_retry_budget_exhausted",
-                        )
-                except Exception as terminal_exc:
-                    _log_dispatch_failure(terminal_exc, task, delivery_count)
-                    await _json_response(send, 503, "dispatch_failed")
-                    return
-                await _json_response(send, 200, "failed", stage=task.stage.value)
-                return
             # The non-2xx response makes the TypeScript bridge throw, so Vercel
             # Queues retains and retries the delivery.  Do not expose the engine
             # exception: it may contain an official URL or credential material.
@@ -236,6 +267,20 @@ def _delivery_count(headers: dict[bytes, bytes]) -> int:
     return value
 
 
+def _terminal_failure_requested(
+    headers: dict[bytes, bytes], delivery_count: int
+) -> bool:
+    raw = headers.get(INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER)
+    if raw is None:
+        return False
+    if (
+        raw != INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE
+        or delivery_count <= MAX_RESEARCH_TASK_DELIVERIES
+    ):
+        raise ValueError("invalid terminal failure request")
+    return True
+
+
 async def _read_bounded_body(receive: Any, limit: int) -> bytes | None:
     body = bytearray()
     while True:
@@ -266,16 +311,27 @@ async def _json_response(
     else:
         payload["error"] = code
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode()
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"cache-control", b"no-store"),
+        (b"x-content-type-options", b"nosniff"),
+        (b"content-length", str(len(body)).encode()),
+    ]
+    if status >= 400 and code in _PERMANENT_TASK_ERROR_CODES:
+        # The bridge never infers permanence from a proxy status alone.  This
+        # fixed, non-sensitive class proves that this validated boundary—not a
+        # Vercel/auth/deployment layer—rejected the task shape.
+        headers.append(
+            (
+                INTERNAL_DISPATCH_ERROR_CLASS_HEADER,
+                INTERNAL_DISPATCH_PERMANENT_TASK_ERROR_CLASS,
+            )
+        )
     await send(
         {
             "type": "http.response.start",
             "status": status,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"cache-control", b"no-store"),
-                (b"x-content-type-options", b"nosniff"),
-                (b"content-length", str(len(body)).encode()),
-            ],
+            "headers": headers,
         }
     )
     await send({"type": "http.response.body", "body": body})
@@ -284,7 +340,11 @@ async def _json_response(
 __all__ = [
     "INTERNAL_DISPATCH_PATH",
     "INTERNAL_DISPATCH_DELIVERY_COUNT_HEADER",
+    "INTERNAL_DISPATCH_ERROR_CLASS_HEADER",
+    "INTERNAL_DISPATCH_PERMANENT_TASK_ERROR_CLASS",
     "INTERNAL_DISPATCH_SECRET_HEADER",
+    "INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE",
+    "INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER",
     "MAX_RESEARCH_TASK_DELIVERIES",
     "MAX_RESEARCH_TASK_BYTES",
     "ResearchTaskDispatchASGI",

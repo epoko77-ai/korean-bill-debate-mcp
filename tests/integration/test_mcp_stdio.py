@@ -8,6 +8,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from kasm import __version__
+
 ROOT = Path(__file__).parents[2]
 
 
@@ -24,6 +26,7 @@ async def exercise_stdio_server() -> None:
     ):
         initialized = await session.initialize()
         assert initialized.serverInfo.name == "Korean Bill & Debate MCP"
+        assert initialized.serverInfo.version == __version__
         listed = await session.list_tools()
         assert {tool.name for tool in listed.tools} == {
             "search_speeches",

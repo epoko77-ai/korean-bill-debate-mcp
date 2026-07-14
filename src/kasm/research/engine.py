@@ -17,7 +17,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, TypeVar, cast
 
 from kasm.adapters.korea.bills import BILL_STATUS_DATASET
 from kasm.adapters.korea.client import ApiPage, ApiResult, AssemblyOpenApiClient
@@ -31,6 +31,7 @@ from .collector import (
     MetadataCollector,
     MetadataKind,
     MetadataPartition,
+    PartitionProvenance,
 )
 from .contracts import EvidenceType, ResearchContract
 from .credentials import ResearchCredential
@@ -62,6 +63,7 @@ from .results import (
 from .transcript_evidence import TranscriptEvidence, extract_transcript_evidence
 
 if TYPE_CHECKING:
+    from .overview import ProvisionalResearchOverview
     from .overview_transport import OverviewGroupShard, OverviewTransportManifest
 
 _WORK_KIND = "work_kind"
@@ -83,6 +85,8 @@ _DOCUMENT_KIND = "document_kind"
 _OFFICIAL_URL = "official_url"
 _START = "start"
 _STOP = "stop"
+
+ROUTING_SHARD_SIZE: Final = 4
 
 _MEETING_EVIDENCE = (
     EvidenceType.AGENDAS,
@@ -140,9 +144,7 @@ class CorpusRecallState:
     gap_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.revision_id is not None and not re.fullmatch(
-            r"[0-9a-f]{64}", self.revision_id
-        ):
+        if self.revision_id is not None and not re.fullmatch(r"[0-9a-f]{64}", self.revision_id):
             raise ValueError("corpus recall revision_id must be a SHA-256 digest")
         if min(self.candidate_count, self.mapped_count) < 0:
             raise ValueError("corpus recall counts must not be negative")
@@ -156,15 +158,9 @@ class CorpusRecallState:
             raise ValueError("corpus recall work ids must not be blank")
         if any(not item.strip() for item in self.gap_reasons):
             raise ValueError("corpus recall gap reasons must not be blank")
-        object.__setattr__(
-            self, "exact_bill_numbers", tuple(sorted(set(self.exact_bill_numbers)))
-        )
-        object.__setattr__(
-            self, "exact_meeting_urls", tuple(sorted(set(self.exact_meeting_urls)))
-        )
-        object.__setattr__(
-            self, "required_work_ids", tuple(sorted(set(self.required_work_ids)))
-        )
+        object.__setattr__(self, "exact_bill_numbers", tuple(sorted(set(self.exact_bill_numbers))))
+        object.__setattr__(self, "exact_meeting_urls", tuple(sorted(set(self.exact_meeting_urls))))
+        object.__setattr__(self, "required_work_ids", tuple(sorted(set(self.required_work_ids))))
         object.__setattr__(self, "gap_reasons", tuple(dict.fromkeys(self.gap_reasons)))
         if self.status is CorpusRecallStatus.NOT_REQUIRED:
             if (
@@ -177,19 +173,14 @@ class CorpusRecallState:
                 or self.gap_reasons
             ):
                 raise ValueError("unrequired corpus recall must not carry search state")
-        elif (
-            self.revision_id is None
-            and self.status is not CorpusRecallStatus.UNAVAILABLE
-        ):
+        elif self.revision_id is None and self.status is not CorpusRecallStatus.UNAVAILABLE:
             raise ValueError("configured corpus recall requires a revision_id")
         if self.status is CorpusRecallStatus.VERIFIED and (
             self.mapped_count != self.candidate_count or self.gap_reasons
         ):
             raise ValueError("verified corpus recall must account for every candidate")
         if self.status is not CorpusRecallStatus.VERIFIED and (
-            self.exact_bill_numbers
-            or self.exact_meeting_urls
-            or self.required_work_ids
+            self.exact_bill_numbers or self.exact_meeting_urls or self.required_work_ids
         ):
             raise ValueError("unverified corpus recall cannot widen candidate scope")
 
@@ -255,6 +246,66 @@ class GatewayPlanState:
 
 
 @dataclass(frozen=True, slots=True)
+class MetadataPageReadiness:
+    """Small final-write marker proving one immutable raw API page is durable."""
+
+    query_fingerprint: str
+    index_revision: str
+    phase: MetadataPhase
+    partition_id: str
+    dataset: str
+    page: int
+    page_size: int
+    total_count: int
+    row_count: int
+    source_hash: str
+
+    def __post_init__(self) -> None:
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", self.query_fingerprint)
+            or not self.index_revision.strip()
+            or not self.partition_id.strip()
+            or not self.dataset.isalnum()
+            or not re.fullmatch(r"[0-9a-f]{64}", self.source_hash)
+        ):
+            raise ValueError("metadata page readiness binding is invalid")
+        if self.page < 1 or not 1 <= self.page_size <= 1_000 or self.total_count < 0:
+            raise ValueError("metadata page readiness pagination is invalid")
+        total_pages = max(1, (self.total_count + self.page_size - 1) // self.page_size)
+        if self.page > total_pages:
+            raise ValueError("metadata page readiness lies beyond the official total")
+        expected_rows = min(
+            self.page_size,
+            max(0, self.total_count - ((self.page - 1) * self.page_size)),
+        )
+        if self.row_count != expected_rows:
+            raise ValueError("metadata page readiness row accounting is invalid")
+
+    @classmethod
+    def create(
+        cls,
+        gateway: GatewayPlanState,
+        phase: MetadataPhase,
+        partition: MetadataPartition,
+        page: ApiPage,
+    ) -> MetadataPageReadiness:
+        if page.total_count is None:
+            raise ValueError("metadata page readiness requires an official total")
+        return cls(
+            gateway.job.query_fingerprint,
+            gateway.job.index_revision,
+            phase,
+            partition.partition_id,
+            partition.dataset,
+            page.page,
+            page.page_size,
+            page.total_count,
+            len(page.rows),
+            page.source_hash,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class FamilyFilterAccounting:
     source_count: int
     kept_count: int
@@ -293,6 +344,231 @@ class DiscoveryStageState:
     status_partitions: tuple[MetadataPartition, ...]
     document_bill_numbers: tuple[str, ...]
     corpus_recall: CorpusRecallState | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredWorkManifest:
+    """Compact discovery boundary used by every deferred worker.
+
+    Immutable page artifacts remain the authoritative official-row archive;
+    the compact discovery state preserves provenance, accepted payloads and
+    every decision score/reason. This manifest contains the hot routing and
+    resolver bindings, so deferred deliveries never decode even that broader
+    compact audit state.
+    """
+
+    query_fingerprint: str
+    index_revision: str
+    discovery_source_hash: str
+    criteria_hash: str
+    terminology_version: str
+    source_partitions: tuple[PartitionProvenance, ...]
+    source_coverage: CollectionCoverage
+    filter_report: StrictFilterReport
+    corpus_recall: CorpusRecallState | None
+    status_partitions: tuple[MetadataPartition, ...]
+    accepted_bills: tuple[CandidateDecision, ...]
+    accepted_meetings: tuple[CandidateDecision, ...]
+    accepted_bill_numbers: tuple[str, ...]
+    document_bill_numbers: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", self.query_fingerprint):
+            raise ValueError("deferred manifest query fingerprint is invalid")
+        if not self.index_revision.strip() or not re.fullmatch(
+            r"[0-9a-f]{64}", self.discovery_source_hash
+        ):
+            raise ValueError("deferred manifest discovery binding is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.criteria_hash) or not (
+            self.terminology_version.strip()
+        ):
+            raise ValueError("deferred manifest resolver binding is invalid")
+        source_partition_ids = tuple(item.partition_id for item in self.source_partitions)
+        if len(source_partition_ids) != len(set(source_partition_ids)):
+            raise ValueError("deferred source partitions must be unique")
+        if _provenance_source_hash(self.source_partitions) != self.discovery_source_hash:
+            raise ValueError("deferred source provenance hash is invalid")
+        if (
+            self.source_coverage.partitions_expected != len(self.source_partitions)
+            or self.filter_report.bills.kept_count > self.source_coverage.bill_unique_records
+            or self.filter_report.meetings.kept_count > self.source_coverage.meeting_unique_pdfs
+        ):
+            raise ValueError("deferred source accounting is invalid")
+        partition_ids = tuple(item.partition_id for item in self.status_partitions)
+        if len(partition_ids) != len(set(partition_ids)):
+            raise ValueError("deferred status partitions must be unique")
+        if any(
+            not re.fullmatch(r"\d{7}", number)
+            for number in (*self.accepted_bill_numbers, *self.document_bill_numbers)
+        ):
+            raise ValueError("deferred bill numbers must contain seven digits")
+        if len(self.accepted_bill_numbers) != len(set(self.accepted_bill_numbers)) or len(
+            self.document_bill_numbers
+        ) != len(set(self.document_bill_numbers)):
+            raise ValueError("deferred bill numbers must be unique")
+        if not set(self.document_bill_numbers) <= set(self.accepted_bill_numbers):
+            raise ValueError("document bills must belong to accepted bills")
+        accepted_numbers = tuple(
+            sorted(_candidate_bill_number(item) for item in self.accepted_bills)
+        )
+        if accepted_numbers != self.accepted_bill_numbers:
+            raise ValueError("accepted bill lookup does not match its identities")
+        if any(
+            not item.accepted or _candidate_meeting_url(item) is None
+            for item in self.accepted_meetings
+        ):
+            raise ValueError("accepted meeting lookup contains an invalid identity")
+
+    @classmethod
+    def create(
+        cls,
+        gateway: GatewayPlanState,
+        discovery: DiscoveryStageState,
+    ) -> DeferredWorkManifest:
+        return cls(
+            gateway.job.query_fingerprint,
+            gateway.job.index_revision,
+            discovery.resolution.source_hash,
+            _criteria_hash(discovery.resolution.criteria),
+            discovery.resolution.criteria.terminology_version,
+            discovery.collection.partitions,
+            discovery.collection.coverage,
+            discovery.filter_report,
+            discovery.corpus_recall,
+            discovery.status_partitions,
+            discovery.resolution.bills.accepted,
+            discovery.resolution.meetings.accepted,
+            tuple(
+                sorted(_candidate_bill_number(item) for item in discovery.resolution.bills.accepted)
+            ),
+            discovery.document_bill_numbers,
+        )
+
+
+class DeferredRouteKind(StrEnum):
+    BILL_STATUS = "bill_status"
+    BILL_DOCUMENT = "bill_document"
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredWorkRoute:
+    """One bounded deferred work identity, separate from the audit manifest."""
+
+    position: int
+    kind: DeferredRouteKind
+    status_partition: MetadataPartition | None = None
+    bill_number: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.position < 0:
+            raise ValueError("deferred route position must not be negative")
+        if self.kind is DeferredRouteKind.BILL_STATUS:
+            if self.status_partition is None or self.bill_number is not None:
+                raise ValueError("bill-status route requires exactly one partition")
+            return
+        if (
+            self.status_partition is not None
+            or self.bill_number is None
+            or not re.fullmatch(r"\d{7}", self.bill_number)
+        ):
+            raise ValueError("bill-document route requires exactly one bill number")
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredRouteShard:
+    """A fixed-size routing shard used by one deferred fan-out delivery."""
+
+    number: int
+    start_position: int
+    total: int
+    routes: tuple[DeferredWorkRoute, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.number < 0
+            or self.start_position != self.number * ROUTING_SHARD_SIZE
+            or self.total < 1
+            or not self.routes
+            or len(self.routes) > ROUTING_SHARD_SIZE
+            or self.start_position + len(self.routes) > self.total
+        ):
+            raise ValueError("deferred route shard bounds are invalid")
+        expected = tuple(range(self.start_position, self.start_position + len(self.routes)))
+        if tuple(item.position for item in self.routes) != expected:
+            raise ValueError("deferred route shard positions are not contiguous")
+        if self.start_position + len(self.routes) < self.total and (
+            len(self.routes) != ROUTING_SHARD_SIZE
+        ):
+            raise ValueError("non-final deferred route shard must be full")
+
+    @classmethod
+    def build(cls, manifest: DeferredWorkManifest) -> tuple[DeferredRouteShard, ...]:
+        routes = tuple(
+            DeferredWorkRoute(position, DeferredRouteKind.BILL_STATUS, partition)
+            for position, partition in enumerate(manifest.status_partitions)
+        ) + tuple(
+            DeferredWorkRoute(
+                len(manifest.status_partitions) + offset,
+                DeferredRouteKind.BILL_DOCUMENT,
+                bill_number=bill_number,
+            )
+            for offset, bill_number in enumerate(manifest.document_bill_numbers)
+        )
+        return tuple(
+            cls(
+                number=start // ROUTING_SHARD_SIZE,
+                start_position=start,
+                total=len(routes),
+                routes=routes[start : start + ROUTING_SHARD_SIZE],
+            )
+            for start in range(0, len(routes), ROUTING_SHARD_SIZE)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryBoundaryReadiness:
+    """Final write proving every compact discovery view is durable."""
+
+    query_fingerprint: str
+    index_revision: str
+    discovery_source_hash: str
+    discovery_hash: str
+    manifest_hash: str
+    overview_hash: str
+    deferred_route_count: int = 0
+    deferred_route_shard_count: int = 0
+    accepted_bill_count: int = 0
+    status_partition_count: int = 0
+    route_shard_size: int = ROUTING_SHARD_SIZE
+
+    def __post_init__(self) -> None:
+        if (
+            any(
+                not re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in (
+                    self.query_fingerprint,
+                    self.discovery_source_hash,
+                    self.discovery_hash,
+                    self.manifest_hash,
+                    self.overview_hash,
+                )
+            )
+            or not self.index_revision.strip()
+            or min(
+                self.deferred_route_count,
+                self.deferred_route_shard_count,
+                self.accepted_bill_count,
+                self.status_partition_count,
+            )
+            < 0
+            or self.route_shard_size != ROUTING_SHARD_SIZE
+            or self.deferred_route_shard_count
+            != (
+                (self.deferred_route_count + ROUTING_SHARD_SIZE - 1)
+                // ROUTING_SHARD_SIZE
+            )
+        ):
+            raise ValueError("discovery readiness binding is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,9 +687,7 @@ class DocumentWorkManifest:
                     dict.fromkeys((*previous.evidence_types, *item.evidence_types))
                 ),
                 related_bill_numbers=tuple(
-                    dict.fromkeys(
-                        (*previous.related_bill_numbers, *item.related_bill_numbers)
-                    )
+                    dict.fromkeys((*previous.related_bill_numbers, *item.related_bill_numbers))
                 ),
             )
         ordered = tuple(sorted(merged.values(), key=lambda item: item.work_id))
@@ -436,6 +710,82 @@ class DocumentWorkManifest:
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode()
         return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentRouteShard:
+    """A fixed-size document routing shard, independent of the full manifest."""
+
+    number: int
+    start_position: int
+    total: int
+    items: tuple[DocumentWorkItem, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.number < 0
+            or self.start_position != self.number * ROUTING_SHARD_SIZE
+            or self.total < 1
+            or not self.items
+            or len(self.items) > ROUTING_SHARD_SIZE
+            or self.start_position + len(self.items) > self.total
+        ):
+            raise ValueError("document route shard bounds are invalid")
+        if len({item.work_id for item in self.items}) != len(self.items):
+            raise ValueError("document route shard contains duplicate work ids")
+        if self.start_position + len(self.items) < self.total and (
+            len(self.items) != ROUTING_SHARD_SIZE
+        ):
+            raise ValueError("non-final document route shard must be full")
+
+    @classmethod
+    def build(cls, manifest: DocumentWorkManifest) -> tuple[DocumentRouteShard, ...]:
+        return tuple(
+            cls(
+                number=start // ROUTING_SHARD_SIZE,
+                start_position=start,
+                total=len(manifest.items),
+                items=manifest.items[start : start + ROUTING_SHARD_SIZE],
+            )
+            for start in range(0, len(manifest.items), ROUTING_SHARD_SIZE)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentBoundaryReadiness:
+    """Final write proving metadata, items, routes, and audit manifest are durable."""
+
+    query_fingerprint: str
+    index_revision: str
+    discovery_source_hash: str
+    deferred_manifest_hash: str
+    metadata_hash: str
+    manifest_hash: str
+    manifest_fingerprint: str
+    item_count: int
+    route_shard_count: int
+    route_shard_size: int = ROUTING_SHARD_SIZE
+
+    def __post_init__(self) -> None:
+        if (
+            any(
+                not re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in (
+                    self.query_fingerprint,
+                    self.discovery_source_hash,
+                    self.deferred_manifest_hash,
+                    self.metadata_hash,
+                    self.manifest_hash,
+                    self.manifest_fingerprint,
+                )
+            )
+            or not self.index_revision.strip()
+            or self.item_count < 0
+            or self.route_shard_count
+            != (self.item_count + ROUTING_SHARD_SIZE - 1) // ROUTING_SHARD_SIZE
+            or self.route_shard_size != ROUTING_SHARD_SIZE
+        ):
+            raise ValueError("document readiness binding is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,6 +872,53 @@ class DerivedResearchStatus:
     complete: bool
 
 
+@dataclass(frozen=True, slots=True)
+class TaskCompletionReceipt:
+    """Write-once proof recorded only after all task side effects finish."""
+
+    research_id: str
+    query_fingerprint: str
+    index_revision: str
+    stage: ResearchTaskStage
+    work_id: str
+    task_identity: str
+    payload_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.research_id.strip() or not self.work_id.strip():
+            raise ValueError("task completion identity is required")
+        if (
+            any(
+                not re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in (
+                    self.query_fingerprint,
+                    self.task_identity,
+                    self.payload_hash,
+                )
+            )
+            or not self.index_revision.strip()
+        ):
+            raise ValueError("task completion binding is invalid")
+
+    @classmethod
+    def from_task(cls, task: ResearchTask) -> TaskCompletionReceipt:
+        payload = json.dumps(
+            dict(task.payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return cls(
+            task.research_id,
+            task.query_fingerprint,
+            task.index_revision,
+            task.stage,
+            task.work_id,
+            task.idempotency_key,
+            hashlib.sha256(payload).hexdigest(),
+        )
+
+
 class MetadataPageClient(Protocol):
     def fetch_page(
         self,
@@ -598,6 +995,14 @@ class ResearchRunStore(Protocol):
         page_number: int,
     ) -> ApiPage | None: ...
 
+    def page_readiness_for(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+        partition_id: str,
+        page_numbers: Sequence[int],
+    ) -> tuple[MetadataPageReadiness, ...]: ...
+
     def pages(
         self, research_id: str, phase: MetadataPhase, partition_id: str
     ) -> tuple[ApiPage, ...]: ...
@@ -607,6 +1012,27 @@ class ResearchRunStore(Protocol):
     ) -> DiscoveryStageState: ...
 
     def get_discovery(self, research_id: str) -> DiscoveryStageState | None: ...
+
+    def get_deferred_manifest(self, research_id: str) -> DeferredWorkManifest | None: ...
+
+    def get_accepted_bill(self, research_id: str, bill_number: str) -> CandidateDecision | None: ...
+
+    def get_document_bill(self, research_id: str, bill_number: str) -> CandidateDecision | None: ...
+
+    def get_status_partition(
+        self, research_id: str, partition_id: str
+    ) -> MetadataPartition | None: ...
+
+    def deferred_routes_for(
+        self,
+        research_id: str,
+        start: int,
+        stop: int,
+        *,
+        expected_total: int,
+    ) -> tuple[DeferredWorkRoute, ...]: ...
+
+    def get_provisional_overview(self, research_id: str) -> ProvisionalResearchOverview | None: ...
 
     def put_bill_discovery(
         self, research_id: str, outcome: BillDocumentDiscovery
@@ -622,25 +1048,46 @@ class ResearchRunStore(Protocol):
 
     def bill_discoveries(self, research_id: str) -> tuple[BillDocumentDiscovery, ...]: ...
 
-    def put_metadata(
-        self, research_id: str, state: MetadataStageState
-    ) -> MetadataStageState: ...
+    def put_metadata(self, research_id: str, state: MetadataStageState) -> MetadataStageState: ...
 
     def get_metadata(self, research_id: str) -> MetadataStageState | None: ...
+
+    def get_document_manifest(self, research_id: str) -> DocumentWorkManifest | None: ...
+
+    def get_document_item(self, research_id: str, work_id: str) -> DocumentWorkItem | None: ...
+
+    def document_routes_for(
+        self,
+        research_id: str,
+        start: int,
+        stop: int,
+        *,
+        expected_total: int,
+    ) -> tuple[DocumentWorkItem, ...]: ...
+
+    def claim_phase_finalization(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+    ) -> bool: ...
+
+    def put_task_completion(self, task: ResearchTask) -> TaskCompletionReceipt: ...
+
+    def get_task_completion(self, task: ResearchTask) -> TaskCompletionReceipt | None: ...
 
     def put_document_outcome(
         self, research_id: str, outcome: DocumentOutcome
     ) -> DocumentOutcome: ...
 
-    def get_document_outcome(
-        self, research_id: str, work_id: str
-    ) -> DocumentOutcome | None: ...
+    def get_document_outcome(self, research_id: str, work_id: str) -> DocumentOutcome | None: ...
+
+    def document_outcomes_for(
+        self, research_id: str, work_ids: Sequence[str]
+    ) -> tuple[DocumentOutcome, ...]: ...
 
     def document_outcomes(self, research_id: str) -> tuple[DocumentOutcome, ...]: ...
 
-    def put_snapshot(
-        self, research_id: str, snapshot: ResearchSnapshot
-    ) -> ResearchSnapshot: ...
+    def put_snapshot(self, research_id: str, snapshot: ResearchSnapshot) -> ResearchSnapshot: ...
 
     def get_snapshot_summary(self, research_id: str) -> ResearchSnapshotSummary | None: ...
 
@@ -672,9 +1119,7 @@ class ResearchRunStore(Protocol):
         self, research_id: str, after_evidence_id: str
     ) -> str | None: ...
 
-    def get_next_core_evidence_id(
-        self, research_id: str, after_evidence_id: str
-    ) -> str | None: ...
+    def get_next_core_evidence_id(self, research_id: str, after_evidence_id: str) -> str | None: ...
 
 
 class InMemoryResearchRunStore:
@@ -684,9 +1129,21 @@ class InMemoryResearchRunStore:
         self._lock = threading.RLock()
         self._gateways: dict[str, GatewayPlanState] = {}
         self._pages: dict[tuple[str, MetadataPhase, str, int], ApiPage] = {}
+        self._page_readiness: dict[tuple[str, MetadataPhase, str, int], MetadataPageReadiness] = {}
         self._discoveries: dict[str, DiscoveryStageState] = {}
+        self._deferred_manifests: dict[str, DeferredWorkManifest] = {}
+        self._accepted_bills: dict[tuple[str, str], CandidateDecision] = {}
+        self._document_bills: dict[tuple[str, str], CandidateDecision] = {}
+        self._status_partitions: dict[tuple[str, str], MetadataPartition] = {}
+        self._deferred_route_shards: dict[tuple[str, int], DeferredRouteShard] = {}
+        self._provisional_overviews: dict[str, ProvisionalResearchOverview] = {}
         self._bill_discoveries: dict[tuple[str, str], BillDocumentDiscovery] = {}
         self._metadata: dict[str, MetadataStageState] = {}
+        self._document_manifests: dict[str, DocumentWorkManifest] = {}
+        self._document_items: dict[tuple[str, str], DocumentWorkItem] = {}
+        self._document_route_shards: dict[tuple[str, int], DocumentRouteShard] = {}
+        self._phase_finalization_claims: set[tuple[str, MetadataPhase]] = set()
+        self._task_completions: dict[tuple[str, str], TaskCompletionReceipt] = {}
         self._outcomes: dict[tuple[str, str], DocumentOutcome] = {}
         self._overview_manifests: dict[str, OverviewTransportManifest] = {}
         self._overview_shards: dict[tuple[str, int], OverviewGroupShard] = {}
@@ -706,9 +1163,32 @@ class InMemoryResearchRunStore:
         partition_id: str,
         page: ApiPage,
     ) -> ApiPage:
-        return self._put_once(
-            self._pages, (research_id, phase, partition_id, page.page), page
-        )
+        with self._lock:
+            gateway = self._gateways.get(research_id)
+            if gateway is None:
+                raise LookupError("research gateway is not available")
+            if phase is MetadataPhase.DISCOVERY:
+                partitions = gateway.discovery_partitions
+                partition = next(
+                    (item for item in partitions if item.partition_id == partition_id),
+                    None,
+                )
+            else:
+                partition = self._status_partitions.get((research_id, partition_id))
+            if partition is None:
+                raise ValueError("metadata partition is outside the research plan")
+            stored = self._put_once(
+                self._pages,
+                (research_id, phase, partition_id, page.page),
+                page,
+            )
+            readiness = MetadataPageReadiness.create(gateway, phase, partition, stored)
+            self._put_once(
+                self._page_readiness,
+                (research_id, phase, partition_id, page.page),
+                readiness,
+            )
+            return stored
 
     def get_page(
         self,
@@ -718,8 +1198,28 @@ class InMemoryResearchRunStore:
         page_number: int,
     ) -> ApiPage | None:
         with self._lock:
-            return self._pages.get(
-                (research_id, phase, partition_id, page_number)
+            return self._pages.get((research_id, phase, partition_id, page_number))
+
+    def page_readiness_for(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+        partition_id: str,
+        page_numbers: Sequence[int],
+    ) -> tuple[MetadataPageReadiness, ...]:
+        numbers = tuple(page_numbers)
+        if any(number < 1 for number in numbers) or len(numbers) != len(set(numbers)):
+            raise ValueError("metadata page readiness numbers must be positive and unique")
+        with self._lock:
+            return tuple(
+                readiness
+                for number in numbers
+                if (
+                    readiness := self._page_readiness.get(
+                        (research_id, phase, partition_id, number)
+                    )
+                )
+                is not None
             )
 
     def pages(
@@ -732,21 +1232,118 @@ class InMemoryResearchRunStore:
                 if key[:3] == (research_id, phase, partition_id)
             )
 
-    def put_discovery(
-        self, research_id: str, state: DiscoveryStageState
-    ) -> DiscoveryStageState:
-        return self._put_once(self._discoveries, research_id, state)
+    def put_discovery(self, research_id: str, state: DiscoveryStageState) -> DiscoveryStageState:
+        # Local imports avoid the engine/overview discovery-state import cycle.
+        from .overview import build_provisional_research_overview
+
+        with self._lock:
+            gateway = self._gateways.get(research_id)
+            if gateway is None:
+                raise LookupError("research gateway is not available")
+            stored = self._put_once(self._discoveries, research_id, state)
+            manifest = DeferredWorkManifest.create(gateway, stored)
+            self._put_once(self._deferred_manifests, research_id, manifest)
+            for decision in stored.resolution.bills.accepted:
+                bill_number = _candidate_bill_number(decision)
+                self._put_once(
+                    self._accepted_bills,
+                    (research_id, bill_number),
+                    decision,
+                )
+                if bill_number in manifest.document_bill_numbers:
+                    self._put_once(
+                        self._document_bills,
+                        (research_id, bill_number),
+                        decision,
+                    )
+            for partition in manifest.status_partitions:
+                self._put_once(
+                    self._status_partitions,
+                    (research_id, partition.partition_id),
+                    partition,
+                )
+            for shard in DeferredRouteShard.build(manifest):
+                self._put_once(
+                    self._deferred_route_shards,
+                    (research_id, shard.number),
+                    shard,
+                )
+            overview = build_provisional_research_overview(stored)
+            self._put_once(self._provisional_overviews, research_id, overview)
+            return stored
 
     def get_discovery(self, research_id: str) -> DiscoveryStageState | None:
         with self._lock:
             return self._discoveries.get(research_id)
 
+    def get_deferred_manifest(self, research_id: str) -> DeferredWorkManifest | None:
+        with self._lock:
+            manifest = self._deferred_manifests.get(research_id)
+            if manifest is not None:
+                return manifest
+            discovery = self._discoveries.get(research_id)
+            gateway = self._gateways.get(research_id)
+            if discovery is None or gateway is None:
+                return None
+            return DeferredWorkManifest.create(gateway, discovery)
+
+    def get_accepted_bill(self, research_id: str, bill_number: str) -> CandidateDecision | None:
+        with self._lock:
+            return self._accepted_bills.get((research_id, bill_number))
+
+    def get_document_bill(self, research_id: str, bill_number: str) -> CandidateDecision | None:
+        with self._lock:
+            return self._document_bills.get((research_id, bill_number))
+
+    def get_status_partition(
+        self, research_id: str, partition_id: str
+    ) -> MetadataPartition | None:
+        with self._lock:
+            return self._status_partitions.get((research_id, partition_id))
+
+    def deferred_routes_for(
+        self,
+        research_id: str,
+        start: int,
+        stop: int,
+        *,
+        expected_total: int,
+    ) -> tuple[DeferredWorkRoute, ...]:
+        if not 0 <= start < stop <= expected_total:
+            raise ValueError("deferred route range is outside its immutable plan")
+        with self._lock:
+            manifest = self._deferred_manifests.get(research_id)
+            if manifest is None:
+                return ()
+            total = len(manifest.status_partitions) + len(manifest.document_bill_numbers)
+            if total != expected_total:
+                raise ValueError("deferred route total does not match its immutable plan")
+            selected: list[DeferredWorkRoute] = []
+            first_shard = start // ROUTING_SHARD_SIZE
+            last_shard = (stop - 1) // ROUTING_SHARD_SIZE
+            for number in range(first_shard, last_shard + 1):
+                shard = self._deferred_route_shards.get((research_id, number))
+                if shard is None:
+                    return ()
+                selected.extend(
+                    route for route in shard.routes if start <= route.position < stop
+                )
+            return tuple(selected)
+
+    def get_provisional_overview(self, research_id: str) -> ProvisionalResearchOverview | None:
+        from .overview import build_provisional_research_overview
+
+        with self._lock:
+            overview = self._provisional_overviews.get(research_id)
+            if overview is not None:
+                return overview
+            discovery = self._discoveries.get(research_id)
+            return build_provisional_research_overview(discovery) if discovery is not None else None
+
     def put_bill_discovery(
         self, research_id: str, outcome: BillDocumentDiscovery
     ) -> BillDocumentDiscovery:
-        return self._put_once(
-            self._bill_discoveries, (research_id, outcome.bill_number), outcome
-        )
+        return self._put_once(self._bill_discoveries, (research_id, outcome.bill_number), outcome)
 
     def get_bill_discovery(
         self, research_id: str, bill_number: str
@@ -761,36 +1358,114 @@ class InMemoryResearchRunStore:
             return tuple(
                 outcome
                 for bill_number in sorted(set(bill_numbers))
-                if (
-                    outcome := self._bill_discoveries.get(
-                        (research_id, bill_number)
-                    )
-                )
-                is not None
+                if (outcome := self._bill_discoveries.get((research_id, bill_number))) is not None
             )
 
     def bill_discoveries(self, research_id: str) -> tuple[BillDocumentDiscovery, ...]:
         with self._lock:
             return tuple(
                 outcome
-                for (candidate_research_id, _), outcome in sorted(
-                    self._bill_discoveries.items()
-                )
+                for (candidate_research_id, _), outcome in sorted(self._bill_discoveries.items())
                 if candidate_research_id == research_id
             )
 
-    def put_metadata(
-        self, research_id: str, state: MetadataStageState
-    ) -> MetadataStageState:
-        return self._put_once(self._metadata, research_id, state)
+    def put_metadata(self, research_id: str, state: MetadataStageState) -> MetadataStageState:
+        with self._lock:
+            stored = self._put_once(self._metadata, research_id, state)
+            self._put_once(
+                self._document_manifests,
+                research_id,
+                stored.manifest,
+            )
+            for item in stored.manifest.items:
+                self._put_once(
+                    self._document_items,
+                    (research_id, item.work_id),
+                    item,
+                )
+            for shard in DocumentRouteShard.build(stored.manifest):
+                self._put_once(
+                    self._document_route_shards,
+                    (research_id, shard.number),
+                    shard,
+                )
+            return stored
 
     def get_metadata(self, research_id: str) -> MetadataStageState | None:
         with self._lock:
             return self._metadata.get(research_id)
 
-    def put_document_outcome(
-        self, research_id: str, outcome: DocumentOutcome
-    ) -> DocumentOutcome:
+    def get_document_manifest(self, research_id: str) -> DocumentWorkManifest | None:
+        with self._lock:
+            manifest = self._document_manifests.get(research_id)
+            if manifest is not None:
+                return manifest
+            metadata = self._metadata.get(research_id)
+            return metadata.manifest if metadata is not None else None
+
+    def get_document_item(self, research_id: str, work_id: str) -> DocumentWorkItem | None:
+        with self._lock:
+            return self._document_items.get((research_id, work_id))
+
+    def document_routes_for(
+        self,
+        research_id: str,
+        start: int,
+        stop: int,
+        *,
+        expected_total: int,
+    ) -> tuple[DocumentWorkItem, ...]:
+        if not 0 <= start < stop <= expected_total:
+            raise ValueError("document route range is outside its immutable plan")
+        with self._lock:
+            manifest = self._document_manifests.get(research_id)
+            if manifest is None:
+                return ()
+            if len(manifest.items) != expected_total:
+                raise ValueError("document route total does not match its immutable plan")
+            selected: list[DocumentWorkItem] = []
+            first_shard = start // ROUTING_SHARD_SIZE
+            last_shard = (stop - 1) // ROUTING_SHARD_SIZE
+            for number in range(first_shard, last_shard + 1):
+                shard = self._document_route_shards.get((research_id, number))
+                if shard is None:
+                    return ()
+                shard_start = shard.start_position
+                for offset, item in enumerate(shard.items):
+                    position = shard_start + offset
+                    if start <= position < stop:
+                        selected.append(item)
+            return tuple(selected)
+
+    def claim_phase_finalization(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+    ) -> bool:
+        with self._lock:
+            if research_id not in self._gateways:
+                raise LookupError("research gateway is not available")
+            key = (research_id, phase)
+            if key in self._phase_finalization_claims:
+                return False
+            self._phase_finalization_claims.add(key)
+            return True
+
+    def put_task_completion(self, task: ResearchTask) -> TaskCompletionReceipt:
+        return self._put_once(
+            self._task_completions,
+            (task.research_id, task.idempotency_key),
+            TaskCompletionReceipt.from_task(task),
+        )
+
+    def get_task_completion(self, task: ResearchTask) -> TaskCompletionReceipt | None:
+        with self._lock:
+            receipt = self._task_completions.get((task.research_id, task.idempotency_key))
+            if receipt is not None and receipt != TaskCompletionReceipt.from_task(task):
+                raise ValueError("task completion binding is invalid")
+            return receipt
+
+    def put_document_outcome(self, research_id: str, outcome: DocumentOutcome) -> DocumentOutcome:
         key = (research_id, outcome.work_id)
         with self._lock:
             current = self._outcomes.get(key)
@@ -801,12 +1476,24 @@ class InMemoryResearchRunStore:
             self._outcomes[key] = outcome
             return outcome
 
-    def get_document_outcome(
-        self, research_id: str, work_id: str
-    ) -> DocumentOutcome | None:
+    def get_document_outcome(self, research_id: str, work_id: str) -> DocumentOutcome | None:
         with self._lock:
             outcome = self._outcomes.get((research_id, work_id))
             return outcome if outcome is not None and outcome.terminal else None
+
+    def document_outcomes_for(
+        self, research_id: str, work_ids: Sequence[str]
+    ) -> tuple[DocumentOutcome, ...]:
+        identifiers = tuple(work_ids)
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("document outcome work ids must be unique")
+        with self._lock:
+            return tuple(
+                outcome
+                for work_id in identifiers
+                if (outcome := self._outcomes.get((research_id, work_id))) is not None
+                and outcome.terminal
+            )
 
     def document_outcomes(self, research_id: str) -> tuple[DocumentOutcome, ...]:
         with self._lock:
@@ -816,9 +1503,7 @@ class InMemoryResearchRunStore:
                 if candidate_research_id == research_id
             )
 
-    def put_snapshot(
-        self, research_id: str, snapshot: ResearchSnapshot
-    ) -> ResearchSnapshot:
+    def put_snapshot(self, research_id: str, snapshot: ResearchSnapshot) -> ResearchSnapshot:
         # Local imports avoid the engine/overview discovery-state import cycle.
         from .overview_transport import build_overview_transport
 
@@ -860,11 +1545,7 @@ class InMemoryResearchRunStore:
     def get_snapshot_summary(self, research_id: str) -> ResearchSnapshotSummary | None:
         with self._lock:
             snapshot = self._snapshots.get(research_id)
-            return (
-                ResearchSnapshotSummary.from_snapshot(snapshot)
-                if snapshot is not None
-                else None
-            )
+            return ResearchSnapshotSummary.from_snapshot(snapshot) if snapshot is not None else None
 
     def get_result_page(
         self,
@@ -977,9 +1658,7 @@ class InMemoryResearchRunStore:
                 raise LookupError("evidence id is absent from this immutable snapshot")
             return None
 
-    def get_next_core_evidence_id(
-        self, research_id: str, after_evidence_id: str
-    ) -> str | None:
+    def get_next_core_evidence_id(self, research_id: str, after_evidence_id: str) -> str | None:
         if not after_evidence_id.strip():
             raise ValueError("after_evidence_id is required")
         with self._lock:
@@ -1054,9 +1733,7 @@ def _overview_page_payload(
     payload = manifest.to_dict()
     payload["catalog"] = catalog
     payload["core_full_text_required_ids"] = [
-        route.evidence_id
-        for route in manifest.core
-        if not route.text_inline_complete
+        route.evidence_id for route in manifest.core if not route.text_inline_complete
     ]
     return payload
 
@@ -1141,11 +1818,7 @@ class ResearchEngine:
     ) -> GatewayReceipt:
         """Plan, persist, and enqueue page-one tasks without official-source I/O."""
 
-        if not (
-            self.task_retention_seconds
-            <= credential_ttl_seconds
-            <= job_ttl.total_seconds()
-        ):
+        if not (self.task_retention_seconds <= credential_ttl_seconds <= job_ttl.total_seconds()):
             raise ValueError(
                 "research TTLs must satisfy task retention <= credential TTL <= job TTL"
             )
@@ -1227,17 +1900,15 @@ class ResearchEngine:
         """Derive observable progress without trusting process-local mutable state."""
 
         gateway = self._required_gateway(research_id)
-        discovery = self.runs.get_discovery(research_id)
-        metadata = self.runs.get_metadata(research_id)
+        deferred = self.runs.get_deferred_manifest(research_id)
+        document_manifest = self.runs.get_document_manifest(research_id)
         snapshot = self.runs.get_snapshot_summary(research_id)
         phase_partitions = [
-            (MetadataPhase.DISCOVERY, partition)
-            for partition in gateway.discovery_partitions
+            (MetadataPhase.DISCOVERY, partition) for partition in gateway.discovery_partitions
         ]
-        if discovery is not None:
+        if deferred is not None:
             phase_partitions.extend(
-                (MetadataPhase.BILL_STATUS, partition)
-                for partition in discovery.status_partitions
+                (MetadataPhase.BILL_STATUS, partition) for partition in deferred.status_partitions
             )
         pages_expected = 0
         pages_complete = 0
@@ -1249,29 +1920,42 @@ class ResearchEngine:
             if first is not None and first.total_count is not None:
                 expected = max(
                     1,
-                    (first.total_count + partition.page_size - 1)
-                    // partition.page_size,
+                    (first.total_count + partition.page_size - 1) // partition.page_size,
                 )
             pages_expected += expected
             pages_complete += len({page.page for page in pages})
             if {page.page for page in pages} == set(range(1, expected + 1)):
                 partitions_complete += 1
 
-        bill_checks_expected = (
-            len(discovery.document_bill_numbers) if discovery is not None else 0
+        bill_checks_expected = len(deferred.document_bill_numbers) if deferred is not None else 0
+        bill_checks_complete = (
+            len(
+                self.runs.bill_discoveries_for(
+                    research_id,
+                    deferred.document_bill_numbers,
+                )
+            )
+            if deferred is not None
+            else 0
         )
-        bill_checks_complete = len(self.runs.bill_discoveries(research_id))
-        documents_expected = len(metadata.manifest.items) if metadata is not None else 0
-        outcomes = self.runs.document_outcomes(research_id)
+        documents_expected = len(document_manifest.items) if document_manifest is not None else 0
+        outcomes = (
+            self.runs.document_outcomes_for(
+                research_id,
+                tuple(item.work_id for item in document_manifest.items),
+            )
+            if document_manifest is not None
+            else ()
+        )
         terminal_outcomes = tuple(item for item in outcomes if item.terminal)
         documents_failed = sum(
             item.status is DocumentOutcomeStatus.FAILED for item in terminal_outcomes
         )
         if snapshot is not None:
             stage = "complete" if snapshot.coverage.complete else "partial"
-        elif metadata is not None:
+        elif document_manifest is not None:
             stage = "documents"
-        elif discovery is not None:
+        elif deferred is not None:
             stage = "deferred_metadata"
         else:
             stage = "metadata_discovery"
@@ -1287,14 +1971,12 @@ class ResearchEngine:
             documents_expected=documents_expected,
             documents_complete=len(terminal_outcomes),
             documents_failed=documents_failed,
-            overview_available=snapshot is not None or discovery is not None,
+            overview_available=snapshot is not None or deferred is not None,
             snapshot_ready=snapshot is not None,
             complete=bool(snapshot is not None and snapshot.coverage.complete),
         )
 
-    def process_metadata_task(
-        self, task: ResearchTask
-    ) -> ApiPage | BillDocumentDiscovery | None:
+    def process_metadata_task(self, task: ResearchTask) -> ApiPage | BillDocumentDiscovery | None:
         self._validate_task(task, ResearchTaskStage.COLLECT_METADATA)
         payload = dict(task.payload)
         work_kind = str(payload.get(_WORK_KIND) or "")
@@ -1319,9 +2001,7 @@ class ResearchEngine:
             return None
         raise ValueError("unknown metadata work kind")
 
-    def _process_discovery_fanout(
-        self, task: ResearchTask, payload: Mapping[str, Any]
-    ) -> None:
+    def _process_discovery_fanout(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
         gateway = self._required_gateway(task.research_id)
         start, stop = self._validate_fanout_task(
             task,
@@ -1348,31 +2028,33 @@ class ResearchEngine:
             credential_capability=task.credential_capability,
         )
 
-    def _process_deferred_fanout(
-        self, task: ResearchTask, payload: Mapping[str, Any]
-    ) -> None:
-        discovery = self._required_discovery(task.research_id)
-        total = len(discovery.status_partitions) + len(discovery.document_bill_numbers)
-        start, stop = self._validate_fanout_task(task, payload, _DEFERRED_FANOUT, total)
+    def _process_deferred_fanout(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
+        start, stop = self._validate_fanout_identity(task, payload, _DEFERRED_FANOUT)
         job = self._required_job(task.research_id)
         window_stop = self._fanout_window_stop(start, stop)
-        for position in range(start, window_stop):
-            if position < len(discovery.status_partitions):
+        routes = self.runs.deferred_routes_for(
+            task.research_id,
+            start,
+            window_stop,
+            expected_total=stop,
+        )
+        if len(routes) != window_stop - start:
+            raise LookupError("deferred fan-out routing window is unavailable")
+        for route in routes:
+            if route.kind is DeferredRouteKind.BILL_STATUS:
                 if task.credential_capability is None:
                     raise ValueError("status fan-out lacks a credential capability")
-                partition = discovery.status_partitions[position]
+                assert route.status_partition is not None
                 self._publish_page(
                     job,
                     MetadataPhase.BILL_STATUS,
-                    partition,
-                    MetadataPageWork(partition.partition_id, 1),
+                    route.status_partition,
+                    MetadataPageWork(route.status_partition.partition_id, 1),
                     task.credential_capability,
                 )
                 continue
-            bill_number = discovery.document_bill_numbers[
-                position - len(discovery.status_partitions)
-            ]
-            self._publish_bill_document(job, bill_number)
+            assert route.bill_number is not None
+            self._publish_bill_document(job, route.bill_number)
         self._chain_fanout(
             job,
             _DEFERRED_FANOUT,
@@ -1381,17 +2063,20 @@ class ResearchEngine:
             credential_capability=task.credential_capability,
         )
 
-    def _process_document_fanout(
-        self, task: ResearchTask, payload: Mapping[str, Any]
-    ) -> None:
-        metadata = self._required_metadata(task.research_id)
-        start, stop = self._validate_fanout_task(
-            task, payload, _DOCUMENT_FANOUT, len(metadata.manifest.items)
-        )
+    def _process_document_fanout(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
+        start, stop = self._validate_fanout_identity(task, payload, _DOCUMENT_FANOUT)
         window_stop = self._fanout_window_stop(start, stop)
+        items = self.runs.document_routes_for(
+            task.research_id,
+            start,
+            window_stop,
+            expected_total=stop,
+        )
+        if len(items) != window_stop - start:
+            raise LookupError("document fan-out routing window is unavailable")
         self._publish_document_items(
             task.research_id,
-            metadata.manifest.items[start:window_stop],
+            items,
         )
         self._chain_fanout(
             self._required_job(task.research_id),
@@ -1400,24 +2085,35 @@ class ResearchEngine:
             stop,
         )
 
-    def _process_page_fanout(
-        self, task: ResearchTask, payload: Mapping[str, Any]
-    ) -> None:
+    def _process_page_fanout(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
         phase = MetadataPhase(str(payload.get(_PHASE) or ""))
         partition_id = str(payload.get(_PARTITION_ID) or "")
         partition = self._partition(task.research_id, phase, partition_id)
-        first = self.runs.get_page(
+        first_values = self.runs.page_readiness_for(
             task.research_id,
             phase,
             partition_id,
-            1,
+            (1,),
         )
-        if first is None or first.total_count is None:
-            raise ValueError("page fan-out requires a complete stored first page")
+        if len(first_values) != 1:
+            raise ValueError("page fan-out requires a ready stored first page")
+        first = first_values[0]
+        if (
+            first.phase is not phase
+            or first.partition_id != partition_id
+            or first.dataset != partition.dataset
+            or first.page != 1
+            or first.page_size != partition.page_size
+        ):
+            raise ValueError("page fan-out marker does not match its stored partition")
         raw_expected = payload.get(_EXPECTED_TOTAL)
         if raw_expected is None or int(raw_expected) != first.total_count:
             raise ValueError("page fan-out total does not match its stored first page")
-        follow_ups = expand_first_page(partition, first).pages
+        total_pages = max(1, (first.total_count + first.page_size - 1) // first.page_size)
+        follow_ups = tuple(
+            MetadataPageWork(partition_id, number, first.total_count)
+            for number in range(2, total_pages + 1)
+        )
         start, stop = self._validate_page_fanout_task(
             task,
             payload,
@@ -1449,9 +2145,7 @@ class ResearchEngine:
                 delay_seconds=self.fanout_delay_seconds,
             )
 
-    def _process_phase_barrier(
-        self, task: ResearchTask, payload: Mapping[str, Any]
-    ) -> None:
+    def _process_phase_barrier(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
         phase = MetadataPhase(str(payload.get(_PHASE) or ""))
         attempt = self._validate_barrier_task(
             task,
@@ -1463,44 +2157,58 @@ class ResearchEngine:
         status_collection: MetadataCollection | None = None
         bill_discoveries: tuple[BillDocumentDiscovery, ...] | None = None
         if phase is MetadataPhase.DISCOVERY:
-            # A completed discovery snapshot is itself the durable phase
-            # marker. Otherwise load every immutable page once, validate the
-            # complete set, and carry that in-memory collection directly into
-            # resolution. The old check-then-assemble path downloaded dozens
-            # of large Blob pages twice and could exceed Vercel's 300-second
-            # function budget despite all source work already being complete.
-            complete = self.runs.get_discovery(task.research_id) is not None
-            if not complete:
+            # A completed discovery boundary is authoritative. Until then, read
+            # only small final-write page markers. Raw page blobs are assembled
+            # exactly once, after every dynamically expected marker is present.
+            complete = self.runs.get_deferred_manifest(task.research_id) is not None
+            if not complete and self._phase_complete(task.research_id, phase):
+                if not self.runs.claim_phase_finalization(task.research_id, phase):
+                    self._publish_phase_barrier(
+                        self._required_job(task.research_id),
+                        phase,
+                        attempt=attempt + 1,
+                        credential_capability=task.credential_capability,
+                        delay_seconds=self._barrier_delay_seconds(attempt + 1),
+                    )
+                    return
                 discovery_collection = self._try_assemble_collection(
                     task.research_id,
-                    MetadataPhase.DISCOVERY,
-                    self._phase_partitions(
-                        task.research_id, MetadataPhase.DISCOVERY
-                    ),
+                    phase,
+                    self._phase_partitions(task.research_id, phase),
                 )
-                complete = discovery_collection is not None
+                if discovery_collection is None:
+                    raise RuntimeError("ready metadata pages are not durably readable")
+                complete = True
         else:
-            discovery = self._required_discovery(task.research_id)
-            complete = self.runs.get_metadata(task.research_id) is not None
-            if not complete:
-                status_collection = (
-                    self._try_assemble_collection(
-                        task.research_id,
-                        MetadataPhase.BILL_STATUS,
-                        discovery.status_partitions,
-                    )
-                    if discovery.status_partitions
-                    else _empty_collection()
-                )
+            manifest = self._required_deferred_manifest(task.research_id)
+            complete = self.runs.get_document_manifest(task.research_id) is not None
+            if not complete and self._phase_complete(task.research_id, phase):
                 bill_discoveries = self.runs.bill_discoveries_for(
                     task.research_id,
-                    discovery.document_bill_numbers,
+                    manifest.document_bill_numbers,
                 )
-                complete = bool(
-                    status_collection is not None
-                    and len(bill_discoveries)
-                    == len(discovery.document_bill_numbers)
-                )
+                complete = len(bill_discoveries) == len(manifest.document_bill_numbers)
+                if complete:
+                    if not self.runs.claim_phase_finalization(task.research_id, phase):
+                        self._publish_phase_barrier(
+                            self._required_job(task.research_id),
+                            phase,
+                            attempt=attempt + 1,
+                            credential_capability=task.credential_capability,
+                            delay_seconds=self._barrier_delay_seconds(attempt + 1),
+                        )
+                        return
+                    status_collection = (
+                        self._try_assemble_collection(
+                            task.research_id,
+                            phase,
+                            manifest.status_partitions,
+                        )
+                        if manifest.status_partitions
+                        else _empty_collection()
+                    )
+                    if status_collection is None:
+                        raise RuntimeError("ready metadata pages are not durably readable")
         if not complete:
             self._publish_phase_barrier(
                 self._required_job(task.research_id),
@@ -1526,16 +2234,14 @@ class ResearchEngine:
 
     def process_document_task(self, task: ResearchTask) -> DocumentOutcome:
         self._validate_task(task, ResearchTaskStage.HYDRATE_DOCUMENT)
-        metadata = self._required_metadata(task.research_id)
-        item_by_id = {item.work_id: item for item in metadata.manifest.items}
-        try:
-            item = item_by_id[task.work_id]
-        except KeyError as exc:
-            raise ValueError("document task is absent from the stored manifest") from exc
+        item = self.runs.get_document_item(task.research_id, task.work_id)
+        if item is None:
+            raise ValueError("document task is absent from the stored manifest")
         payload = dict(task.payload)
-        if payload.get(_DOCUMENT_KIND) != item.kind.value or payload.get(
-            _OFFICIAL_URL
-        ) != item.official_url:
+        if (
+            payload.get(_DOCUMENT_KIND) != item.kind.value
+            or payload.get(_OFFICIAL_URL) != item.official_url
+        ):
             raise ValueError("document task payload does not match the stored manifest")
 
         existing = self.runs.get_document_outcome(task.research_id, item.work_id)
@@ -1579,14 +2285,10 @@ class ResearchEngine:
             _DOCUMENT_FINALIZE_BARRIER,
             "documents",
         )
-        metadata = self._required_metadata(task.research_id)
-        outcomes = self.runs.document_outcomes(task.research_id)
-        outcome_by_id = {item.work_id: item for item in outcomes}
-        required_ids = tuple(item.work_id for item in metadata.manifest.items)
-        if any(
-            work_id not in outcome_by_id or not outcome_by_id[work_id].terminal
-            for work_id in required_ids
-        ):
+        manifest = self._required_document_manifest(task.research_id)
+        required_ids = tuple(item.work_id for item in manifest.items)
+        outcomes = self.runs.document_outcomes_for(task.research_id, required_ids)
+        if len(outcomes) != len(required_ids):
             self._publish_document_finalize_barrier(
                 self._required_job(task.research_id),
                 attempt=attempt + 1,
@@ -1595,17 +2297,48 @@ class ResearchEngine:
             return None
         return self.try_finalize(task.research_id, outcomes=outcomes)
 
-    def fail_task(self, task: ResearchTask, *, error_code: str) -> ResearchJob:
-        """End a poisoned durable task after the queue retry budget is spent."""
+    def task_completed(self, task: ResearchTask) -> bool:
+        """Return whether the dispatcher already finished every side effect."""
 
-        if not error_code.strip():
-            raise ValueError("task failure requires an error code")
-        job = self._required_current_job(task.research_id)
+        job = self._required_job(task.research_id)
         if (
             task.query_fingerprint != job.query_fingerprint
             or task.index_revision != job.index_revision
         ):
             raise ValueError("research task does not match its persisted job")
+        return self.runs.get_task_completion(task) is not None
+
+    def complete_task(self, task: ResearchTask) -> TaskCompletionReceipt:
+        """Record dispatcher completion after work and all chained publishes."""
+
+        job = self._required_job(task.research_id)
+        if (
+            task.query_fingerprint != job.query_fingerprint
+            or task.index_revision != job.index_revision
+        ):
+            raise ValueError("research task does not match its persisted job")
+        return self.runs.put_task_completion(task)
+
+    def fail_task(self, task: ResearchTask, *, error_code: str) -> ResearchJob | None:
+        """End a poisoned durable task after the queue retry budget is spent."""
+
+        if not error_code.strip():
+            raise ValueError("task failure requires an error code")
+        job = self.jobs.get(task.research_id)
+        if job is None:
+            # A marker-only delivery can outlive the job's artifact retention.
+            # There is no durable run left to fail, so absence is an idempotent
+            # terminal success rather than a poison message to retry forever.
+            return None
+        if (
+            task.query_fingerprint != job.query_fingerprint
+            or task.index_revision != job.index_revision
+        ):
+            raise ValueError("research task does not match its persisted job")
+        if self.runs.get_task_completion(task) is not None:
+            # The prior delivery finished and only its HTTP response/ACK was
+            # lost. A later retry-budget marker must not overwrite success.
+            return job
         if job.terminal:
             return job
         return self.jobs.transition(
@@ -1627,15 +2360,13 @@ class ResearchEngine:
             return None
         gateway = self._required_gateway(research_id)
         metadata = self._required_metadata(research_id)
+        required_ids = tuple(item.work_id for item in metadata.manifest.items)
         current_outcomes = (
             tuple(outcomes)
             if outcomes is not None
-            else self.runs.document_outcomes(research_id)
+            else self.runs.document_outcomes_for(research_id, required_ids)
         )
-        outcome_by_id = {
-            item.work_id: item for item in current_outcomes
-        }
-        required_ids = tuple(item.work_id for item in metadata.manifest.items)
+        outcome_by_id = {item.work_id: item for item in current_outcomes}
         if any(
             work_id not in outcome_by_id or not outcome_by_id[work_id].terminal
             for work_id in required_ids
@@ -1681,9 +2412,7 @@ class ResearchEngine:
                 )
         return stored
 
-    def _process_page_task(
-        self, task: ResearchTask, payload: Mapping[str, Any]
-    ) -> ApiPage:
+    def _process_page_task(self, task: ResearchTask, payload: Mapping[str, Any]) -> ApiPage:
         phase = MetadataPhase(str(payload.get(_PHASE) or ""))
         partition_id = str(payload.get(_PARTITION_ID) or "")
         page_number = int(payload.get(_PAGE) or 0)
@@ -1713,11 +2442,12 @@ class ResearchEngine:
                 parameters=partition.parameters_dict(),
             )
             validate_fetched_page(partition, work, page)
-            existing = self.runs.put_page(
-                task.research_id, phase, partition_id, page
-            )
+            existing = page
         else:
             validate_fetched_page(partition, work, existing)
+        # Idempotently re-put even an existing raw page so a delivery that died
+        # between raw PUT and its final readiness marker heals on redelivery.
+        existing = self.runs.put_page(task.research_id, phase, partition_id, existing)
 
         if existing.page == 1:
             expansion = expand_first_page(partition, existing)
@@ -1754,8 +2484,18 @@ class ResearchEngine:
         preassembled: MetadataCollection | None = None,
     ) -> None:
         gateway = self._required_gateway(research_id)
-        existing = self.runs.get_discovery(research_id)
-        if existing is None:
+        deferred = self.runs.get_deferred_manifest(research_id)
+        if deferred is not None:
+            # A prior invocation may have written the compact readiness marker
+            # and then failed while the hosted status subclass wrote its small
+            # checkpoint. Re-put the compact audit state idempotently so the
+            # checkpoint heals before any child fan-out is repeated.
+            persisted = self.runs.get_discovery(research_id)
+            if persisted is None:
+                raise LookupError("ready discovery audit state is missing")
+            self.runs.put_discovery(research_id, persisted)
+            deferred = self._required_deferred_manifest(research_id)
+        else:
             collection = preassembled or self._assemble_collection(
                 research_id,
                 MetadataPhase.DISCOVERY,
@@ -1793,18 +2533,14 @@ class ResearchEngine:
                 duplicate_meeting_ids: set[str] = set()
                 for decision in resolution.meetings.decisions:
                     try:
-                        url = OpenAssemblyPipeline.minutes_url(
-                            dict(decision.candidate)
-                        )
+                        url = OpenAssemblyPipeline.minutes_url(dict(decision.candidate))
                     except ValueError:
                         continue
                     previous = meeting_id_by_url.setdefault(url, decision.candidate_id)
                     if previous != decision.candidate_id:
                         duplicate_meeting_ids.add(decision.candidate_id)
                 missing_meeting_urls = tuple(
-                    url
-                    for url in corpus_recall.exact_meeting_urls
-                    if url not in meeting_id_by_url
+                    url for url in corpus_recall.exact_meeting_urls if url not in meeting_id_by_url
                 )
                 available_bill_ids = {
                     decision.candidate_id for decision in resolution.bills.decisions
@@ -1818,18 +2554,15 @@ class ResearchEngine:
                     reasons: list[str] = []
                     if missing_bill_ids:
                         reasons.append(
-                            "corpus_exact_bill_absent_from_metadata:"
-                            f"{len(missing_bill_ids)}"
+                            f"corpus_exact_bill_absent_from_metadata:{len(missing_bill_ids)}"
                         )
                     if missing_meeting_urls:
                         reasons.append(
-                            "corpus_exact_meeting_absent_from_metadata:"
-                            f"{len(missing_meeting_urls)}"
+                            f"corpus_exact_meeting_absent_from_metadata:{len(missing_meeting_urls)}"
                         )
                     if duplicate_meeting_ids:
                         reasons.append(
-                            "corpus_exact_meeting_metadata_ambiguous:"
-                            f"{len(duplicate_meeting_ids)}"
+                            f"corpus_exact_meeting_metadata_ambiguous:{len(duplicate_meeting_ids)}"
                         )
                     corpus_recall = corpus_recall.fail_closed(*reasons)
                 else:
@@ -1837,8 +2570,7 @@ class ResearchEngine:
                         resolution,
                         bill_candidate_ids=bill_candidate_ids,
                         meeting_candidate_ids=tuple(
-                            meeting_id_by_url[url]
-                            for url in corpus_recall.exact_meeting_urls
+                            meeting_id_by_url[url] for url in corpus_recall.exact_meeting_urls
                         ),
                     )
             bill_numbers = _accepted_bill_numbers(resolution)
@@ -1850,8 +2582,7 @@ class ResearchEngine:
                     ),
                     page_size=self.status_page_size,
                 )
-                if EvidenceType.BILL_STATUS
-                in gateway.research_plan.contract.evidence_types
+                if EvidenceType.BILL_STATUS in gateway.research_plan.contract.evidence_types
                 else ()
             )
             document_bills = (
@@ -1862,7 +2593,7 @@ class ResearchEngine:
                 )
                 else ()
             )
-            existing = self.runs.put_discovery(
+            self.runs.put_discovery(
                 research_id,
                 DiscoveryStageState(
                     collection,
@@ -1874,13 +2605,12 @@ class ResearchEngine:
                     corpus_recall,
                 ),
             )
+            deferred = self._required_deferred_manifest(research_id)
 
         job = self._required_job(research_id)
-        deferred_count = len(existing.status_partitions) + len(
-            existing.document_bill_numbers
-        )
+        deferred_count = len(deferred.status_partitions) + len(deferred.document_bill_numbers)
         if deferred_count > self.direct_fanout_limit:
-            if existing.status_partitions and credential_capability is None:
+            if deferred.status_partitions and credential_capability is None:
                 raise ValueError("status fan-out requires a credential capability")
             self._publish_fanout(
                 job,
@@ -1890,10 +2620,10 @@ class ResearchEngine:
                 credential_capability=credential_capability,
             )
         else:
-            if existing.status_partitions:
+            if deferred.status_partitions:
                 if credential_capability is None:
                     raise ValueError("status fan-out requires a credential capability")
-                for partition in existing.status_partitions:
+                for partition in deferred.status_partitions:
                     self._publish_page(
                         job,
                         MetadataPhase.BILL_STATUS,
@@ -1901,7 +2631,7 @@ class ResearchEngine:
                         MetadataPageWork(partition.partition_id, 1),
                         credential_capability,
                     )
-            for bill_number in existing.document_bill_numbers:
+            for bill_number in deferred.document_bill_numbers:
                 self._publish_bill_document(job, bill_number)
         self._transition_job_if_present(
             research_id,
@@ -1950,10 +2680,7 @@ class ResearchEngine:
                 revision_id=revision_id,
                 gap_reasons=("corpus_runtime_index_revision_mismatch",),
             )
-        if (
-            provider.revision_id != revision_id
-            or provider.binding_id != self.corpus_binding_id
-        ):
+        if provider.revision_id != revision_id or provider.binding_id != self.corpus_binding_id:
             return CorpusRecallState(
                 CorpusRecallStatus.INCOMPLETE,
                 revision_id=revision_id,
@@ -1981,8 +2708,8 @@ class ResearchEngine:
         bill_number = str(payload.get(_BILL_NO) or "")
         if task.work_id != f"bill-documents:{bill_number}":
             raise ValueError("bill document task work_id does not match")
-        discovery = self._required_discovery(task.research_id)
-        if bill_number not in discovery.document_bill_numbers:
+        bill = self.runs.get_document_bill(task.research_id, bill_number)
+        if bill is None:
             raise ValueError("bill document task is outside the resolved candidate set")
         # Every bill discovery is stored under a fixed write-once identity.
         # Reading that identity directly keeps N concurrent bill checks O(N);
@@ -1990,7 +2717,6 @@ class ResearchEngine:
         # hosted Blob reads and JSON decoding.
         existing = self.runs.get_bill_discovery(task.research_id, bill_number)
         if existing is None:
-            bill = _accepted_bill_by_number(discovery.resolution, bill_number)
             try:
                 discovered = self.bill_documents.discover_one(
                     self._required_gateway(task.research_id).research_plan,
@@ -2009,17 +2735,17 @@ class ResearchEngine:
         return existing
 
     def _deferred_metadata_complete(self, research_id: str) -> bool:
-        discovery = self._required_discovery(research_id)
-        if discovery.status_partitions and not self._phase_complete(
+        manifest = self._required_deferred_manifest(research_id)
+        if manifest.status_partitions and not self._phase_complete(
             research_id, MetadataPhase.BILL_STATUS
         ):
             return False
         return len(
             self.runs.bill_discoveries_for(
                 research_id,
-                discovery.document_bill_numbers,
+                manifest.document_bill_numbers,
             )
-        ) == len(discovery.document_bill_numbers)
+        ) == len(manifest.document_bill_numbers)
 
     def _complete_metadata(
         self,
@@ -2029,13 +2755,20 @@ class ResearchEngine:
         preassembled_status: MetadataCollection | None = None,
         preassembled_bill_discoveries: Sequence[BillDocumentDiscovery] | None = None,
     ) -> MetadataStageState | None:
-        existing = self.runs.get_metadata(research_id)
-        if existing is not None:
-            self._publish_document_manifest(research_id, existing.manifest)
-            return existing
+        existing_manifest = self.runs.get_document_manifest(research_id)
+        if existing_manifest is not None:
+            persisted = self.runs.get_metadata(research_id)
+            if persisted is None:
+                raise LookupError("ready metadata audit state is missing")
+            # Heal a status-checkpoint failure after the document manifest's
+            # successful last write. All writes remain immutable/idempotent.
+            self.runs.put_metadata(research_id, persisted)
+            self._publish_document_manifest(research_id, existing_manifest)
+            return None
         discovery = self.runs.get_discovery(research_id)
         if discovery is None:
             return None
+        deferred = self._required_deferred_manifest(research_id)
         if not prerequisites_verified and not self._deferred_metadata_complete(research_id):
             return None
         bill_discoveries = (
@@ -2043,10 +2776,10 @@ class ResearchEngine:
             if preassembled_bill_discoveries is not None
             else self.runs.bill_discoveries_for(
                 research_id,
-                discovery.document_bill_numbers,
+                deferred.document_bill_numbers,
             )
         )
-        if len(bill_discoveries) != len(discovery.document_bill_numbers):
+        if len(bill_discoveries) != len(deferred.document_bill_numbers):
             return None
 
         status_collection = preassembled_status
@@ -2055,9 +2788,9 @@ class ResearchEngine:
                 self._assemble_collection(
                     research_id,
                     MetadataPhase.BILL_STATUS,
-                    discovery.status_partitions,
+                    deferred.status_partitions,
                 )
-                if discovery.status_partitions
+                if deferred.status_partitions
                 else _empty_collection()
             )
         gateway = self._required_gateway(research_id)
@@ -2087,9 +2820,7 @@ class ResearchEngine:
         )
         return existing
 
-    def _publish_document_manifest(
-        self, research_id: str, manifest: DocumentWorkManifest
-    ) -> None:
+    def _publish_document_manifest(self, research_id: str, manifest: DocumentWorkManifest) -> None:
         job = self._required_job(research_id)
         if len(manifest.items) > self.direct_fanout_limit:
             self._publish_fanout(job, _DOCUMENT_FANOUT, 0, len(manifest.items))
@@ -2101,9 +2832,7 @@ class ResearchEngine:
             delay_seconds=self._barrier_delay_seconds(1),
         )
 
-    def _publish_document_items(
-        self, research_id: str, items: Sequence[DocumentWorkItem]
-    ) -> None:
+    def _publish_document_items(self, research_id: str, items: Sequence[DocumentWorkItem]) -> None:
         job = self._required_job(research_id)
         for item in items:
             task = ResearchTask(
@@ -2121,9 +2850,8 @@ class ResearchEngine:
             self.queue.publish(task, retention_seconds=self.task_retention_seconds)
 
     def _publish_bill_document(self, job: ResearchJob, bill_number: str) -> None:
-        discovery = self._required_discovery(job.id)
-        bill = _accepted_bill_by_number(discovery.resolution, bill_number)
-        assert bill.candidate_id
+        if not re.fullmatch(r"\d{7}", bill_number):
+            raise ValueError("bill document task requires an exact bill number")
         task = ResearchTask(
             research_id=job.id,
             stage=ResearchTaskStage.COLLECT_METADATA,
@@ -2254,9 +2982,7 @@ class ResearchEngine:
         *,
         delay_seconds: int = 0,
     ) -> None:
-        work_id = (
-            f"{_PAGE_FANOUT}:{phase.value}:{partition.partition_id}:{start}:{stop}"
-        )
+        work_id = f"{_PAGE_FANOUT}:{phase.value}:{partition.partition_id}:{start}:{stop}"
         task = ResearchTask(
             research_id=job.id,
             stage=ResearchTaskStage.COLLECT_METADATA,
@@ -2286,10 +3012,21 @@ class ResearchEngine:
         work_kind: str,
         total: int,
     ) -> tuple[int, int]:
+        start, stop = ResearchEngine._validate_fanout_identity(task, payload, work_kind)
+        if stop > total:
+            raise ValueError("research fan-out range is outside its immutable plan")
+        return start, stop
+
+    @staticmethod
+    def _validate_fanout_identity(
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+        work_kind: str,
+    ) -> tuple[int, int]:
         start = int(payload.get(_START, -1))
         stop = int(payload.get(_STOP, -1))
-        if not 0 <= start < stop <= total:
-            raise ValueError("research fan-out range is outside its immutable plan")
+        if not 0 <= start < stop:
+            raise ValueError("research fan-out range is invalid")
         if task.work_id != f"{work_kind}:{start}:{stop}":
             raise ValueError("research fan-out task identity does not match")
         return start, stop
@@ -2328,18 +3065,47 @@ class ResearchEngine:
         return start, stop
 
     def _phase_complete(self, research_id: str, phase: MetadataPhase) -> bool:
+        """Check only small page-ready markers; never decode raw page blobs."""
+
         partitions = self._phase_partitions(research_id, phase)
         for partition in partitions:
-            pages = self.runs.pages(research_id, phase, partition.partition_id)
-            if not pages or not any(page.page == 1 for page in pages):
-                return False
-            first = next(page for page in pages if page.page == 1)
-            assert first.total_count is not None
-            expected_pages = max(
-                1, (first.total_count + partition.page_size - 1) // partition.page_size
+            first_values = self.runs.page_readiness_for(
+                research_id,
+                phase,
+                partition.partition_id,
+                (1,),
             )
-            if {page.page for page in pages} != set(range(1, expected_pages + 1)):
+            if len(first_values) != 1:
                 return False
+            first = first_values[0]
+            if (
+                first.phase is not phase
+                or first.partition_id != partition.partition_id
+                or first.dataset != partition.dataset
+                or first.page != 1
+                or first.page_size != partition.page_size
+            ):
+                raise RuntimeError("metadata page readiness does not match its partition")
+            expected_pages = max(1, (first.total_count + first.page_size - 1) // first.page_size)
+            following_numbers = tuple(range(2, expected_pages + 1))
+            following = self.runs.page_readiness_for(
+                research_id,
+                phase,
+                partition.partition_id,
+                following_numbers,
+            )
+            if len(following) != len(following_numbers):
+                return False
+            readiness = (first, *following)
+            if tuple(item.page for item in readiness) != tuple(range(1, expected_pages + 1)):
+                raise RuntimeError("metadata page readiness sequence is invalid")
+            if any(
+                item.total_count != first.total_count
+                or item.page_size != first.page_size
+                or item.dataset != first.dataset
+                for item in readiness
+            ):
+                raise RuntimeError("metadata page readiness totals are inconsistent")
         return True
 
     def _assemble_collection(
@@ -2369,8 +3135,7 @@ class ResearchEngine:
                 return None
             expected_pages = max(
                 1,
-                (first.total_count + partition.page_size - 1)
-                // partition.page_size,
+                (first.total_count + partition.page_size - 1) // partition.page_size,
             )
             if {page.page for page in pages} != set(range(1, expected_pages + 1)):
                 return None
@@ -2413,7 +3178,12 @@ class ResearchEngine:
     def _partition(
         self, research_id: str, phase: MetadataPhase, partition_id: str
     ) -> MetadataPartition:
-        for partition in self._phase_partitions(research_id, phase):
+        if phase is MetadataPhase.BILL_STATUS:
+            partition = self.runs.get_status_partition(research_id, partition_id)
+            if partition is None:
+                raise ValueError("metadata partition is absent from the stored plan")
+            return partition
+        for partition in self._required_gateway(research_id).discovery_partitions:
             if partition.partition_id == partition_id:
                 return partition
         raise ValueError("metadata partition is absent from the stored plan")
@@ -2423,7 +3193,7 @@ class ResearchEngine:
     ) -> tuple[MetadataPartition, ...]:
         if phase is MetadataPhase.DISCOVERY:
             return self._required_gateway(research_id).discovery_partitions
-        return self._required_discovery(research_id).status_partitions
+        return self._required_deferred_manifest(research_id).status_partitions
 
     def _reveal_task_credential(self, task: ResearchTask) -> ResearchCredential:
         if task.credential_capability is None:
@@ -2449,18 +3219,14 @@ class ResearchEngine:
         ):
             raise ValueError("research task belongs to an expired job")
 
-    def _validate_snapshot(
-        self, snapshot: ResearchSnapshot, context: FinalizationContext
-    ) -> None:
+    def _validate_snapshot(self, snapshot: ResearchSnapshot, context: FinalizationContext) -> None:
         if (
             snapshot.research_id != context.job.id
             or snapshot.contract != context.job.contract
             or snapshot.index_revision != context.job.index_revision
         ):
             raise ValueError("finalizer returned a snapshot for another research job")
-        coverage_by_type = {
-            entry.evidence_type: entry for entry in snapshot.coverage.entries
-        }
+        coverage_by_type = {entry.evidence_type: entry for entry in snapshot.coverage.entries}
         for gap in context.coverage_gaps:
             for evidence_type in gap.evidence_types:
                 if evidence_type not in snapshot.contract.evidence_types:
@@ -2481,10 +3247,22 @@ class ResearchEngine:
             raise LookupError(f"research discovery state not found: {research_id}")
         return result
 
+    def _required_deferred_manifest(self, research_id: str) -> DeferredWorkManifest:
+        result = self.runs.get_deferred_manifest(research_id)
+        if result is None:
+            raise LookupError(f"research deferred manifest not found: {research_id}")
+        return result
+
     def _required_metadata(self, research_id: str) -> MetadataStageState:
         result = self.runs.get_metadata(research_id)
         if result is None:
             raise LookupError(f"research metadata state not found: {research_id}")
+        return result
+
+    def _required_document_manifest(self, research_id: str) -> DocumentWorkManifest:
+        result = self.runs.get_document_manifest(research_id)
+        if result is None:
+            raise LookupError(f"research document manifest not found: {research_id}")
         return result
 
     def _required_job(self, research_id: str) -> ResearchJob:
@@ -2554,10 +3332,7 @@ class _ArtifactResultClient:
 def _chunk_ranges(total: int, chunk_size: int) -> tuple[tuple[int, int], ...]:
     if total < 0 or chunk_size < 1:
         raise ValueError("fan-out range inputs are invalid")
-    return tuple(
-        (start, min(total, start + chunk_size))
-        for start in range(0, total, chunk_size)
-    )
+    return tuple((start, min(total, start + chunk_size)) for start in range(0, total, chunk_size))
 
 
 def _status_partitions(
@@ -2576,14 +3351,77 @@ def _status_partitions(
 
 
 def _accepted_bill_numbers(resolution: MetadataResolution) -> tuple[str, ...]:
-    return tuple(
-        sorted(
+    return tuple(sorted({_candidate_bill_number(item) for item in resolution.bills.accepted}))
+
+
+def _candidate_bill_number(decision: CandidateDecision) -> str:
+    raw = decision.candidate.get("BILL_NO", decision.candidate.get("bill_no"))
+    bill_number = str(raw).strip() if raw is not None else ""
+    if (
+        decision.kind is not MetadataKind.BILL
+        or not decision.accepted
+        or decision.candidate_id != f"bill:{bill_number}"
+        or not re.fullmatch(r"\d{7}", bill_number)
+    ):
+        raise ValueError("accepted bill candidate lacks an exact bill identity")
+    return bill_number
+
+
+def _candidate_meeting_url(decision: CandidateDecision) -> str | None:
+    if decision.kind is not MetadataKind.MEETING or not decision.accepted:
+        return None
+    prefix = "meeting:"
+    if not decision.candidate_id.startswith(prefix):
+        return None
+    candidate_url = str(
+        decision.candidate.get("PDF_LINK_URL", decision.candidate.get("DOWN_URL", ""))
+    ).strip()
+    identity_url = decision.candidate_id.removeprefix(prefix).strip()
+    return identity_url if candidate_url == identity_url and identity_url else None
+
+
+def _criteria_hash(criteria: RelevanceCriteria) -> str:
+    payload = {
+        "query": criteria.query,
+        "bill_numbers": list(criteria.bill_numbers),
+        "statute_terms": list(criteria.statute_terms),
+        "issue_terms": list(criteria.issue_terms),
+        "related_statute_terms": list(criteria.related_statute_terms),
+        "related_issue_terms": list(criteria.related_issue_terms),
+        "committees": list(criteria.committees),
+        "date_from": criteria.date_from.isoformat() if criteria.date_from else None,
+        "date_to": criteria.date_to.isoformat() if criteria.date_to else None,
+        "minimum_score": criteria.minimum_score,
+        "terminology_version": criteria.terminology_version,
+        "terminology_expansions": [
             {
-                str(item.candidate.get("BILL_NO", item.candidate.get("bill_no"))).strip()
-                for item in resolution.bills.accepted
+                "source_text": item.source_text,
+                "source_concept_id": item.source_concept_id,
+                "target_concept_id": item.target_concept_id,
+                "term": item.term,
+                "category": item.category.value,
+                "relation": item.relation.value,
+                "reason": item.reason,
             }
-        )
-    )
+            for item in criteria.terminology_expansions
+        ],
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _provenance_source_hash(
+    partitions: Sequence[PartitionProvenance],
+) -> str:
+    digest = hashlib.sha256()
+    for partition in partitions:
+        digest.update(partition.partition_id.encode())
+        digest.update(b":")
+        digest.update(partition.result_hash.encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def _accepted_bill_scopes(
@@ -2593,11 +3431,7 @@ def _accepted_bill_scopes(
 
     result: dict[str, int] = {}
     for item in resolution.bills.accepted:
-        bill_number = str(
-            item.candidate.get("BILL_NO", item.candidate.get("bill_no"))
-        ).strip()
-        if not re.fullmatch(r"\d{7}", bill_number):
-            raise ValueError("accepted bill candidate lacks an exact bill number")
+        bill_number = _candidate_bill_number(item)
         raw_term = _first_text(item.candidate, ("AGE", "AGE_NM", "assembly_term"))
         digits = re.search(r"\d+", raw_term or "")
         assembly_term = int(digits.group()) if digits else int(bill_number[:2])
@@ -2609,12 +3443,9 @@ def _accepted_bill_scopes(
     return tuple(sorted(result.items()))
 
 
-def _accepted_bill_by_number(
-    resolution: MetadataResolution, bill_number: str
-) -> CandidateDecision:
+def _accepted_bill_by_number(resolution: MetadataResolution, bill_number: str) -> CandidateDecision:
     for item in resolution.bills.accepted:
-        value = str(item.candidate.get("BILL_NO", item.candidate.get("bill_no"))).strip()
-        if value == bill_number:
+        if _candidate_bill_number(item) == bill_number:
             return item
     raise ValueError("accepted bill is absent from stored resolution")
 
@@ -2743,9 +3574,7 @@ def _document_manifest(
                 )
             )
     gaps: list[CoverageGap] = []
-    requested_bill_documents = tuple(
-        item for item in _BILL_DOCUMENT_EVIDENCE if item in requested
-    )
+    requested_bill_documents = tuple(item for item in _BILL_DOCUMENT_EVIDENCE if item in requested)
     for discovery in bill_discoveries:
         items.extend(discovery.items)
         if discovery.failure_reason and requested_bill_documents:
@@ -2778,23 +3607,17 @@ def _metadata_coverage_gaps(
     corpus_recall = discovery.corpus_recall
     if corpus_recall is not None and not corpus_recall.comprehensive:
         reasons = corpus_recall.gap_reasons or ("corpus_recall_incomplete",)
-        gaps.extend(
-            CoverageGap(requested, f"full_text_corpus:{reason}")
-            for reason in reasons
-        )
+        gaps.extend(CoverageGap(requested, f"full_text_corpus:{reason}") for reason in reasons)
     if corpus_recall is not None and corpus_recall.status is CorpusRecallStatus.VERIFIED:
         manifest_ids = {item.work_id for item in manifest.items}
         missing_work_ids = tuple(
-            work_id
-            for work_id in corpus_recall.required_work_ids
-            if work_id not in manifest_ids
+            work_id for work_id in corpus_recall.required_work_ids if work_id not in manifest_ids
         )
         if missing_work_ids:
             gaps.append(
                 CoverageGap(
                     requested,
-                    "full_text_corpus:corpus_candidate_work_missing:"
-                    f"{len(missing_work_ids)}",
+                    f"full_text_corpus:corpus_candidate_work_missing:{len(missing_work_ids)}",
                 )
             )
     coverage = discovery.collection.coverage
@@ -2847,10 +3670,7 @@ def _metadata_coverage_gaps(
     if discovery.status_partitions:
         if not status.coverage.source_complete:
             gaps.append(CoverageGap((EvidenceType.BILL_STATUS,), "bill_status_source_incomplete"))
-        found = {
-            str(row.get("BILL_NO", row.get("bill_no"))).strip()
-            for row in status.bills
-        }
+        found = {str(row.get("BILL_NO", row.get("bill_no"))).strip() for row in status.bills}
         for bill_number in _accepted_bill_numbers(discovery.resolution):
             if bill_number not in found:
                 gaps.append(
@@ -2861,9 +3681,7 @@ def _metadata_coverage_gaps(
                 )
     for item in bill_discoveries:
         requested_bill_documents = tuple(
-            evidence_type
-            for evidence_type in _BILL_DOCUMENT_EVIDENCE
-            if evidence_type in requested
+            evidence_type for evidence_type in _BILL_DOCUMENT_EVIDENCE if evidence_type in requested
         )
         if item.failure_reason and requested_bill_documents:
             gaps.append(
@@ -2875,9 +3693,7 @@ def _metadata_coverage_gaps(
         if (
             EvidenceType.BILL_TEXT in requested
             and not item.failure_reason
-            and not any(
-                work.kind is OfficialDocumentKind.BILL_TEXT for work in item.items
-            )
+            and not any(work.kind is OfficialDocumentKind.BILL_TEXT for work in item.items)
         ):
             gaps.append(
                 CoverageGap(
@@ -2933,8 +3749,7 @@ def _page_aware_transcripts(
             gaps.append(
                 CoverageGap(
                     speech_types,
-                    f"page_aware_transcript_failed:{outcome.work_id}:"
-                    f"{type(exc).__name__}",
+                    f"page_aware_transcript_failed:{outcome.work_id}:{type(exc).__name__}",
                 )
             )
             continue
@@ -2943,8 +3758,7 @@ def _page_aware_transcripts(
             gaps.append(
                 CoverageGap(
                     speech_types,
-                    f"transcript_parse_gaps:{outcome.work_id}:"
-                    f"{len(transcript.failures)}",
+                    f"transcript_parse_gaps:{outcome.work_id}:{len(transcript.failures)}",
                 )
             )
         if not transcript.speeches:
@@ -2988,11 +3802,18 @@ __all__ = [
     "CorpusRecallState",
     "CorpusRecallStatus",
     "CoverageGap",
+    "DeferredRouteKind",
+    "DeferredRouteShard",
+    "DeferredWorkManifest",
+    "DeferredWorkRoute",
+    "DiscoveryBoundaryReadiness",
     "DiscoveryStageState",
     "DerivedResearchStatus",
     "DocumentOutcome",
     "DocumentOutcomeStatus",
+    "DocumentBoundaryReadiness",
     "DocumentProcessor",
+    "DocumentRouteShard",
     "DocumentWorkItem",
     "DocumentWorkManifest",
     "FamilyFilterAccounting",
@@ -3000,6 +3821,7 @@ __all__ = [
     "GatewayPlanState",
     "GatewayReceipt",
     "InMemoryResearchRunStore",
+    "MetadataPageReadiness",
     "MetadataPageClient",
     "MetadataPhase",
     "MetadataStageState",
@@ -3007,5 +3829,6 @@ __all__ = [
     "ResearchCredentialCapabilityCodec",
     "ResearchFinalizer",
     "ResearchRunStore",
+    "ROUTING_SHARD_SIZE",
     "StrictFilterReport",
 ]

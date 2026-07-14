@@ -15,6 +15,10 @@ _SECRET = "w" * 48
 class _Engine:
     def __init__(self) -> None:
         self.tasks: list[ResearchTask] = []
+        self.completions: list[ResearchTask] = []
+
+    def task_completed(self, task: ResearchTask) -> bool:
+        return task in self.completions
 
     def process_metadata_task(self, task: ResearchTask) -> None:
         self.tasks.append(task)
@@ -24,6 +28,9 @@ class _Engine:
 
     def process_finalize_task(self, task: ResearchTask) -> None:
         self.tasks.append(task)
+
+    def complete_task(self, task: ResearchTask) -> None:
+        self.completions.append(task)
 
     def fail_task(self, task: ResearchTask, *, error_code: str) -> None:
         del error_code
@@ -98,6 +105,7 @@ def test_dedicated_worker_dispatches_without_importing_public_mcp(
         {"ok": True, "stage": "collect_metadata"},
     )
     assert engine.tasks == [_task()]
+    assert engine.completions == [_task()]
     source = (
         Path(__file__).resolve().parents[2]
         / "src/kasm/research/worker_deployment.py"

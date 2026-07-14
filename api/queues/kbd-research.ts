@@ -3,15 +3,26 @@ import { handleCallback } from "@vercel/queue";
 const INTERNAL_PATH = "/_internal/research/dispatch";
 const SECRET_HEADER = "x-kbd-internal-secret";
 const DELIVERY_COUNT_HEADER = "x-kbd-delivery-count";
+const TERMINAL_FAILURE_HEADER = "x-kbd-terminal-failure";
+const TERMINAL_FAILURE_CODE = "task_retry_budget_exhausted";
+const ERROR_CLASS_HEADER = "x-kbd-dispatch-error-class";
+const PERMANENT_TASK_ERROR_CLASS = "permanent-task";
 const OIDC_HEADER = "x-vercel-oidc-token";
 const TRUSTED_OIDC_HEADER = "x-vercel-trusted-oidc-idp-token";
 const MAX_TASK_BYTES = 64 * 1024;
 // Leave enough of the 300 second function budget for the Queue SDK to issue
 // its acknowledge/reschedule directive after the Python worker returns.
 const DISPATCH_TIMEOUT_MS = 270_000;
+// Deliveries after the ten normal attempts skip normal work entirely.  Their
+// lightweight terminal marker leaves 275 seconds of the function budget for
+// cold start, response handling, and the Queue SDK acknowledge/reschedule call.
+const TERMINAL_FAILURE_TIMEOUT_MS = 25_000;
+const MAX_NORMAL_DELIVERY_ATTEMPTS = 10;
 const MAX_PERMANENT_DELIVERY_ATTEMPTS = 3;
 
 class PermanentDispatchError extends Error {}
+class AmbiguousDispatchError extends Error {}
+class TerminalFailureDispatchError extends Error {}
 
 function currentDeploymentOrigin(request: Request): string {
   const deploymentHost = (process.env.VERCEL_URL ?? "").trim();
@@ -71,6 +82,10 @@ async function dispatchMessage(
   deploymentOrigin: string,
   deliveryCount: number,
   oidcToken: string,
+  options: {
+    terminalFailure?: boolean;
+    timeoutMs?: number;
+  } = {},
 ): Promise<void> {
   let body: string;
   try {
@@ -94,6 +109,9 @@ async function dispatchMessage(
         "content-type": "application/json",
         [SECRET_HEADER]: internalSecret(),
         [DELIVERY_COUNT_HEADER]: String(deliveryCount),
+        ...(options.terminalFailure
+          ? { [TERMINAL_FAILURE_HEADER]: TERMINAL_FAILURE_CODE }
+          : {}),
         // Python publishes follow-up tasks with this request-local identity.
         // The trusted-source form also supports same-project calls when
         // Deployment Protection is enabled.
@@ -102,10 +120,13 @@ async function dispatchMessage(
       },
       body,
       redirect: "error",
-      signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(options.timeoutMs ?? DISPATCH_TIMEOUT_MS),
     });
   } catch {
-    throw new Error("research dispatch request failed");
+    // DNS/socket/AbortSignal failures do not prove whether Python accepted the
+    // task.  Give a potentially still-running 300s target time to finish and
+    // write its receipt before any normal redelivery.
+    throw new AmbiguousDispatchError("research dispatch request failed");
   }
 
   if (!response.ok) {
@@ -117,7 +138,13 @@ async function dispatchMessage(
     // Throwing leaves the delivery unacknowledged, so Vercel Queues retries it.
     // The response body is intentionally never read or copied into the error.
     const error = `research dispatch failed (${response.status})`;
-    if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+    // These are the only statuses emitted by the private Python boundary for
+    // a proven malformed/oversized task body.  Auth, routing/deployment, HTTP
+    // timeout, conflict, and rate-limit responses remain retryable.
+    if (
+      (response.status === 400 || response.status === 413) &&
+      response.headers.get(ERROR_CLASS_HEADER) === PERMANENT_TASK_ERROR_CLASS
+    ) {
       throw new PermanentDispatchError(error);
     }
     throw new Error(error);
@@ -129,12 +156,48 @@ async function dispatchMessage(
   }
 }
 
+async function handleMessage(
+  message: unknown,
+  deploymentOrigin: string,
+  deliveryCount: number,
+  oidcToken: string,
+): Promise<void> {
+  if (deliveryCount > MAX_NORMAL_DELIVERY_ATTEMPTS) {
+    // Never repeat the potentially expensive/ambiguous task after its ten
+    // normal attempts.  This avoids a timeout-then-late-success racing with a
+    // second normal execution.  The Python marker checks durable task state
+    // before deciding whether fail_task is still required.
+    try {
+      await dispatchMessage(message, deploymentOrigin, deliveryCount, oidcToken, {
+        terminalFailure: true,
+        timeoutMs: TERMINAL_FAILURE_TIMEOUT_MS,
+      });
+    } catch (error) {
+      // Preserve a boundary-proven malformed/oversized task classification.
+      // Collapsing it into the transient marker error below would reschedule a
+      // poison message every five minutes until Queue retention expired.
+      if (error instanceof PermanentDispatchError) {
+        throw error;
+      }
+      throw new TerminalFailureDispatchError(
+        "research terminal failure dispatch failed",
+      );
+    }
+    return;
+  }
+
+  // Attempts 1..10 are normal dispatches only.  Any transient failure is
+  // thrown to the Queue SDK and rescheduled; the terminal marker begins on the
+  // following delivery, never inside an aborted normal invocation.
+  await dispatchMessage(message, deploymentOrigin, deliveryCount, oidcToken);
+}
+
 async function queueRoute(request: Request): Promise<Response> {
   const deploymentOrigin = currentDeploymentOrigin(request);
   const oidcToken = requestOidcToken(request);
   const queueCallback = handleCallback<unknown>(
     async (message, metadata) =>
-      dispatchMessage(
+      handleMessage(
         message,
         deploymentOrigin,
         metadata.deliveryCount,
@@ -144,15 +207,25 @@ async function queueRoute(request: Request): Promise<Response> {
       visibilityTimeoutSeconds: 600,
       retry: (error, metadata) => {
         // Only a proven permanent 4xx/task-shape failure may be discarded by
-        // this bridge. Network/429/5xx failures must remain durable: once the
-        // Python worker is reachable it records terminal engine failures on its
-        // own bounded tenth delivery. A blanket tenth-attempt acknowledge here
-        // would silently lose work during a temporary worker outage.
+        // this bridge.  Transient failures are acknowledged by normal handler
+        // completion only after the dedicated terminal marker succeeds.
         if (
           error instanceof PermanentDispatchError &&
           metadata.deliveryCount >= MAX_PERMANENT_DELIVERY_ATTEMPTS
         ) {
           return { acknowledge: true };
+        }
+        if (error instanceof TerminalFailureDispatchError) {
+          return { afterSeconds: 300 };
+        }
+        if (error instanceof AmbiguousDispatchError) {
+          return { afterSeconds: 600 };
+        }
+        if (metadata.deliveryCount === MAX_NORMAL_DELIVERY_ATTEMPTS) {
+          // The bridge can lose its response immediately after Python accepts
+          // the tenth task.  Wait beyond that target's 300s max duration so its
+          // write-once completion receipt cannot race the marker-only delivery.
+          return { afterSeconds: 600 };
         }
         return {
           afterSeconds: Math.min(

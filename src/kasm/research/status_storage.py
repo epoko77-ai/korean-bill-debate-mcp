@@ -35,24 +35,18 @@ class BoundedResearchStatusView:
 class StatusSnapshotResearchRunStore(ArtifactResearchRunStore):
     """Add three immutable checkpoints without changing source artifact storage."""
 
-    def put_gateway(
-        self, research_id: str, state: GatewayPlanState
-    ) -> GatewayPlanState:
+    def put_gateway(self, research_id: str, state: GatewayPlanState) -> GatewayPlanState:
         stored = super().put_gateway(research_id, state)
         self._put_status("gateway", stored, _gateway_status(stored))
         return stored
 
-    def put_discovery(
-        self, research_id: str, state: DiscoveryStageState
-    ) -> DiscoveryStageState:
+    def put_discovery(self, research_id: str, state: DiscoveryStageState) -> DiscoveryStageState:
         stored = super().put_discovery(research_id, state)
         gateway = self._required_status_gateway(research_id)
         self._put_status("discovery", gateway, _discovery_status(gateway, stored))
         return stored
 
-    def put_metadata(
-        self, research_id: str, state: MetadataStageState
-    ) -> MetadataStageState:
+    def put_metadata(self, research_id: str, state: MetadataStageState) -> MetadataStageState:
         stored = super().put_metadata(research_id, state)
         gateway = self._required_status_gateway(research_id)
         self._put_status("metadata", gateway, _metadata_status(gateway, stored))
@@ -146,14 +140,8 @@ class StatusSnapshotResearchRunStore(ArtifactResearchRunStore):
                 or value.get("index_revision") != gateway.job.index_revision
             ):
                 raise ResearchRunStorageError("research status checkpoint binding is invalid")
-            status = self._expect(
-                value.get("status"), DerivedResearchStatus, "research status"
-            )
-            if (
-                status.research_id != research_id
-                or status.snapshot_ready
-                or status.complete
-            ):
+            status = self._expect(value.get("status"), DerivedResearchStatus, "research status")
+            if status.research_id != research_id or status.snapshot_ready or status.complete:
                 raise ResearchRunStorageError("research status checkpoint over-reports readiness")
             return status
         return None
@@ -278,9 +266,7 @@ def _failed_document_count(summary: ResearchSnapshotSummary) -> int:
     for entry in summary.coverage.entries:
         for reason in entry.gap_reasons:
             if reason.startswith("document_failed:"):
-                work_id, separator, _code = reason.removeprefix("document_failed:").rpartition(
-                    ":"
-                )
+                work_id, separator, _code = reason.removeprefix("document_failed:").rpartition(":")
                 if separator and work_id:
                     work_ids.add(work_id)
     return len(work_ids)

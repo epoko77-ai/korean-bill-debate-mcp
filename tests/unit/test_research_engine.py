@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 from typing import Any
 
 import pytest
@@ -26,6 +28,7 @@ from kasm.research.document_worker import DocumentWorkResult, TransientDocumentE
 from kasm.research.documents import OfficialDocumentKind, ParsedOfficialDocument, TextSegment
 from kasm.research.engine import (
     BillDocumentDiscovery,
+    DeferredWorkManifest,
     DiscoveryStageState,
     DocumentOutcome,
     DocumentOutcomeStatus,
@@ -190,9 +193,7 @@ class BillDocuments:
         self.failure = failure
         self.bills: list[str] = []
 
-    def discover_one(
-        self, plan: ResearchPlan, bill: Any
-    ) -> BillDocumentDiscovery:
+    def discover_one(self, plan: ResearchPlan, bill: Any) -> BillDocumentDiscovery:
         assert plan.contract.query
         number = str(bill.candidate["BILL_NO"])
         self.bills.append(number)
@@ -209,6 +210,47 @@ class BillDocuments:
                 ),
             ),
         )
+
+
+class ManyBillDocuments(BillDocuments):
+    def discover_one(self, plan: ResearchPlan, bill: Any) -> BillDocumentDiscovery:
+        assert plan.contract.query
+        number = str(bill.candidate["BILL_NO"])
+        self.bills.append(number)
+        return BillDocumentDiscovery(
+            number,
+            tuple(
+                DocumentWorkItem.create(
+                    OfficialDocumentKind.REVIEW_REPORT,
+                    f"{REVIEW_URL}&part={part}",
+                    evidence_types=(EvidenceType.REVIEW_REPORTS,),
+                    related_bill_numbers=(number,),
+                )
+                for part in range(5)
+            ),
+        )
+
+
+class ManifestReadGuardRunStore(InMemoryResearchRunStore):
+    """Fail when an engine hot path falls back to a full run manifest."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.forbid_global_manifest_reads = False
+        self.deferred_manifest_reads = 0
+        self.document_manifest_reads = 0
+
+    def get_deferred_manifest(self, research_id: str) -> DeferredWorkManifest | None:
+        self.deferred_manifest_reads += 1
+        if self.forbid_global_manifest_reads:
+            raise AssertionError("hot path read the full deferred manifest")
+        return super().get_deferred_manifest(research_id)
+
+    def get_document_manifest(self, research_id: str) -> DocumentWorkManifest | None:
+        self.document_manifest_reads += 1
+        if self.forbid_global_manifest_reads:
+            raise AssertionError("hot path read the full document manifest")
+        return super().get_document_manifest(research_id)
 
 
 class Worker:
@@ -275,9 +317,7 @@ class Finalizer:
         entries = []
         for evidence_type in context.job.contract.evidence_types:
             reasons = tuple(
-                gap.reason
-                for gap in context.coverage_gaps
-                if evidence_type in gap.evidence_types
+                gap.reason for gap in context.coverage_gaps if evidence_type in gap.evidence_types
             )
             entries.append(
                 EvidenceCoverage(
@@ -306,9 +346,7 @@ class ReducedPartitionPlanner(ResearchPartitionPlanner):
     def plan(self, research_plan: ResearchPlan) -> ResearchPartitionPlan:
         original = super().plan(research_plan)
         selected = next(
-            item
-            for item in original.planned_partitions
-            if item.source.value == "bill_metadata"
+            item for item in original.planned_partitions if item.source.value == "bill_metadata"
         )
         return replace(original, planned_partitions=(selected,))
 
@@ -365,6 +403,7 @@ def engine(
     partition_planner: ResearchPartitionPlanner | None = None,
     bill_documents: BillDocuments | None = None,
     document_worker: Worker | None = None,
+    run_store: InMemoryResearchRunStore | None = None,
 ) -> tuple[
     ResearchEngine,
     Queue,
@@ -376,7 +415,7 @@ def engine(
     queue = Queue()
     client = PageClient(responder)
     jobs = InMemoryResearchJobStore()
-    runs = InMemoryResearchRunStore()
+    runs = run_store or InMemoryResearchRunStore()
     finalizer = Finalizer()
 
     def client_factory(key: str) -> PageClient:
@@ -516,7 +555,7 @@ def test_phase_barrier_rechecks_with_unique_attempts_and_single_assembly_pass(
 
     process_phase_barrier(value, queue, "discovery", attempt=1)
 
-    assert phase_checks == [MetadataPhase.DISCOVERY]
+    assert phase_checks == []
     assert runs.get_discovery(receipt.research_id) is None
     retry = task_with(
         queue,
@@ -529,10 +568,57 @@ def test_phase_barrier_rechecks_with_unique_attempts_and_single_assembly_pass(
 
     value.process_metadata_task(task_with(queue, work_kind="metadata_page", page=1))
 
-    assert phase_checks == [MetadataPhase.DISCOVERY]
+    assert phase_checks == []
     process_phase_barrier(value, queue, "discovery", attempt=2)
-    assert phase_checks == [MetadataPhase.DISCOVERY, MetadataPhase.DISCOVERY]
+    assert phase_checks == [MetadataPhase.DISCOVERY]
     assert runs.get_discovery(receipt.research_id) is not None
+
+
+def test_concurrent_duplicate_barriers_allow_only_one_full_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value, queue, _client, _jobs, runs, _finalizer = engine(exact_responder)
+    receipt = value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+    value.process_metadata_task(task_with(queue, work_kind="metadata_page", page=1))
+    barrier_task = task_with(queue, work_kind="phase_barrier", attempt=1)
+    rendezvous = Barrier(2)
+    original_complete = value._phase_complete
+    original_assembly = value._try_assemble_collection
+    assemblies: list[MetadataPhase] = []
+
+    def synchronized_complete(research_id: str, phase: MetadataPhase) -> bool:
+        result = original_complete(research_id, phase)
+        rendezvous.wait(timeout=5)
+        return result
+
+    def counted_assembly(
+        research_id: str,
+        phase: MetadataPhase,
+        partitions: tuple[MetadataPartition, ...],
+    ) -> MetadataCollection | None:
+        assemblies.append(phase)
+        return original_assembly(research_id, phase, partitions)
+
+    monkeypatch.setattr(value, "_phase_complete", synchronized_complete)
+    monkeypatch.setattr(value, "_try_assemble_collection", counted_assembly)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        tuple(executor.map(value.process_metadata_task, (barrier_task, barrier_task)))
+
+    assert assemblies == [MetadataPhase.DISCOVERY]
+    assert runs.get_discovery(receipt.research_id) is not None
+    assert len(
+        [
+            task
+            for task in queue.tasks
+            if dict(task.payload).get("work_kind") == "phase_barrier"
+            and dict(task.payload).get("attempt") == 2
+        ]
+    ) == 1
 
 
 def test_broad_gateway_uses_bounded_coordinators_instead_of_serial_queue_fanout() -> None:
@@ -547,25 +633,20 @@ def test_broad_gateway_uses_bounded_coordinators_instead_of_serial_queue_fanout(
     assert client.calls == []
     assert receipt.metadata_task_count > value.direct_fanout_limit
     coordinators = [
-        task
-        for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "discovery_fanout"
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
     ]
     assert len(coordinators) == 1
     assert dict(coordinators[0].payload)["start"] == 0
     assert dict(coordinators[0].payload)["stop"] == receipt.metadata_task_count
     value.process_metadata_task(coordinators[0])
     children = [
-        task
-        for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "metadata_page"
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "metadata_page"
     ]
     assert len(children) == value.fanout_chunk_size
     continuation = next(
         task
         for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "discovery_fanout"
-        and task is not coordinators[0]
+        if dict(task.payload).get("work_kind") == "discovery_fanout" and task is not coordinators[0]
     )
     assert dict(continuation.payload)["start"] == value.fanout_chunk_size
     assert dict(continuation.payload)["stop"] == receipt.metadata_task_count
@@ -603,6 +684,55 @@ def test_poisoned_task_retry_budget_marks_job_failed_with_sanitized_error() -> N
     assert failed.error_code == "task_retry_budget_exhausted"
     assert "key" not in (failed.error_message or "")
     assert jobs.get(receipt.research_id) == failed
+
+
+def test_completed_task_receipt_prevents_late_retry_budget_failure() -> None:
+    value, queue, _client, jobs, _runs, _finalizer = engine(exact_responder)
+    receipt = value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+    task = queue.tasks[0]
+
+    completion = value.complete_task(task)
+    assert value.task_completed(task) is True
+    assert completion.work_id == task.work_id
+
+    preserved = value.fail_task(task, error_code="task_retry_budget_exhausted")
+
+    assert preserved.status is JobStatus.QUEUED
+    assert jobs.get(receipt.research_id) == preserved
+
+
+def test_retry_budget_marker_acknowledges_a_run_absent_after_retention() -> None:
+    value, queue, _client, _jobs, _runs, _finalizer = engine(exact_responder)
+    value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+    expired = replace(queue.tasks[0], research_id="expired-run")
+
+    assert value.fail_task(expired, error_code="task_retry_budget_exhausted") is None
+
+
+def test_memory_task_receipt_rejects_same_identity_with_changed_payload() -> None:
+    value, queue, _client, _jobs, _runs, _finalizer = engine(exact_responder)
+    value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+    task = queue.tasks[0]
+    value.complete_task(task)
+    changed = replace(task, payload=((*task.payload, ("changed", True))))
+
+    with pytest.raises(ValueError, match="binding"):
+        value.task_completed(changed)
 
 
 def test_worker_recovers_plan_and_identity_when_process_local_job_store_is_empty() -> None:
@@ -749,6 +879,16 @@ def test_large_page_expansion_is_chained_without_prior_page_rescans(
     monkeypatch.setattr(runs, "pages", forbidden_scan)
     value.process_metadata_task(queue.tasks[0])
 
+    def forbidden_raw_page_read(
+        _research_id: str,
+        _phase: MetadataPhase,
+        _partition_id: str,
+        _page_number: int,
+    ) -> ApiPage | None:
+        raise AssertionError("page fan-out must read the small readiness marker")
+
+    monkeypatch.setattr(runs, "get_page", forbidden_raw_page_read)
+
     assert len(client.calls) == 1
     assert not [
         task
@@ -797,9 +937,7 @@ def test_large_page_expansion_is_chained_without_prior_page_rescans(
     ]
     assert [dict(task.payload)["page"] for task in follow_ups] == list(range(2, 16))
     coordinators = [
-        task
-        for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "page_fanout"
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "page_fanout"
     ]
     assert len(coordinators) == 4
     assert all(
@@ -808,7 +946,9 @@ def test_large_page_expansion_is_chained_without_prior_page_rescans(
     )
 
 
-def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss() -> None:
+def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rows = [
         {
             "BILL_NO": f"{2210000 + index:07d}",
@@ -841,9 +981,11 @@ def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss()
         selected = rows[start : start + page_size]
         return page(dataset, number, page_size, len(rows), selected)
 
+    guarded_runs = ManifestReadGuardRunStore()
     value, queue, client, _jobs, runs, _finalizer = engine(
         responder,
         partition_planner=ReducedPartitionPlanner(),
+        run_store=guarded_runs,
     )
     receipt = value.gateway(
         "최근 AI 입법",
@@ -855,12 +997,31 @@ def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss()
             EvidenceType.REVIEW_REPORTS,
         ),
     )
+    original = value._try_assemble_collection
+    assembled_phases: list[MetadataPhase] = []
+
+    def counted_assembly(
+        research_id: str,
+        phase: MetadataPhase,
+        partitions: tuple[MetadataPartition, ...],
+    ) -> MetadataCollection | None:
+        assembled_phases.append(phase)
+        return original(research_id, phase, partitions)
+
+    monkeypatch.setattr(value, "_try_assemble_collection", counted_assembly)
+
     value.process_metadata_task(queue.tasks[0])
+    process_phase_barrier(value, queue, "discovery", attempt=1)
+
+    assert assembled_phases == []
+    assert runs.get_discovery(receipt.research_id) is None
+
     second_page = task_with(queue, work_kind="metadata_page", page=2)
     value.process_metadata_task(second_page)
-    process_phase_barrier(value, queue, "discovery")
+    process_phase_barrier(value, queue, "discovery", attempt=2)
 
     discovery = runs.get_discovery(receipt.research_id)
+    assert assembled_phases == [MetadataPhase.DISCOVERY]
     assert discovery is not None
     assert discovery.filter_report.bills.source_count == 103
     assert discovery.filter_report.bills.kept_count == 103
@@ -868,9 +1029,7 @@ def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss()
     assert discovery.filter_report.bills.missing_date_count == 0
     assert discovery.resolution.bills.accepted_count == 103
     initial_fanout_tasks = [
-        task
-        for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "deferred_fanout"
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
     assert len(initial_fanout_tasks) == 1
     assert not [
@@ -879,6 +1038,9 @@ def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss()
         if dict(task.payload).get("work_kind") == "metadata_page"
         and dict(task.payload).get("phase") == "bill_status"
     ]
+    guarded_runs.deferred_manifest_reads = 0
+    guarded_runs.document_manifest_reads = 0
+    guarded_runs.forbid_global_manifest_reads = True
     processed: set[str] = set()
     while True:
         pending = next(
@@ -913,9 +1075,7 @@ def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss()
         )
         assert 1 <= children_after - children_before <= value.fanout_chunk_size
     fanout_tasks = [
-        task
-        for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "deferred_fanout"
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
     expected_fanouts = (206 + value.fanout_chunk_size - 1) // value.fanout_chunk_size
     assert len(fanout_tasks) == expected_fanouts
@@ -926,20 +1086,21 @@ def test_resolution_preserves_all_103_bill_entities_without_top_n_or_date_loss()
     status_tasks = [
         task
         for task in queue.tasks
-        if dict(task.payload).get("phase") == "bill_status"
-        and dict(task.payload).get("page") == 1
+        if dict(task.payload).get("phase") == "bill_status" and dict(task.payload).get("page") == 1
     ]
     discovery_tasks = [
-        task
-        for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "bill_documents"
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "bill_documents"
     ]
     assert len(status_tasks) == 103
     assert len(discovery_tasks) == 103
     assert len(client.calls) == 2
+    assert guarded_runs.deferred_manifest_reads == 0
+    assert guarded_runs.document_manifest_reads == 0
 
 
-def test_exact_status_document_pipeline_completes_and_is_idempotent() -> None:
+def test_exact_status_document_pipeline_completes_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     value, queue, _client, jobs, runs, finalizer = engine(exact_responder)
     receipt = value.gateway(
         "2026-01-01부터 2026-07-13까지 2219564 보완수사권",
@@ -953,9 +1114,27 @@ def test_exact_status_document_pipeline_completes_and_is_idempotent() -> None:
     )
     value.process_metadata_task(queue.tasks[0])
     process_phase_barrier(value, queue, "discovery")
-    value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
     value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
-    process_phase_barrier(value, queue, "bill_status")
+    original = value._try_assemble_collection
+    assembled_phases: list[MetadataPhase] = []
+
+    def counted_assembly(
+        research_id: str,
+        phase: MetadataPhase,
+        partitions: tuple[MetadataPartition, ...],
+    ) -> MetadataCollection | None:
+        assembled_phases.append(phase)
+        return original(research_id, phase, partitions)
+
+    monkeypatch.setattr(value, "_try_assemble_collection", counted_assembly)
+
+    process_phase_barrier(value, queue, "bill_status", attempt=1)
+    assert assembled_phases == []
+    assert runs.get_document_manifest(receipt.research_id) is None
+
+    value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
+    process_phase_barrier(value, queue, "bill_status", attempt=2)
+    assert assembled_phases == [MetadataPhase.BILL_STATUS]
     document_task = next(
         task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
     )
@@ -971,11 +1150,82 @@ def test_exact_status_document_pipeline_completes_and_is_idempotent() -> None:
     assert snapshot is not None and snapshot.coverage.complete
     job = jobs.get(receipt.research_id)
     assert job is not None and job.status is JobStatus.COMPLETE
+
+    def forbidden_run_scan(_research_id: str) -> tuple[object, ...]:
+        raise AssertionError("derived status must use exact planned identities")
+
+    monkeypatch.setattr(runs, "bill_discoveries", forbidden_run_scan)
+    monkeypatch.setattr(runs, "document_outcomes", forbidden_run_scan)
     derived = value.derive_status(receipt.research_id)
     assert derived.snapshot_ready and derived.complete
     assert derived.overview_available is True
     assert derived.documents_expected == 1
     assert derived.documents_complete == 1
+
+
+def test_hot_workers_and_document_fanout_never_read_global_manifests() -> None:
+    guarded_runs = ManifestReadGuardRunStore()
+    worker = Worker()
+    value, queue, _client, _jobs, _runs, _finalizer = engine(
+        exact_responder,
+        bill_documents=ManyBillDocuments(),
+        document_worker=worker,
+        run_store=guarded_runs,
+    )
+    value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(task_with(queue, work_kind="metadata_page", page=1))
+    process_phase_barrier(value, queue, "discovery")
+
+    guarded_runs.deferred_manifest_reads = 0
+    guarded_runs.document_manifest_reads = 0
+    guarded_runs.forbid_global_manifest_reads = True
+    value.process_metadata_task(task_with(queue, phase="bill_status", page=1))
+    value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
+    assert guarded_runs.deferred_manifest_reads == 0
+    assert guarded_runs.document_manifest_reads == 0
+
+    # A phase barrier may perform the one full audit/finalization read. Once it
+    # has published fixed document routes, fan-out and workers must stay O(1).
+    guarded_runs.forbid_global_manifest_reads = False
+    process_phase_barrier(value, queue, "bill_status")
+    guarded_runs.deferred_manifest_reads = 0
+    guarded_runs.document_manifest_reads = 0
+    guarded_runs.forbid_global_manifest_reads = True
+
+    processed_fanouts: set[str] = set()
+    while True:
+        pending = next(
+            (
+                task
+                for task in queue.tasks
+                if dict(task.payload).get("work_kind") == "document_fanout"
+                and task.idempotency_key not in processed_fanouts
+            ),
+            None,
+        )
+        if pending is None:
+            break
+        value.process_metadata_task(pending)
+        processed_fanouts.add(pending.idempotency_key)
+
+    document_tasks = [
+        task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
+    ]
+    assert len(document_tasks) == 5
+    for task in document_tasks:
+        assert value.process_document_task(task).status is DocumentOutcomeStatus.SUCCEEDED
+    assert len(worker.calls) == 5
+    assert guarded_runs.deferred_manifest_reads == 0
+    assert guarded_runs.document_manifest_reads == 0
 
 
 def test_bill_document_task_uses_single_identity_lookup_not_sibling_scan(
@@ -1006,7 +1256,7 @@ def test_bill_document_task_uses_single_identity_lookup_not_sibling_scan(
     assert first.bill_number == "2219564"
 
 
-def test_document_tasks_use_single_outcome_lookup_and_finalize_barrier_scan(
+def test_document_tasks_and_finalize_barrier_use_exact_terminal_lookups(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     worker = Worker()
@@ -1032,18 +1282,23 @@ def test_document_tasks_use_single_outcome_lookup_and_finalize_barrier_scan(
     document_task = next(
         task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
     )
-    original = runs.document_outcomes
-    outcome_scans = 0
+    original = runs.document_outcomes_for
+    outcome_reads: list[tuple[str, ...]] = []
 
-    def counted_document_outcomes(research_id: str) -> tuple[DocumentOutcome, ...]:
-        nonlocal outcome_scans
-        outcome_scans += 1
-        return original(research_id)
+    def forbidden_history_scan(_research_id: str) -> tuple[DocumentOutcome, ...]:
+        raise AssertionError("finalize barrier must not scan outcome history")
 
-    monkeypatch.setattr(runs, "document_outcomes", counted_document_outcomes)
+    def counted_document_outcomes_for(
+        research_id: str, work_ids: tuple[str, ...]
+    ) -> tuple[DocumentOutcome, ...]:
+        outcome_reads.append(work_ids)
+        return original(research_id, work_ids)
+
+    monkeypatch.setattr(runs, "document_outcomes", forbidden_history_scan)
+    monkeypatch.setattr(runs, "document_outcomes_for", counted_document_outcomes_for)
 
     process_finalize_barrier(value, queue, attempt=1)
-    assert outcome_scans == 1
+    assert outcome_reads == [(document_task.work_id,)]
     current = jobs.get(receipt.research_id)
     assert current is not None
     assert current.stage == "documents"
@@ -1061,13 +1316,13 @@ def test_document_tasks_use_single_outcome_lookup_and_finalize_barrier_scan(
 
     assert first == repeated
     assert len(worker.calls) == 1
-    assert outcome_scans == 1
+    assert outcome_reads == [(document_task.work_id,)]
     current = jobs.get(receipt.research_id)
     assert current is not None
     assert current.stage == "documents"
     assert current.progress == 0.4
     process_finalize_barrier(value, queue, attempt=2)
-    assert outcome_scans == 2
+    assert outcome_reads == [(document_task.work_id,), (document_task.work_id,)]
     assert runs.get_snapshot(receipt.research_id) is not None
 
 
@@ -1105,10 +1360,7 @@ def test_explicit_assembly_term_clipping_finishes_partial_with_explicit_gap() ->
     process_phase_barrier(value, queue, "discovery")
     process_finalize_barrier(value, queue)
 
-    expected = (
-        "requested_date_scope_not_fully_represented:"
-        "date_from_clipped_to_assembly_term_start"
-    )
+    expected = "requested_date_scope_not_fully_represented:date_from_clipped_to_assembly_term_start"
     snapshot = runs.get_snapshot(receipt.research_id)
     assert snapshot is not None and not snapshot.coverage.complete
     assert expected in snapshot.coverage.entries[0].gap_reasons
@@ -1136,9 +1388,7 @@ def test_cross_term_status_requests_use_each_accepted_bills_own_term() -> None:
                     "BILL_NO": bill_number,
                     "AGE": assembly_term,
                     "BILL_NAME": "인공지능 산업 진흥 법률안",
-                    "PROPOSE_DT": (
-                        "2023-06-01" if assembly_term == 21 else "2025-06-01"
-                    ),
+                    "PROPOSE_DT": ("2023-06-01" if assembly_term == 21 else "2025-06-01"),
                 }
             ]
         return page(dataset, number, page_size, 1, rows)

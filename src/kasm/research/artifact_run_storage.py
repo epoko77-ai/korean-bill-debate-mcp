@@ -14,14 +14,16 @@ secret check before any bytes are persisted.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import math
 import re
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import MISSING, fields, is_dataclass
+from dataclasses import MISSING, fields, is_dataclass, replace
 from datetime import UTC, date, datetime
 from enum import Enum
 from functools import lru_cache
@@ -38,15 +40,28 @@ from .artifacts import (
     ResearchArtifactStore,
     canonical_hash,
 )
+from .collector import MetadataCollection, MetadataKind, MetadataPartition
 from .contracts import EvidencePage, StableCursor
 from .engine import (
+    ROUTING_SHARD_SIZE,
     BillDocumentDiscovery,
+    DeferredRouteShard,
+    DeferredWorkManifest,
+    DeferredWorkRoute,
+    DiscoveryBoundaryReadiness,
     DiscoveryStageState,
+    DocumentBoundaryReadiness,
     DocumentOutcome,
+    DocumentRouteShard,
+    DocumentWorkItem,
+    DocumentWorkManifest,
     GatewayPlanState,
+    MetadataPageReadiness,
     MetadataPhase,
     MetadataStageState,
+    TaskCompletionReceipt,
 )
+from .overview import ProvisionalResearchOverview, build_provisional_research_overview
 from .overview_transport import (
     OverviewCoverageAxisSummary,
     OverviewGroupShard,
@@ -56,6 +71,8 @@ from .overview_transport import (
     overview_catalog_page,
     overview_catalog_required_shards,
 )
+from .queue import ResearchTask
+from .resolver import CandidateDecision, CandidateSetResolution, MetadataResolution
 from .results import (
     SNAPSHOT_INDEX_SHARD_SIZE,
     EvidenceIndexEntry,
@@ -77,6 +94,15 @@ _NAMESPACE: Final = "kasm.research.run"
 _WRITE_RETRIES: Final = 25
 _WRITE_RETRY_SECONDS: Final = 0.002
 _TYPE_MARKER: Final = "__kasm_run_value__"
+_ROUTING_IO_CONCURRENCY: Final = 8
+_DISCOVERY_STATE_KEY: Final = "run/discovery-v2"
+_METADATA_STATE_KEY: Final = "run/metadata-v2"
+_LEGACY_DISCOVERY_STATE_KEY: Final = "run/discovery"
+_LEGACY_METADATA_STATE_KEY: Final = "run/metadata"
+_DISCOVERY_ROUTING_READY_KEY: Final = "run/discovery-routing-ready"
+_DOCUMENT_ROUTING_READY_KEY: Final = "run/document-routing-ready"
+_FINALIZATION_CLAIM_LEASE_SECONDS: Final = 600
+_FINALIZATION_CLAIM_GENERATIONS: Final = 64
 
 _ALLOWED_TYPE_MODULES: Final = (
     "kasm.adapters.korea.client",
@@ -90,6 +116,7 @@ _ALLOWED_TYPE_MODULES: Final = (
     "kasm.research.overview_transport",
     "kasm.research.partitioning",
     "kasm.research.planner",
+    "kasm.research.queue",
     "kasm.research.relevance",
     "kasm.research.resolver",
     "kasm.research.results",
@@ -99,6 +126,8 @@ _ALLOWED_TYPE_MODULES: Final = (
 )
 
 _Value = TypeVar("_Value")
+_Input = TypeVar("_Input")
+_Output = TypeVar("_Output")
 
 
 class ResearchRunStorageError(RuntimeError):
@@ -135,9 +164,7 @@ class ArtifactResearchRunStore:
         self._page_read_concurrency = page_read_concurrency
         self._lock = threading.RLock()
 
-    def put_gateway(
-        self, research_id: str, state: GatewayPlanState
-    ) -> GatewayPlanState:
+    def put_gateway(self, research_id: str, state: GatewayPlanState) -> GatewayPlanState:
         if state.job.id != research_id:
             raise ValueError("gateway job belongs to another research id")
         self._validate_clock()
@@ -177,7 +204,7 @@ class ArtifactResearchRunStore:
             "partition_id": partition_id,
             "page": page.page,
         }
-        return self._put_fixed(
+        stored = self._put_fixed(
             research_id,
             ArtifactKind.PARTITION,
             f"run/page/{phase.value}/{partition_id}/{page.page}",
@@ -186,6 +213,23 @@ class ArtifactResearchRunStore:
             page,
             expires_at=gateway.job.expires_at,
         )
+        readiness = MetadataPageReadiness.create(gateway, phase, partition, stored)
+        # Final write for this page boundary. A barrier reads only these small
+        # markers until every dynamic page is present, then loads raw pages once.
+        self._put_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            f"run/page-ready/{phase.value}/{partition_id}/{page.page}",
+            "page_readiness",
+            {
+                "phase": phase.value,
+                "partition_id": partition_id,
+                "page": page.page,
+            },
+            readiness,
+            expires_at=gateway.job.expires_at,
+        )
+        return stored
 
     def get_page(
         self,
@@ -204,6 +248,44 @@ class ArtifactResearchRunStore:
             partition_id,
             page_number,
         )
+
+    def page_readiness_for(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+        partition_id: str,
+        page_numbers: Sequence[int],
+    ) -> tuple[MetadataPageReadiness, ...]:
+        """Read small fixed page markers without decoding any raw page payload."""
+
+        numbers = tuple(page_numbers)
+        if any(number < 1 for number in numbers) or len(numbers) != len(set(numbers)):
+            raise ValueError("metadata page readiness numbers must be positive and unique")
+        if not numbers:
+            return ()
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return ()
+        partition = self._partition(research_id, gateway, phase, partition_id)
+
+        def read_page(number: int) -> MetadataPageReadiness | None:
+            return self._get_page_readiness(
+                research_id,
+                gateway,
+                phase,
+                partition,
+                number,
+            )
+
+        if len(numbers) == 1 or self._page_read_concurrency == 1:
+            values = tuple(read_page(number) for number in numbers)
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(self._page_read_concurrency, len(numbers)),
+                thread_name_prefix="kbd-page-ready-read",
+            ) as executor:
+                values = tuple(executor.map(read_page, numbers))
+        return tuple(value for value in values if value is not None)
 
     def pages(
         self, research_id: str, phase: MetadataPhase, partition_id: str
@@ -247,47 +329,389 @@ class ArtifactResearchRunStore:
         values = [first, *(value for value in following if value is not None)]
         return tuple(values)
 
-    def put_discovery(
-        self, research_id: str, state: DiscoveryStageState
-    ) -> DiscoveryStageState:
+    def put_discovery(self, research_id: str, state: DiscoveryStageState) -> DiscoveryStageState:
         gateway = self._require_active(research_id)
         if state.resolution.query != gateway.job.contract.query:
             raise ValueError("discovery belongs to another research contract")
-        return self._put_fixed(
+        state = _compact_discovery_state(state)
+        manifest = DeferredWorkManifest.create(gateway, state)
+        overview = build_provisional_research_overview(state)
+        deferred_routes = DeferredRouteShard.build(manifest)
+        route_count = len(manifest.status_partitions) + len(manifest.document_bill_numbers)
+        readiness = DiscoveryBoundaryReadiness(
+            query_fingerprint=gateway.job.query_fingerprint,
+            index_revision=gateway.job.index_revision,
+            discovery_source_hash=manifest.discovery_source_hash,
+            discovery_hash=canonical_hash(_encode(state)),
+            manifest_hash=canonical_hash(_encode(manifest)),
+            overview_hash=canonical_hash(_encode(overview)),
+            deferred_route_count=route_count,
+            deferred_route_shard_count=len(deferred_routes),
+            accepted_bill_count=len(manifest.accepted_bills),
+            status_partition_count=len(manifest.status_partitions),
+        )
+        existing_readiness = self._get_discovery_readiness(research_id, gateway)
+        if existing_readiness is not None:
+            if existing_readiness != readiness:
+                raise ResearchRunConflictError(
+                    "immutable discovery readiness already contains different state"
+                )
+            # The marker is the last write and binds every hot routing view.
+            # A hosted status-checkpoint retry must not re-read/re-put O(N)
+            # fixed items merely to invoke the status-store subclass again.
+            return state
+        stored = self._put_fixed(
             research_id,
             ArtifactKind.RESOLUTION,
-            "run/discovery",
+            _DISCOVERY_STATE_KEY,
             "discovery",
             {"research_id": research_id},
             state,
             expires_at=gateway.job.expires_at,
         )
+        routing_value = self._get_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            _DISCOVERY_ROUTING_READY_KEY,
+            "discovery_routing_readiness",
+        )
+        if routing_value is None:
+            # Immutable page artifacts preserve every complete official row. The
+            # compact discovery above keeps accepted payloads plus each rejected
+            # exact identity/score/reason. Publish fixed routing views before a
+            # small intermediate marker so a final-marker retry stays O(1).
+            writes: list[tuple[str, str, Mapping[str, Any], Any]] = []
+            document_bills = set(manifest.document_bill_numbers)
+            for decision in manifest.accepted_bills:
+                bill_number = _candidate_bill_number(decision)
+                logical_key = f"run/accepted-bill/{bill_number}"
+                writes.append(
+                    (
+                        logical_key,
+                        "accepted_bill",
+                        _hot_entity(
+                            gateway,
+                            readiness.manifest_hash,
+                            logical_key,
+                            decision,
+                            bill_number=bill_number,
+                            document_required=bill_number in document_bills,
+                        ),
+                        decision,
+                    )
+                )
+            for partition in manifest.status_partitions:
+                logical_key = _status_partition_key(partition.partition_id)
+                writes.append(
+                    (
+                        logical_key,
+                        "status_partition",
+                        _hot_entity(
+                            gateway,
+                            readiness.manifest_hash,
+                            logical_key,
+                            partition,
+                            partition_id=partition.partition_id,
+                        ),
+                        partition,
+                    )
+                )
+            for shard in deferred_routes:
+                logical_key = f"run/deferred-route-shard/{shard.number}"
+                writes.append(
+                    (
+                        logical_key,
+                        "deferred_route_shard",
+                        _hot_entity(
+                            gateway,
+                            readiness.manifest_hash,
+                            logical_key,
+                            shard,
+                            shard=shard.number,
+                        ),
+                        shard,
+                    )
+                )
+            self._put_manifest_artifacts_parallel(research_id, gateway, writes)
+            self._put_fixed(
+                research_id,
+                ArtifactKind.MANIFEST,
+                _DISCOVERY_ROUTING_READY_KEY,
+                "discovery_routing_readiness",
+                {"research_id": research_id},
+                readiness,
+                expires_at=gateway.job.expires_at,
+            )
+        elif self._expect(
+            routing_value,
+            DiscoveryBoundaryReadiness,
+            "discovery routing readiness",
+        ) != readiness:
+            raise ResearchRunConflictError(
+                "immutable discovery routing readiness contains different state"
+            )
+        self._put_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            "run/deferred-work-manifest",
+            "deferred_work_manifest",
+            {
+                "query_fingerprint": gateway.job.query_fingerprint,
+                "index_revision": gateway.job.index_revision,
+                "discovery_source_hash": manifest.discovery_source_hash,
+            },
+            manifest,
+            expires_at=gateway.job.expires_at,
+        )
+        self._put_fixed(
+            research_id,
+            ArtifactKind.RESOLUTION,
+            "run/provisional-overview",
+            "provisional_overview",
+            {
+                "query_fingerprint": gateway.job.query_fingerprint,
+                "source_hash": manifest.discovery_source_hash,
+            },
+            overview,
+            expires_at=gateway.job.expires_at,
+        )
+        # Last write: workers cannot observe a partially published compact
+        # boundary if a serverless invocation stops between independent PUTs.
+        self._put_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            "run/discovery-ready",
+            "discovery_readiness",
+            {"research_id": research_id},
+            readiness,
+            expires_at=gateway.job.expires_at,
+        )
+        return stored
 
     def get_discovery(self, research_id: str) -> DiscoveryStageState | None:
         gateway = self.get_gateway(research_id)
         if gateway is None:
             return None
+        readiness = self._discovery_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return None
         value = self._get_fixed(
             research_id,
             ArtifactKind.RESOLUTION,
-            "run/discovery",
+            _DISCOVERY_STATE_KEY,
             "discovery",
         )
         if value is None:
             return None
         state = self._expect(value, DiscoveryStageState, "discovery")
-        if state.resolution.query != gateway.job.contract.query:
+        if (
+            state.resolution.query != gateway.job.contract.query
+            or state.resolution.source_hash != readiness.discovery_source_hash
+            or canonical_hash(_encode(state)) != readiness.discovery_hash
+        ):
             raise ResearchRunStorageError("discovery contract binding is invalid")
         return state
+
+    def get_deferred_manifest(self, research_id: str) -> DeferredWorkManifest | None:
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return None
+        readiness = self._discovery_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return None
+        record = self._get_fixed_record(
+            research_id,
+            ArtifactKind.MANIFEST,
+            "run/deferred-work-manifest",
+            "deferred_work_manifest",
+        )
+        if record is None:
+            raise ResearchRunStorageError("ready deferred manifest is missing")
+        entity, value = record
+        manifest = self._expect(value, DeferredWorkManifest, "deferred work manifest")
+        if (
+            entity.get("query_fingerprint") != gateway.job.query_fingerprint
+            or entity.get("index_revision") != gateway.job.index_revision
+            or entity.get("discovery_source_hash") != manifest.discovery_source_hash
+            or manifest.query_fingerprint != gateway.job.query_fingerprint
+            or manifest.index_revision != gateway.job.index_revision
+        ):
+            raise ResearchRunStorageError("deferred manifest job binding is invalid")
+        if (
+            readiness.discovery_source_hash != manifest.discovery_source_hash
+            or readiness.manifest_hash != canonical_hash(_encode(manifest))
+        ):
+            raise ResearchRunStorageError("deferred manifest readiness binding is invalid")
+        return manifest
+
+    def get_accepted_bill(self, research_id: str, bill_number: str) -> CandidateDecision | None:
+        return self._get_accepted_bill(
+            research_id,
+            bill_number,
+            require_document=False,
+        )
+
+    def get_document_bill(self, research_id: str, bill_number: str) -> CandidateDecision | None:
+        return self._get_accepted_bill(
+            research_id,
+            bill_number,
+            require_document=True,
+        )
+
+    def _get_accepted_bill(
+        self,
+        research_id: str,
+        bill_number: str,
+        *,
+        require_document: bool,
+    ) -> CandidateDecision | None:
+        if not re.fullmatch(r"\d{7}", bill_number):
+            raise ValueError("accepted bill lookup requires seven digits")
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return None
+        readiness = self._discovery_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return None
+        logical_key = f"run/accepted-bill/{bill_number}"
+        record = self._get_bound_hot_record(
+            research_id,
+            gateway,
+            readiness.manifest_hash,
+            logical_key,
+            "accepted_bill",
+        )
+        if record is None:
+            return None
+        entity, value = record
+        decision = self._expect(value, CandidateDecision, "accepted bill")
+        if (
+            entity.get("bill_number") != bill_number
+            or not isinstance(entity.get("document_required"), bool)
+            or not decision.accepted
+            or _candidate_bill_number(decision) != bill_number
+        ):
+            raise ResearchRunStorageError("accepted bill fixed identity is invalid")
+        if require_document and entity.get("document_required") is not True:
+            return None
+        return decision
+
+    def get_status_partition(
+        self, research_id: str, partition_id: str
+    ) -> MetadataPartition | None:
+        if not partition_id.strip():
+            raise ValueError("status partition id is required")
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return None
+        readiness = self._discovery_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return None
+        logical_key = _status_partition_key(partition_id)
+        record = self._get_bound_hot_record(
+            research_id,
+            gateway,
+            readiness.manifest_hash,
+            logical_key,
+            "status_partition",
+        )
+        if record is None:
+            return None
+        entity, value = record
+        partition = self._expect(value, MetadataPartition, "status partition")
+        if entity.get("partition_id") != partition_id or partition.partition_id != partition_id:
+            raise ResearchRunStorageError("status partition fixed identity is invalid")
+        return partition
+
+    def deferred_routes_for(
+        self,
+        research_id: str,
+        start: int,
+        stop: int,
+        *,
+        expected_total: int,
+    ) -> tuple[DeferredWorkRoute, ...]:
+        if not 0 <= start < stop <= expected_total:
+            raise ValueError("deferred route range is outside its immutable plan")
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return ()
+        readiness = self._discovery_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return ()
+        if readiness.deferred_route_count != expected_total:
+            raise ResearchRunStorageError("deferred route total binding is invalid")
+        shard_numbers = tuple(
+            range(start // ROUTING_SHARD_SIZE, ((stop - 1) // ROUTING_SHARD_SIZE) + 1)
+        )
+
+        def read_shard(number: int) -> DeferredRouteShard:
+            logical_key = f"run/deferred-route-shard/{number}"
+            record = self._get_bound_hot_record(
+                research_id,
+                gateway,
+                readiness.manifest_hash,
+                logical_key,
+                "deferred_route_shard",
+            )
+            if record is None:
+                raise ResearchRunStorageError("ready deferred route shard is missing")
+            entity, value = record
+            shard = self._expect(value, DeferredRouteShard, "deferred route shard")
+            if (
+                entity.get("shard") != number
+                or shard.number != number
+                or shard.total != expected_total
+            ):
+                raise ResearchRunStorageError("deferred route shard binding is invalid")
+            return shard
+
+        shards = self._bounded_map(read_shard, shard_numbers, "kbd-deferred-route-read")
+        routes = tuple(
+            route
+            for shard in shards
+            for route in shard.routes
+            if start <= route.position < stop
+        )
+        if tuple(item.position for item in routes) != tuple(range(start, stop)):
+            raise ResearchRunStorageError("deferred route range is incomplete")
+        return routes
+
+    def get_provisional_overview(self, research_id: str) -> ProvisionalResearchOverview | None:
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return None
+        readiness = self._discovery_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return None
+        record = self._get_fixed_record(
+            research_id,
+            ArtifactKind.RESOLUTION,
+            "run/provisional-overview",
+            "provisional_overview",
+        )
+        if record is None:
+            raise ResearchRunStorageError("ready provisional overview is missing")
+        entity, value = record
+        overview = self._expect(value, ProvisionalResearchOverview, "provisional overview")
+        if (
+            entity.get("query_fingerprint") != gateway.job.query_fingerprint
+            or entity.get("source_hash") != overview.source_hash
+            or overview.query != gateway.job.contract.query
+        ):
+            raise ResearchRunStorageError("provisional overview binding is invalid")
+        if (
+            readiness.discovery_source_hash != overview.source_hash
+            or readiness.overview_hash != canonical_hash(_encode(overview))
+        ):
+            raise ResearchRunStorageError("provisional overview readiness binding is invalid")
+        return overview
 
     def put_bill_discovery(
         self, research_id: str, outcome: BillDocumentDiscovery
     ) -> BillDocumentDiscovery:
         gateway = self._require_active(research_id)
-        discovery = self.get_discovery(research_id)
-        if discovery is None:
-            raise LookupError("research discovery is not available")
-        if outcome.bill_number not in discovery.document_bill_numbers:
+        if self.get_document_bill(research_id, outcome.bill_number) is None:
             raise ValueError("bill discovery is outside the resolved research scope")
         return self._put_fixed(
             research_id,
@@ -330,9 +754,7 @@ class ArtifactResearchRunStore:
         if not numbers:
             return ()
         if len(numbers) == 1 or self._page_read_concurrency == 1:
-            values = tuple(
-                self.get_bill_discovery(research_id, number) for number in numbers
-            )
+            values = tuple(self.get_bill_discovery(research_id, number) for number in numbers)
         else:
             with ThreadPoolExecutor(
                 max_workers=min(self._page_read_concurrency, len(numbers)),
@@ -340,22 +762,18 @@ class ArtifactResearchRunStore:
             ) as executor:
                 values = tuple(
                     executor.map(
-                        lambda number: self.get_bill_discovery(
-                            research_id, number
-                        ),
+                        lambda number: self.get_bill_discovery(research_id, number),
                         numbers,
                     )
                 )
         return tuple(value for value in values if value is not None)
 
-    def bill_discoveries(
-        self, research_id: str
-    ) -> tuple[BillDocumentDiscovery, ...]:
+    def bill_discoveries(self, research_id: str) -> tuple[BillDocumentDiscovery, ...]:
         gateway = self.get_gateway(research_id)
         if gateway is None:
             return ()
-        discovery = self.get_discovery(research_id)
-        allowed = set(discovery.document_bill_numbers) if discovery is not None else set()
+        manifest = self.get_deferred_manifest(research_id)
+        allowed = set(manifest.document_bill_numbers) if manifest is not None else set()
         values: dict[str, BillDocumentDiscovery] = {}
         for _ref, entity, value in self._records(
             research_id, ArtifactKind.RESOLUTION, "bill_discovery"
@@ -370,59 +788,403 @@ class ArtifactResearchRunStore:
                 raise ResearchRunConflictError("conflicting bill discovery artifacts")
         return tuple(values[number] for number in sorted(values))
 
-    def put_metadata(
-        self, research_id: str, state: MetadataStageState
-    ) -> MetadataStageState:
+    def put_metadata(self, research_id: str, state: MetadataStageState) -> MetadataStageState:
         gateway = self._require_active(research_id)
-        discovery = self.get_discovery(research_id)
-        if discovery is None or state.discovery != discovery:
+        state = replace(state, discovery=_compact_discovery_state(state.discovery))
+        existing_readiness = self._get_document_readiness(research_id, gateway)
+        if existing_readiness is not None:
+            if (
+                existing_readiness.discovery_source_hash
+                != state.discovery.resolution.source_hash
+                or existing_readiness.metadata_hash != canonical_hash(_encode(state))
+                or existing_readiness.manifest_hash
+                != canonical_hash(_encode(state.manifest))
+                or existing_readiness.manifest_fingerprint != state.manifest.fingerprint
+                or existing_readiness.item_count != len(state.manifest.items)
+            ):
+                raise ResearchRunConflictError(
+                    "immutable document readiness already contains different state"
+                )
+            # The marker proves every item, route, metadata state, and manifest
+            # was already durable. Let the status-store subclass heal its own
+            # small checkpoint without reading any O(N) audit artifact.
+            return state
+        deferred = self.get_deferred_manifest(research_id)
+        if (
+            deferred is None
+            or state.discovery.resolution.query != gateway.job.contract.query
+            or state.discovery.resolution.source_hash != deferred.discovery_source_hash
+            or state.discovery.status_partitions != deferred.status_partitions
+            or state.discovery.document_bill_numbers != deferred.document_bill_numbers
+        ):
             raise ValueError("metadata does not bind to the stored discovery")
+        route_shards = DocumentRouteShard.build(state.manifest)
+        readiness = DocumentBoundaryReadiness(
+            gateway.job.query_fingerprint,
+            gateway.job.index_revision,
+            deferred.discovery_source_hash,
+            canonical_hash(_encode(deferred)),
+            canonical_hash(_encode(state)),
+            canonical_hash(_encode(state.manifest)),
+            state.manifest.fingerprint,
+            len(state.manifest.items),
+            len(route_shards),
+        )
         stored_bill_discoveries = self.bill_discoveries_for(
             research_id,
-            discovery.document_bill_numbers,
+            deferred.document_bill_numbers,
         )
         if state.manifest.bill_discoveries != stored_bill_discoveries:
             raise ValueError("metadata manifest does not bind to bill discoveries")
-        return self._put_fixed(
+        stored = self._put_fixed(
             research_id,
             ArtifactKind.METADATA,
-            "run/metadata",
+            _METADATA_STATE_KEY,
             "metadata",
             {"research_id": research_id},
             state,
             expires_at=gateway.job.expires_at,
         )
+        routing_value = self._get_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            _DOCUMENT_ROUTING_READY_KEY,
+            "document_routing_readiness",
+        )
+        if routing_value is None:
+            writes: list[tuple[str, str, Mapping[str, Any], Any]] = []
+            for item in stored.manifest.items:
+                logical_key = f"run/document-work-item/{item.work_id}"
+                writes.append(
+                    (
+                        logical_key,
+                        "document_work_item",
+                        _hot_entity(
+                            gateway,
+                            readiness.manifest_hash,
+                            logical_key,
+                            item,
+                            work_id=item.work_id,
+                        ),
+                        item,
+                    )
+                )
+            for shard in route_shards:
+                logical_key = f"run/document-route-shard/{shard.number}"
+                writes.append(
+                    (
+                        logical_key,
+                        "document_route_shard",
+                        _hot_entity(
+                            gateway,
+                            readiness.manifest_hash,
+                            logical_key,
+                            shard,
+                            shard=shard.number,
+                        ),
+                        shard,
+                    )
+                )
+            self._put_manifest_artifacts_parallel(research_id, gateway, writes)
+            self._put_fixed(
+                research_id,
+                ArtifactKind.MANIFEST,
+                _DOCUMENT_ROUTING_READY_KEY,
+                "document_routing_readiness",
+                {"research_id": research_id},
+                readiness,
+                expires_at=gateway.job.expires_at,
+            )
+        elif self._expect(
+            routing_value,
+            DocumentBoundaryReadiness,
+            "document routing readiness",
+        ) != readiness:
+            raise ResearchRunConflictError(
+                "immutable document routing readiness contains different state"
+            )
+        self._put_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            "run/document-work-manifest",
+            "document_work_manifest",
+            {
+                "query_fingerprint": gateway.job.query_fingerprint,
+                "index_revision": gateway.job.index_revision,
+                "manifest_fingerprint": stored.manifest.fingerprint,
+                "discovery_source_hash": deferred.discovery_source_hash,
+            },
+            stored.manifest,
+            expires_at=gateway.job.expires_at,
+        )
+        # Final write for the document boundary. No metadata, full manifest,
+        # route, or work item is observable to workers before this marker.
+        self._put_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            "run/document-ready",
+            "document_readiness",
+            {"research_id": research_id},
+            readiness,
+            expires_at=gateway.job.expires_at,
+        )
+        return stored
 
     def get_metadata(self, research_id: str) -> MetadataStageState | None:
         gateway = self.get_gateway(research_id)
         if gateway is None:
             return None
+        readiness = self._document_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return None
         value = self._get_fixed(
             research_id,
             ArtifactKind.METADATA,
-            "run/metadata",
+            _METADATA_STATE_KEY,
             "metadata",
         )
         if value is None:
-            return None
+            raise ResearchRunStorageError("ready metadata audit state is missing")
         state = self._expect(value, MetadataStageState, "metadata")
-        discovery = self.get_discovery(research_id)
-        if discovery is None or state.discovery != discovery:
+        if (
+            canonical_hash(_encode(state)) != readiness.metadata_hash
+            or state.discovery.resolution.query != gateway.job.contract.query
+            or state.discovery.resolution.source_hash != readiness.discovery_source_hash
+            or canonical_hash(_encode(state.manifest)) != readiness.manifest_hash
+        ):
             raise ResearchRunStorageError("metadata discovery binding is invalid")
         return state
 
-    def put_document_outcome(
-        self, research_id: str, outcome: DocumentOutcome
-    ) -> DocumentOutcome:
+    def get_document_manifest(self, research_id: str) -> DocumentWorkManifest | None:
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return None
+        readiness = self._document_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return None
+        record = self._get_fixed_record(
+            research_id,
+            ArtifactKind.MANIFEST,
+            "run/document-work-manifest",
+            "document_work_manifest",
+        )
+        if record is None:
+            raise ResearchRunStorageError("ready document manifest is missing")
+        entity, value = record
+        manifest = self._expect(value, DocumentWorkManifest, "document work manifest")
+        if (
+            entity.get("query_fingerprint") != gateway.job.query_fingerprint
+            or entity.get("index_revision") != gateway.job.index_revision
+            or entity.get("manifest_fingerprint") != manifest.fingerprint
+            or entity.get("discovery_source_hash") != readiness.discovery_source_hash
+            or manifest.fingerprint != readiness.manifest_fingerprint
+            or canonical_hash(_encode(manifest)) != readiness.manifest_hash
+        ):
+            raise ResearchRunStorageError("document manifest binding is invalid")
+        return manifest
+
+    def get_document_item(self, research_id: str, work_id: str) -> DocumentWorkItem | None:
+        if not work_id.strip():
+            raise ValueError("document work_id is required")
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return None
+        readiness = self._document_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return None
+        logical_key = f"run/document-work-item/{work_id}"
+        record = self._get_bound_hot_record(
+            research_id,
+            gateway,
+            readiness.manifest_hash,
+            logical_key,
+            "document_work_item",
+        )
+        if record is None:
+            return None
+        entity, value = record
+        item = self._expect(value, DocumentWorkItem, "document work item")
+        if entity.get("work_id") != work_id or item.work_id != work_id:
+            raise ResearchRunStorageError("document work item fixed identity is invalid")
+        return item
+
+    def document_routes_for(
+        self,
+        research_id: str,
+        start: int,
+        stop: int,
+        *,
+        expected_total: int,
+    ) -> tuple[DocumentWorkItem, ...]:
+        if not 0 <= start < stop <= expected_total:
+            raise ValueError("document route range is outside its immutable plan")
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return ()
+        readiness = self._document_readiness_or_adopt(research_id, gateway)
+        if readiness is None:
+            return ()
+        if readiness.item_count != expected_total:
+            raise ResearchRunStorageError("document route total binding is invalid")
+        shard_numbers = tuple(
+            range(start // ROUTING_SHARD_SIZE, ((stop - 1) // ROUTING_SHARD_SIZE) + 1)
+        )
+
+        def read_shard(number: int) -> DocumentRouteShard:
+            logical_key = f"run/document-route-shard/{number}"
+            record = self._get_bound_hot_record(
+                research_id,
+                gateway,
+                readiness.manifest_hash,
+                logical_key,
+                "document_route_shard",
+            )
+            if record is None:
+                raise ResearchRunStorageError("ready document route shard is missing")
+            entity, value = record
+            shard = self._expect(value, DocumentRouteShard, "document route shard")
+            if (
+                entity.get("shard") != number
+                or shard.number != number
+                or shard.total != expected_total
+            ):
+                raise ResearchRunStorageError("document route shard binding is invalid")
+            return shard
+
+        shards = self._bounded_map(read_shard, shard_numbers, "kbd-document-route-read")
+        selected: list[DocumentWorkItem] = []
+        positions: list[int] = []
+        for shard in shards:
+            for offset, item in enumerate(shard.items):
+                position = shard.start_position + offset
+                if start <= position < stop:
+                    positions.append(position)
+                    selected.append(item)
+        if tuple(positions) != tuple(range(start, stop)):
+            raise ResearchRunStorageError("document route range is incomplete")
+        return tuple(selected)
+
+    def claim_phase_finalization(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+    ) -> bool:
+        """Acquire one crash-recoverable assembly claim for this phase.
+
+        A generation remains active for twice the hosted function hard limit.
+        Concurrent invocations race on one write-once key, so only one may read
+        and decode all raw pages. After a crashed invocation's lease expires,
+        the next fixed generation restores liveness without overwriting audit
+        history or allowing an active 300-second function to overlap.
+        """
+
         gateway = self._require_active(research_id)
-        metadata = self.get_metadata(research_id)
-        if metadata is None:
-            raise LookupError("research metadata is not available")
-        item_by_id = {item.work_id: item for item in metadata.manifest.items}
-        try:
-            work_item = item_by_id[outcome.work_id]
-        except KeyError as exc:
-            raise ValueError("document outcome is absent from the stored manifest") from exc
+        self._validate_clock()
+        now = self._now()
+        for generation in range(_FINALIZATION_CLAIM_GENERATIONS):
+            logical_key = f"run/phase-finalization-claim/{phase.value}/{generation}"
+            value = self._get_fixed(
+                research_id,
+                ArtifactKind.MANIFEST,
+                logical_key,
+                "phase_finalization_claim",
+            )
+            if value is not None:
+                if not isinstance(value, Mapping):
+                    raise ResearchRunStorageError("phase finalization claim is invalid")
+                claimed_at = value.get("claimed_at")
+                if (
+                    value.get("query_fingerprint") != gateway.job.query_fingerprint
+                    or value.get("index_revision") != gateway.job.index_revision
+                    or value.get("phase") != phase.value
+                    or value.get("generation") != generation
+                    or not isinstance(claimed_at, datetime)
+                    or claimed_at.tzinfo is None
+                    or not re.fullmatch(r"[0-9a-f]{32}", str(value.get("owner") or ""))
+                ):
+                    raise ResearchRunStorageError(
+                        "phase finalization claim binding is invalid"
+                    )
+                if (now - claimed_at).total_seconds() < _FINALIZATION_CLAIM_LEASE_SECONDS:
+                    return False
+                continue
+            claim = {
+                "query_fingerprint": gateway.job.query_fingerprint,
+                "index_revision": gateway.job.index_revision,
+                "phase": phase.value,
+                "generation": generation,
+                "claimed_at": now,
+                # Distinct contenders must not collapse as an idempotent same-
+                # payload write in backends that return success for duplicates.
+                "owner": uuid.uuid4().hex,
+            }
+            payload = _record_payload(
+                research_id,
+                "phase_finalization_claim",
+                {"phase": phase.value, "generation": generation},
+                claim,
+                expires_at=gateway.job.expires_at,
+            )
+            try:
+                self.artifacts.write(
+                    research_id,
+                    ArtifactKind.MANIFEST,
+                    payload,
+                    logical_key=logical_key,
+                )
+                return True
+            except ArtifactConflictError:
+                # Another invocation won this exact generation. Re-read it on
+                # the next loop turn only after moving through the same chain.
+                return False
+        raise ResearchRunStorageError("phase finalization claim generations are exhausted")
+
+    def put_task_completion(self, task: ResearchTask) -> TaskCompletionReceipt:
+        gateway = self._require_active(task.research_id)
+        receipt = TaskCompletionReceipt.from_task(task)
+        self._validate_task_receipt_binding(gateway, task, receipt)
+        return self._put_fixed(
+            task.research_id,
+            ArtifactKind.MANIFEST,
+            f"run/task-completion/{task.idempotency_key}",
+            "task_completion",
+            {
+                "task_identity": task.idempotency_key,
+                "stage": task.stage.value,
+                "work_id": task.work_id,
+            },
+            receipt,
+            expires_at=gateway.job.expires_at,
+        )
+
+    def get_task_completion(self, task: ResearchTask) -> TaskCompletionReceipt | None:
+        gateway = self.get_gateway(task.research_id)
+        if gateway is None:
+            return None
+        record = self._get_fixed_record(
+            task.research_id,
+            ArtifactKind.MANIFEST,
+            f"run/task-completion/{task.idempotency_key}",
+            "task_completion",
+        )
+        if record is None:
+            return None
+        entity, value = record
+        receipt = self._expect(value, TaskCompletionReceipt, "task completion")
+        if (
+            entity.get("task_identity") != task.idempotency_key
+            or entity.get("stage") != task.stage.value
+            or entity.get("work_id") != task.work_id
+        ):
+            raise ResearchRunStorageError("task completion identity is invalid")
+        self._validate_task_receipt_binding(gateway, task, receipt)
+        return receipt
+
+    def put_document_outcome(self, research_id: str, outcome: DocumentOutcome) -> DocumentOutcome:
+        gateway = self._require_active(research_id)
+        work_item = self.get_document_item(research_id, outcome.work_id)
+        if work_item is None:
+            raise ValueError("document outcome is absent from the stored manifest")
         if outcome.result is not None and (
             outcome.result.kind is not work_item.kind
             or outcome.result.official_url != work_item.official_url
@@ -458,14 +1220,39 @@ class ArtifactResearchRunStore:
             expires_at=gateway.job.expires_at,
         )
 
-    def get_document_outcome(
-        self, research_id: str, work_id: str
-    ) -> DocumentOutcome | None:
+    def get_document_outcome(self, research_id: str, work_id: str) -> DocumentOutcome | None:
         """Read one terminal outcome by its fixed logical key without a run scan."""
 
         if not work_id.strip():
             raise ValueError("document work_id is required")
         return self._terminal_outcome(research_id, work_id)
+
+    def document_outcomes_for(
+        self, research_id: str, work_ids: Sequence[str]
+    ) -> tuple[DocumentOutcome, ...]:
+        """Read planned terminal outcomes directly without listing retry history."""
+
+        identifiers = tuple(work_ids)
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("document outcome work ids must be unique")
+        if not identifiers:
+            return ()
+        if len(identifiers) == 1 or self._page_read_concurrency == 1:
+            values = tuple(
+                self.get_document_outcome(research_id, work_id) for work_id in identifiers
+            )
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(self._page_read_concurrency, len(identifiers)),
+                thread_name_prefix="kbd-outcome-read",
+            ) as executor:
+                values = tuple(
+                    executor.map(
+                        lambda work_id: self.get_document_outcome(research_id, work_id),
+                        identifiers,
+                    )
+                )
+        return tuple(value for value in values if value is not None)
 
     def document_outcomes(self, research_id: str) -> tuple[DocumentOutcome, ...]:
         history = self.document_outcome_history(research_id)
@@ -492,21 +1279,18 @@ class ArtifactResearchRunStore:
         gateway = self.get_gateway(research_id)
         if gateway is None:
             return ()
-        metadata = self.get_metadata(research_id)
-        allowed = (
-            {item.work_id for item in metadata.manifest.items}
-            if metadata is not None
-            else set()
-        )
+        manifest = self.get_document_manifest(research_id)
+        allowed = {item.work_id for item in manifest.items} if manifest is not None else set()
         values: list[DocumentOutcome] = []
         seen: set[str] = set()
         for ref, entity, value in self._records(
             research_id, ArtifactKind.OUTCOME, "document_outcome"
         ):
             restored = self._expect(value, DocumentOutcome, "document outcome")
-            if entity.get("work_id") != restored.work_id or entity.get(
-                "status"
-            ) != restored.status.value:
+            if (
+                entity.get("work_id") != restored.work_id
+                or entity.get("status") != restored.status.value
+            ):
                 raise ResearchRunStorageError("document outcome identity is invalid")
             if restored.work_id not in allowed:
                 raise ResearchRunStorageError("document outcome manifest binding is invalid")
@@ -532,9 +1316,7 @@ class ArtifactResearchRunStore:
             )
         )
 
-    def put_snapshot(
-        self, research_id: str, snapshot: ResearchSnapshot
-    ) -> ResearchSnapshot:
+    def put_snapshot(self, research_id: str, snapshot: ResearchSnapshot) -> ResearchSnapshot:
         gateway = self._require_active(research_id)
         if (
             snapshot.research_id != research_id
@@ -545,63 +1327,67 @@ class ArtifactResearchRunStore:
             raise ValueError("snapshot belongs to another research job")
         manifest, shards, lookup_buckets, text_shards = build_snapshot_index(snapshot)
         overview = build_overview_transport(snapshot)
-        for text_shard in text_shards:
-            self._put_fixed(
-                research_id,
-                ArtifactKind.RESULT_PAGE,
-                f"run/snapshot-text/shard/{text_shard.number}",
+        shard_writes: list[tuple[str, str, Mapping[str, Any], Any]] = []
+        shard_writes.extend(
+            (
+                f"run/snapshot-text/shard/{item.number}",
                 "evidence_text_shard",
-                {"research_id": research_id, "shard": text_shard.number},
-                text_shard,
-                expires_at=gateway.job.expires_at,
+                {"research_id": research_id, "shard": item.number},
+                item,
             )
-        for shard in shards:
-            self._put_fixed(
-                research_id,
-                ArtifactKind.RESULT_PAGE,
-                f"run/snapshot-index/shard/{shard.number}",
-                "snapshot_index_shard",
-                {"research_id": research_id, "shard": shard.number},
-                shard,
-                expires_at=gateway.job.expires_at,
-            )
-        for bucket in lookup_buckets:
-            self._put_fixed(
-                research_id,
-                ArtifactKind.RESULT_PAGE,
-                f"run/snapshot-index/lookup/{bucket.number}",
-                "snapshot_index_lookup",
-                {"research_id": research_id, "bucket": bucket.number},
-                bucket,
-                expires_at=gateway.job.expires_at,
-            )
-        self._put_fixed(
-            research_id,
-            ArtifactKind.RESULT_PAGE,
-            "run/snapshot-index/manifest",
-            "snapshot_index_manifest",
-            {"research_id": research_id},
-            manifest,
-            expires_at=gateway.job.expires_at,
+            for item in text_shards
         )
-        for overview_shard in overview.shards:
-            self._put_fixed(
-                research_id,
-                ArtifactKind.RESULT_PAGE,
-                f"run/overview/shard/{overview_shard.number}",
-                "overview_group_shard",
-                {"research_id": research_id, "shard": overview_shard.number},
-                overview_shard,
-                expires_at=gateway.job.expires_at,
+        shard_writes.extend(
+            (
+                f"run/snapshot-index/shard/{item.number}",
+                "snapshot_index_shard",
+                {"research_id": research_id, "shard": item.number},
+                item,
             )
-        self._put_fixed(
+            for item in shards
+        )
+        shard_writes.extend(
+            (
+                f"run/snapshot-index/lookup/{item.number}",
+                "snapshot_index_lookup",
+                {"research_id": research_id, "bucket": item.number},
+                item,
+            )
+            for item in lookup_buckets
+        )
+        shard_writes.extend(
+            (
+                f"run/overview/shard/{item.number}",
+                "overview_group_shard",
+                {"research_id": research_id, "shard": item.number},
+                item,
+            )
+            for item in overview.shards
+        )
+        self._put_result_artifacts_parallel(
             research_id,
-            ArtifactKind.RESULT_PAGE,
-            "run/overview/manifest",
-            "overview_manifest",
-            {"research_id": research_id},
-            overview.manifest,
-            expires_at=gateway.job.expires_at,
+            gateway,
+            tuple(shard_writes),
+        )
+        # Manifests are independent after all referenced shards are durable.
+        # Publish both in parallel, then write the single readiness marker.
+        self._put_result_artifacts_parallel(
+            research_id,
+            gateway,
+            (
+                (
+                    "run/snapshot-index/manifest",
+                    "snapshot_index_manifest",
+                    {"research_id": research_id},
+                    manifest,
+                ),
+                (
+                    "run/overview/manifest",
+                    "overview_manifest",
+                    {"research_id": research_id},
+                    overview.manifest,
+                ),
+            ),
         )
         # This summary is the readiness marker for the snapshot index and the
         # overview alike.  It must remain the final immutable write.
@@ -615,6 +1401,83 @@ class ArtifactResearchRunStore:
             expires_at=gateway.job.expires_at,
         )
         return snapshot
+
+    def _put_result_artifacts_parallel(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+        writes: Sequence[tuple[str, str, Mapping[str, Any], Any]],
+    ) -> None:
+        if not writes:
+            return
+
+        def put_one(spec: tuple[str, str, Mapping[str, Any], Any]) -> None:
+            logical_key, record_type, entity, value = spec
+            self._put_fixed(
+                research_id,
+                ArtifactKind.RESULT_PAGE,
+                logical_key,
+                record_type,
+                entity,
+                value,
+                expires_at=gateway.job.expires_at,
+            )
+
+        if len(writes) == 1 or self._page_read_concurrency == 1:
+            for write in writes:
+                put_one(write)
+            return
+        with ThreadPoolExecutor(
+            max_workers=min(self._page_read_concurrency, len(writes)),
+            thread_name_prefix="kbd-result-write",
+        ) as executor:
+            tuple(executor.map(put_one, writes))
+
+    def _put_manifest_artifacts_parallel(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+        writes: Sequence[tuple[str, str, Mapping[str, Any], Any]],
+    ) -> None:
+        """Write hot routing artifacts concurrently, capped at eight requests."""
+
+        if not writes:
+            return
+
+        def put_one(spec: tuple[str, str, Mapping[str, Any], Any]) -> None:
+            logical_key, record_type, entity, value = spec
+            self._put_fixed(
+                research_id,
+                ArtifactKind.MANIFEST,
+                logical_key,
+                record_type,
+                entity,
+                value,
+                expires_at=gateway.job.expires_at,
+            )
+
+        self._bounded_map(put_one, tuple(writes), "kbd-routing-write")
+
+    def _bounded_map(
+        self,
+        function: Callable[[_Input], _Output],
+        values: Sequence[_Input],
+        thread_name_prefix: str,
+    ) -> tuple[_Output, ...]:
+        if not values:
+            return ()
+        max_workers = min(
+            _ROUTING_IO_CONCURRENCY,
+            self._page_read_concurrency,
+            len(values),
+        )
+        if max_workers == 1:
+            return tuple(function(value) for value in values)
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix=thread_name_prefix,
+        ) as executor:
+            return tuple(executor.map(function, values))
 
     def get_snapshot_summary(self, research_id: str) -> ResearchSnapshotSummary | None:
         gateway = self.get_gateway(research_id)
@@ -691,17 +1554,11 @@ class ArtifactResearchRunStore:
                 descriptor = manifest.shards[number]
                 current_shard = loaded.get(number)
                 if current_shard is None:
-                    current_shard = self._get_snapshot_index_shard(
-                        research_id, descriptor
-                    )
+                    current_shard = self._get_snapshot_index_shard(research_id, descriptor)
                 local_start = (
-                    max(start, current_shard.start_position)
-                    - current_shard.start_position
+                    max(start, current_shard.start_position) - current_shard.start_position
                 )
-                local_stop = (
-                    min(stop, current_shard.end_position)
-                    - current_shard.start_position
-                )
+                local_stop = min(stop, current_shard.end_position) - current_shard.start_position
                 selected.extend(current_shard.entries[local_start:local_stop])
 
         next_cursor = None
@@ -745,10 +1602,7 @@ class ArtifactResearchRunStore:
             offset=offset,
             page_size=page_size,
         )
-        shards = tuple(
-            self._get_overview_shard(research_id, descriptor)
-            for descriptor in required
-        )
+        shards = tuple(self._get_overview_shard(research_id, descriptor) for descriptor in required)
         try:
             catalog = overview_catalog_page(
                 manifest,
@@ -761,9 +1615,7 @@ class ArtifactResearchRunStore:
         payload = manifest.to_dict()
         payload["catalog"] = catalog.to_dict()
         payload["core_full_text_required_ids"] = [
-            route.evidence_id
-            for route in manifest.core
-            if not route.text_inline_complete
+            route.evidence_id for route in manifest.core if not route.text_inline_complete
         ]
         return payload
 
@@ -913,11 +1765,7 @@ class ArtifactResearchRunStore:
             manifest.shards[shard_number],
         )
         offset = next(
-            (
-                number
-                for number, entry in enumerate(shard.entries)
-                if entry.id == after_evidence_id
-            ),
+            (number for number, entry in enumerate(shard.entries) if entry.id == after_evidence_id),
             None,
         )
         if offset is None:
@@ -1057,18 +1905,16 @@ class ArtifactResearchRunStore:
         if phase is MetadataPhase.DISCOVERY:
             partitions = gateway.discovery_partitions
         else:
-            discovery = self.get_discovery(research_id)
-            if discovery is None:
+            partition = self.get_status_partition(research_id, partition_id)
+            if partition is None:
                 raise LookupError("bill-status partitions are not available")
-            partitions = discovery.status_partitions
+            return partition
         for partition in partitions:
             if partition.partition_id == partition_id:
                 return partition
         raise ValueError("metadata partition is outside the research plan")
 
-    def _terminal_outcome(
-        self, research_id: str, work_id: str
-    ) -> DocumentOutcome | None:
+    def _terminal_outcome(self, research_id: str, work_id: str) -> DocumentOutcome | None:
         value = self._get_fixed(
             research_id,
             ArtifactKind.OUTCOME,
@@ -1108,6 +1954,39 @@ class ArtifactResearchRunStore:
             raise ResearchRunStorageError("metadata page identity is invalid")
         return page
 
+    def _get_page_readiness(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+        phase: MetadataPhase,
+        partition: MetadataPartition,
+        page_number: int,
+    ) -> MetadataPageReadiness | None:
+        record = self._get_fixed_record(
+            research_id,
+            ArtifactKind.MANIFEST,
+            f"run/page-ready/{phase.value}/{partition.partition_id}/{page_number}",
+            "page_readiness",
+        )
+        if record is None:
+            return None
+        entity, value = record
+        readiness = self._expect(value, MetadataPageReadiness, "metadata page readiness")
+        if (
+            entity.get("phase") != phase.value
+            or entity.get("partition_id") != partition.partition_id
+            or entity.get("page") != page_number
+            or readiness.query_fingerprint != gateway.job.query_fingerprint
+            or readiness.index_revision != gateway.job.index_revision
+            or readiness.phase is not phase
+            or readiness.partition_id != partition.partition_id
+            or readiness.dataset != partition.dataset
+            or readiness.page != page_number
+            or readiness.page_size != partition.page_size
+        ):
+            raise ResearchRunStorageError("metadata page readiness identity is invalid")
+        return readiness
+
     def _get_gateway_any(self, research_id: str) -> GatewayPlanState | None:
         value = self._get_fixed(
             research_id,
@@ -1121,6 +2000,144 @@ class ArtifactResearchRunStore:
         if state.job.id != research_id:
             raise ResearchRunStorageError("gateway research binding is invalid")
         return state
+
+    def _get_discovery_readiness(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+    ) -> DiscoveryBoundaryReadiness | None:
+        value = self._get_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            "run/discovery-ready",
+            "discovery_readiness",
+        )
+        if value is None:
+            return None
+        readiness = self._expect(value, DiscoveryBoundaryReadiness, "discovery readiness")
+        if (
+            readiness.query_fingerprint != gateway.job.query_fingerprint
+            or readiness.index_revision != gateway.job.index_revision
+        ):
+            raise ResearchRunStorageError("discovery readiness job binding is invalid")
+        return readiness
+
+    def _get_document_readiness(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+    ) -> DocumentBoundaryReadiness | None:
+        value = self._get_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            "run/document-ready",
+            "document_readiness",
+        )
+        if value is None:
+            return None
+        readiness = self._expect(value, DocumentBoundaryReadiness, "document readiness")
+        if (
+            readiness.query_fingerprint != gateway.job.query_fingerprint
+            or readiness.index_revision != gateway.job.index_revision
+        ):
+            raise ResearchRunStorageError("document readiness job binding is invalid")
+        return readiness
+
+    def _discovery_readiness_or_adopt(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+    ) -> DiscoveryBoundaryReadiness | None:
+        """Adopt a pre-v0.10 discovery boundary into fixed routing artifacts once."""
+
+        readiness = self._get_discovery_readiness(research_id, gateway)
+        if readiness is not None:
+            return readiness
+        value = self._get_fixed(
+            research_id,
+            ArtifactKind.RESOLUTION,
+            _LEGACY_DISCOVERY_STATE_KEY,
+            "discovery",
+        )
+        if value is None:
+            return None
+        legacy = self._expect(value, DiscoveryStageState, "legacy discovery")
+        if legacy.resolution.query != gateway.job.contract.query:
+            raise ResearchRunStorageError("legacy discovery contract binding is invalid")
+        self.put_discovery(research_id, legacy)
+        readiness = self._get_discovery_readiness(research_id, gateway)
+        if readiness is None:
+            raise ResearchRunStorageError("legacy discovery adoption did not become ready")
+        return readiness
+
+    def _document_readiness_or_adopt(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+    ) -> DocumentBoundaryReadiness | None:
+        """Adopt a pre-v0.10 metadata boundary without rewriting its old key."""
+
+        readiness = self._get_document_readiness(research_id, gateway)
+        if readiness is not None:
+            return readiness
+        value = self._get_fixed(
+            research_id,
+            ArtifactKind.METADATA,
+            _LEGACY_METADATA_STATE_KEY,
+            "metadata",
+        )
+        if value is None:
+            return None
+        legacy = self._expect(value, MetadataStageState, "legacy metadata")
+        if legacy.discovery.resolution.query != gateway.job.contract.query:
+            raise ResearchRunStorageError("legacy metadata contract binding is invalid")
+        self.put_discovery(research_id, legacy.discovery)
+        self.put_metadata(research_id, legacy)
+        readiness = self._get_document_readiness(research_id, gateway)
+        if readiness is None:
+            raise ResearchRunStorageError("legacy metadata adoption did not become ready")
+        return readiness
+
+    def _get_bound_hot_record(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+        boundary_hash: str,
+        logical_key: str,
+        record_type: str,
+    ) -> tuple[Mapping[str, Any], Any] | None:
+        record = self._get_fixed_record(
+            research_id,
+            ArtifactKind.MANIFEST,
+            logical_key,
+            record_type,
+        )
+        if record is None:
+            return None
+        entity, value = record
+        if (
+            entity.get("query_fingerprint") != gateway.job.query_fingerprint
+            or entity.get("index_revision") != gateway.job.index_revision
+            or entity.get("boundary_hash") != boundary_hash
+            or entity.get("binding_hash")
+            != _hot_binding_hash(boundary_hash, logical_key, value)
+        ):
+            raise ResearchRunStorageError("hot routing artifact binding is invalid")
+        return entity, value
+
+    @staticmethod
+    def _validate_task_receipt_binding(
+        gateway: GatewayPlanState,
+        task: ResearchTask,
+        receipt: TaskCompletionReceipt,
+    ) -> None:
+        if (
+            task.research_id != gateway.job.id
+            or task.query_fingerprint != gateway.job.query_fingerprint
+            or task.index_revision != gateway.job.index_revision
+            or receipt != TaskCompletionReceipt.from_task(task)
+        ):
+            raise ResearchRunStorageError("task completion job binding is invalid")
 
     def _require_active(self, research_id: str) -> GatewayPlanState:
         state = self._get_gateway_any(research_id)
@@ -1157,32 +2174,30 @@ class ArtifactResearchRunStore:
             value,
             expires_at=expires_at,
         )
-        with self._lock:
-            for attempt in range(_WRITE_RETRIES):
+        # The artifact backend owns atomic put-if-absent semantics. Keeping a
+        # process-wide lock around network I/O serialized every supposedly
+        # parallel result-shard PUT and recreated the 300-second timeout.
+        for attempt in range(_WRITE_RETRIES):
+            try:
+                self.artifacts.write(research_id, kind, payload, logical_key=logical_key)
+                return value
+            except ArtifactConflictError:
                 try:
-                    self.artifacts.write(
-                        research_id, kind, payload, logical_key=logical_key
-                    )
-                    return value
-                except ArtifactConflictError:
-                    try:
-                        existing = self._get_fixed(
-                            research_id, kind, logical_key, record_type
-                        )
-                    except (ArtifactIntegrityError, ArtifactBackendError):
-                        existing = None
-                    if existing is not None:
-                        if existing == value:
-                            return cast(_Value, existing)
-                        raise ResearchRunConflictError(
-                            "immutable research artifact already contains different state"
-                        ) from None
-                    if attempt + 1 < _WRITE_RETRIES:
-                        time.sleep(_WRITE_RETRY_SECONDS)
-                        continue
-                    raise ResearchRunStorageError(
-                        "concurrent research artifact did not become readable"
+                    existing = self._get_fixed(research_id, kind, logical_key, record_type)
+                except (ArtifactIntegrityError, ArtifactBackendError):
+                    existing = None
+                if existing is not None:
+                    if existing == value:
+                        return cast(_Value, existing)
+                    raise ResearchRunConflictError(
+                        "immutable research artifact already contains different state"
                     ) from None
+                if attempt + 1 < _WRITE_RETRIES:
+                    time.sleep(_WRITE_RETRY_SECONDS)
+                    continue
+                raise ResearchRunStorageError(
+                    "concurrent research artifact did not become readable"
+                ) from None
         raise AssertionError("unreachable")
 
     def _put_content_addressed(
@@ -1306,9 +2321,7 @@ class ArtifactResearchRunStore:
         try:
             value = _decode(raw_value)
         except (TypeError, ValueError, ImportError, AttributeError) as exc:
-            raise ResearchRunStorageError(
-                "research run artifact value is invalid"
-            ) from exc
+            raise ResearchRunStorageError("research run artifact value is invalid") from exc
         return cast(Mapping[str, Any], entity), value
 
     @staticmethod
@@ -1325,11 +2338,15 @@ def _descriptor_for_cursor(
     key = (cursor.sort_key, cursor.item_id)
     for descriptor in manifest.shards:
         if (
-            descriptor.first_sort_key,
-            descriptor.first_id,
-        ) <= key <= (
-            descriptor.last_sort_key,
-            descriptor.last_id,
+            (
+                descriptor.first_sort_key,
+                descriptor.first_id,
+            )
+            <= key
+            <= (
+                descriptor.last_sort_key,
+                descriptor.last_id,
+            )
         ):
             return descriptor
     raise ValueError("cursor item is absent from this immutable snapshot")
@@ -1364,6 +2381,34 @@ def _validate_overview_summary_binding(
         or manifest_evidence_types != summary.evidence_types
     ):
         raise ResearchRunStorageError("overview snapshot binding is invalid")
+
+
+def _status_partition_key(partition_id: str) -> str:
+    digest = hashlib.sha256(partition_id.encode()).hexdigest()
+    return f"run/status-partition/{digest}"
+
+
+def _hot_binding_hash(boundary_hash: str, logical_key: str, value: Any) -> str:
+    value_hash = canonical_hash(_encode(value))
+    return hashlib.sha256(
+        f"{boundary_hash}\0{logical_key}\0{value_hash}".encode()
+    ).hexdigest()
+
+
+def _hot_entity(
+    gateway: GatewayPlanState,
+    boundary_hash: str,
+    logical_key: str,
+    value: Any,
+    **identity: Any,
+) -> dict[str, Any]:
+    return {
+        "query_fingerprint": gateway.job.query_fingerprint,
+        "index_revision": gateway.job.index_revision,
+        "boundary_hash": boundary_hash,
+        "binding_hash": _hot_binding_hash(boundary_hash, logical_key, value),
+        **identity,
+    }
 
 
 def _record_payload(
@@ -1488,9 +2533,7 @@ def _decode(value: Any) -> Any:
         raw_fields = value.get("fields")
         if not isinstance(raw_fields, Mapping):
             raise ValueError("encoded run dataclass fields are invalid")
-        init_fields = {
-            field.name: field for field in fields(target) if field.init
-        }
+        init_fields = {field.name: field for field in fields(target) if field.init}
         encoded_fields = set(raw_fields)
         unknown = encoded_fields - set(init_fields)
         required_missing = {
@@ -1506,9 +2549,7 @@ def _decode(value: Any) -> Any:
         # dataclass may add an optional field with a declared default; old
         # artifacts must resume with exactly that default instead of becoming
         # unreadable.  Required fields and unknown fields remain fail-closed.
-        arguments = {
-            name: _decode(raw_fields[name]) for name in sorted(encoded_fields)
-        }
+        arguments = {name: _decode(raw_fields[name]) for name in sorted(encoded_fields)}
         return target(**arguments)
     raise ValueError("encoded run value marker is invalid")
 
@@ -1518,6 +2559,85 @@ def _required_string(value: Mapping[str, Any], name: str) -> str:
     if not isinstance(result, str):
         raise ValueError("encoded run string field is invalid")
     return result
+
+
+def _candidate_bill_number(decision: CandidateDecision) -> str:
+    raw = decision.candidate.get("BILL_NO", decision.candidate.get("bill_no"))
+    bill_number = str(raw).strip() if raw is not None else ""
+    if (
+        decision.kind.value != "bill"
+        or not decision.accepted
+        or decision.candidate_id != f"bill:{bill_number}"
+        or not re.fullmatch(r"\d{7}", bill_number)
+    ):
+        raise ValueError("accepted bill decision lacks an exact identity")
+    return bill_number
+
+
+def _compact_discovery_state(state: DiscoveryStageState) -> DiscoveryStageState:
+    """Drop duplicated rows while retaining lossless page and decision audit.
+
+    Every original official row remains in the immutable page artifacts named
+    by ``collection.partitions``. Accepted candidates keep their complete
+    normalized payload because finalization needs it. Rejected candidates keep
+    their exact source identity plus every score/reason; their full official
+    payload is recoverable from those provenance-bound pages.
+    """
+
+    resolution = MetadataResolution(
+        query=state.resolution.query,
+        source_hash=state.resolution.source_hash,
+        criteria=state.resolution.criteria,
+        bills=_compact_candidate_set(state.resolution.bills),
+        meetings=_compact_candidate_set(state.resolution.meetings),
+    )
+    return replace(
+        state,
+        collection=_rowless_collection(state.collection),
+        filtered_collection=_rowless_collection(state.filtered_collection),
+        resolution=resolution,
+    )
+
+
+def _rowless_collection(collection: MetadataCollection) -> MetadataCollection:
+    return MetadataCollection((), (), collection.partitions, collection.coverage)
+
+
+def _compact_candidate_set(
+    resolution: CandidateSetResolution,
+) -> CandidateSetResolution:
+    decisions = tuple(_compact_candidate(item) for item in resolution.decisions)
+    by_id = {item.candidate_id: item for item in decisions}
+    accepted = tuple(by_id[item.candidate_id] for item in resolution.accepted)
+    return CandidateSetResolution(resolution.kind, decisions, accepted)
+
+
+def _compact_candidate(decision: CandidateDecision) -> CandidateDecision:
+    if decision.accepted:
+        return decision
+    if decision.kind is MetadataKind.BILL:
+        identity: Mapping[str, Any] = {"BILL_NO": _candidate_bill_number_any(decision)}
+    else:
+        prefix = "meeting:"
+        if not decision.candidate_id.startswith(prefix):
+            raise ValueError("rejected meeting decision lacks an exact identity")
+        official_url = decision.candidate_id.removeprefix(prefix).strip()
+        if not official_url:
+            raise ValueError("rejected meeting decision lacks an official URL")
+        identity = {"PDF_LINK_URL": official_url}
+    return replace(decision, candidate=identity)
+
+
+def _candidate_bill_number_any(decision: CandidateDecision) -> str:
+    raw = decision.candidate.get("BILL_NO", decision.candidate.get("bill_no"))
+    bill_number = str(raw).strip() if raw is not None else ""
+    if (
+        decision.kind is not MetadataKind.BILL
+        or decision.candidate_id != f"bill:{bill_number}"
+        or not re.fullmatch(r"\d{7}", bill_number)
+    ):
+        raise ValueError("bill decision lacks an exact identity")
+    return bill_number
 
 
 __all__ = [

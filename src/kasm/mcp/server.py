@@ -6,6 +6,8 @@ from collections.abc import Callable
 from functools import partial, wraps
 from typing import Any
 
+from kasm import __version__
+
 from .tools import KasmTools, ServiceContext
 
 
@@ -64,6 +66,10 @@ def create_server(
         json_response=True,
         transport_security=transport_security,
     )
+    # FastMCP does not currently expose the low-level server version in its
+    # constructor. Without setting it here, MCP initialize reports the SDK
+    # package version instead of this server's release version.
+    server._mcp_server.version = __version__
     legacy_methods: tuple[Callable[..., Any], ...] = (
         implementation.search_speeches,
         implementation.get_speech,

@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from kasm.research.backend import DurableResearchBackend
+from kasm.research.collector import MetadataKind
 from kasm.research.contracts import CoverageLedger, EvidenceCoverage, EvidenceType, ResearchContract
 from kasm.research.documents import (
     FilesystemOfficialDocumentStore,
@@ -17,6 +18,12 @@ from kasm.research.documents import (
 )
 from kasm.research.engine import DerivedResearchStatus, GatewayReceipt
 from kasm.research.jobs import JobStatus
+from kasm.research.overview import (
+    ProvisionalCandidateEntry,
+    ProvisionalFamilyAccounting,
+    ProvisionalResearchOverview,
+    ProvisionalSourceAccounting,
+)
 from kasm.research.overview_transport import build_overview_transport
 from kasm.research.results import (
     EvidenceCitation,
@@ -73,13 +80,9 @@ class Runs:
             return None
         bundle = build_overview_transport(self.snapshot)
         payload = bundle.manifest.to_dict()
-        payload["catalog"] = bundle.page(
-            offset=offset, page_size=page_size
-        ).to_dict()
+        payload["catalog"] = bundle.page(offset=offset, page_size=page_size).to_dict()
         payload["core_full_text_required_ids"] = [
-            route.evidence_id
-            for route in bundle.manifest.core
-            if not route.text_inline_complete
+            route.evidence_id for route in bundle.manifest.core if not route.text_inline_complete
         ]
         return payload
 
@@ -105,9 +108,7 @@ class Runs:
                 return evidence
         raise LookupError(evidence_id)
 
-    def get_next_full_text_evidence_id(
-        self, research_id: str, after_evidence_id: str
-    ):
+    def get_next_full_text_evidence_id(self, research_id: str, after_evidence_id: str):
         assert research_id == "research_1"
         if self.snapshot is None:
             return None
@@ -121,9 +122,7 @@ class Runs:
             raise LookupError(after_evidence_id)
         return None
 
-    def get_next_core_evidence_id(
-        self, research_id: str, after_evidence_id: str
-    ):
+    def get_next_core_evidence_id(self, research_id: str, after_evidence_id: str):
         return self.get_next_full_text_evidence_id(research_id, after_evidence_id)
 
     def document_outcomes(self, research_id: str):
@@ -293,6 +292,80 @@ def test_status_uses_bounded_store_view_without_exhaustive_derivation(tmp_path) 
         research.get_research_page("research_1")
     with pytest.raises(RuntimeError, match="현재 단계: documents"):
         research.get_evidence_document("research_1", "missing")
+
+
+def test_metadata_overview_uses_compact_complete_accounting(tmp_path) -> None:
+    overview = ProvisionalResearchOverview(
+        "AI 입법",
+        "a" * 64,
+        (
+            ProvisionalCandidateEntry(
+                0,
+                MetadataKind.BILL,
+                "bill:2219564",
+                12,
+                ("issue_term:인공지능",),
+                (("bill_no", "2219564"),),
+                "인공지능 기본법 일부개정법률안",
+            ),
+        ),
+        (
+            ProvisionalFamilyAccounting(
+                MetadataKind.BILL,
+                3,
+                1,
+                2,
+                (("no_relevance_signal", 2),),
+            ),
+            ProvisionalFamilyAccounting(MetadataKind.MEETING, 4, 0, 4, (("low_score", 4),)),
+        ),
+        ProvisionalSourceAccounting(True, 7, 7, 3, 3, 4, 4),
+    )
+
+    class CompactRuns(Runs):
+        def get_provisional_overview(self, research_id: str):
+            assert research_id == "research_1"
+            return overview
+
+        def get_discovery(self, research_id: str):
+            raise AssertionError("compact overview must not load discovery")
+
+    class CompactEngine(Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.runs = CompactRuns()
+
+    result = backend(tmp_path, CompactEngine()).get_research_overview("research_1", page_size=20)
+
+    assert result["accepted_total"] == 1
+    assert result["rejected_total"] == 6
+    assert result["pending_total"] == 0
+    assert result["source_complete"] is True
+    assert result["substantive_conclusion_available"] is False
+    assert result["catalog"]["complete"] is True
+    assert result["catalog_scope"] == "accepted_metadata_inventory_page"
+    assert "원문 조사는 계속" in result["catalog_completion_meaning"]
+    assert "next_action" not in result
+
+
+def test_compact_overview_readiness_none_never_falls_back_to_discovery(
+    tmp_path,
+) -> None:
+    class PartialCompactRuns(Runs):
+        def get_provisional_overview(self, research_id: str):
+            assert research_id == "research_1"
+            return None
+
+        def get_discovery(self, research_id: str):
+            raise AssertionError("readiness must not be bypassed")
+
+    class PartialCompactEngine(Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.runs = PartialCompactRuns()
+
+    with pytest.raises(RuntimeError, match="metadata_discovery"):
+        backend(tmp_path, PartialCompactEngine()).get_research_overview("research_1")
 
 
 def test_pages_index_large_evidence_without_sending_a_false_preview(tmp_path) -> None:

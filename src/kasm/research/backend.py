@@ -150,14 +150,21 @@ class DurableResearchBackend:
                 "full_evidence_inventory_delivery": "get_research_page",
             }
 
-        discovery = self.engine.runs.get_discovery(research_id)
-        if discovery is None:
+        compact_getter = getattr(self.engine.runs, "get_provisional_overview", None)
+        if callable(compact_getter):
+            overview = compact_getter(research_id)
+        else:
+            # Compatibility for third-party/legacy run stores. Hosted and local
+            # built-in stores always serve the compact accepted-only artifact.
+            discovery = self.engine.runs.get_discovery(research_id)
+            overview = (
+                build_provisional_research_overview(discovery) if discovery is not None else None
+            )
+        if overview is None:
             status = self._derived_status(research_id)
             raise RuntimeError(
-                "조사 자료 지도가 아직 준비되지 않았습니다. "
-                f"현재 단계: {status.stage}"
+                f"조사 자료 지도가 아직 준비되지 않았습니다. 현재 단계: {status.stage}"
             )
-        overview = build_provisional_research_overview(discovery)
         page = overview.page(offset=offset, page_size=page_size)
         priority_candidate_limit = 12
         priority_candidates = tuple(
@@ -176,6 +183,9 @@ class DurableResearchBackend:
                 "실질적 결론으로 사용하지 마세요."
             ),
             "accepted_total": overview.accepted_total,
+            "rejected_total": sum(item.rejected_count for item in overview.families),
+            "pending_total": 0,
+            "source_complete": overview.source.source_complete,
             "families": [item.to_dict() for item in overview.families],
             "source": overview.source.to_dict(),
             "priority_candidates": list(priority_candidates),
@@ -188,6 +198,12 @@ class DurableResearchBackend:
                 "full_inventory": "catalog",
             },
             "catalog": page.to_dict(),
+            "catalog_scope": "accepted_metadata_inventory_page",
+            "catalog_completion_meaning": (
+                "catalog의 complete는 이 accepted metadata 목록 페이지의 끝만 뜻합니다. "
+                "원문 조사는 계속 진행 중이므로 status를 확인한 뒤 final overview와 "
+                "evidence tools를 사용하세요."
+            ),
         }
 
     def get_research_page(
@@ -273,14 +289,10 @@ class DurableResearchBackend:
         research_id: str,
         evidence_id: str,
     ) -> EvidenceRecord:
-        evidence = self.engine.runs.get_overflow_evidence_record(
-            research_id, evidence_id
-        )
+        evidence = self.engine.runs.get_overflow_evidence_record(research_id, evidence_id)
         if evidence is None:
             status = self._derived_status(research_id)
-            raise RuntimeError(
-                f"조사가 아직 완료되지 않았습니다. 현재 단계: {status.stage}"
-            )
+            raise RuntimeError(f"조사가 아직 완료되지 않았습니다. 현재 단계: {status.stage}")
         return evidence
 
     def _with_evidence_progress(
@@ -294,9 +306,7 @@ class DurableResearchBackend:
         complete = bool(payload.get("complete"))
         next_evidence_id = None
         if complete and scope == "core":
-            next_evidence_id = self.engine.runs.get_next_core_evidence_id(
-                research_id, evidence_id
-            )
+            next_evidence_id = self.engine.runs.get_next_core_evidence_id(research_id, evidence_id)
         elif complete and scope == "all":
             next_evidence_id = self.engine.runs.get_next_full_text_evidence_id(
                 research_id, evidence_id

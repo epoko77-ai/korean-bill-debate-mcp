@@ -11,6 +11,10 @@ import pytest
 from kasm.research import task_dispatch as dispatch_module
 from kasm.research.queue import ResearchTask, ResearchTaskStage
 from kasm.research.task_dispatch import (
+    INTERNAL_DISPATCH_ERROR_CLASS_HEADER,
+    INTERNAL_DISPATCH_PERMANENT_TASK_ERROR_CLASS,
+    INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE,
+    INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER,
     ResearchTaskDispatchASGI,
     ResearchTaskDispatcher,
 )
@@ -23,8 +27,15 @@ _BODY_MARKER = "private-task-body-marker"
 class _Engine:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ResearchTask]] = []
+        self.completion_checks: list[ResearchTask] = []
+        self.completions: list[ResearchTask] = []
+        self.completed_tasks: set[ResearchTask] = set()
+        self.terminal_checks: list[ResearchTask] = []
         self.failures: list[tuple[ResearchTask, str]] = []
         self.failure: Exception | None = None
+        self.completion_check_failure: Exception | None = None
+        self.completion_failure: Exception | None = None
+        self.terminal_failure: Exception | None = None
 
     def _record(self, stage: str, task: ResearchTask) -> object:
         self.calls.append((stage, task))
@@ -41,8 +52,26 @@ class _Engine:
     def process_finalize_task(self, task: ResearchTask) -> object:
         return self._record("finalize", task)
 
+    def task_completed(self, task: ResearchTask) -> bool:
+        self.completion_checks.append(task)
+        if self.completion_check_failure is not None:
+            raise self.completion_check_failure
+        return task in self.completed_tasks
+
+    def complete_task(self, task: ResearchTask) -> object:
+        self.completions.append(task)
+        if self.completion_failure is not None:
+            raise self.completion_failure
+        self.completed_tasks.add(task)
+        return object()
+
     def fail_task(self, task: ResearchTask, *, error_code: str) -> object:
+        self.terminal_checks.append(task)
+        if task in self.completed_tasks:
+            return object()
         self.failures.append((task, error_code))
+        if self.terminal_failure is not None:
+            raise self.terminal_failure
         return object()
 
 
@@ -127,6 +156,8 @@ def test_valid_task_is_schema_decoded_and_dispatched_by_stage(
     assert status == 200
     assert response == {"ok": True, "stage": stage.value}
     assert engine.calls == [(expected_method, _task(stage))]
+    assert engine.completion_checks == []
+    assert engine.completions == [_task(stage)]
     assert _CAPABILITY not in json.dumps(response)
     assert _BODY_MARKER not in json.dumps(response)
     assert (b"cache-control", b"no-store") in headers
@@ -144,12 +175,15 @@ def test_secret_is_compared_with_constant_time_primitive(monkeypatch: pytest.Mon
     monkeypatch.setattr(dispatch_module.hmac, "compare_digest", compare_digest)
     body = json.dumps(_task(ResearchTaskStage.FINALIZE).to_queue_payload()).encode()
 
-    status, response, _headers = _request(app, body, secret="x" * 32)
+    status, response, headers = _request(app, body, secret="x" * 32)
 
     assert status == 401
     assert response == {"ok": False, "error": "unauthorized"}
     assert compared == [(b"x" * 32, _SECRET.encode())]
     assert engine.calls == []
+    assert not any(
+        name == INTERNAL_DISPATCH_ERROR_CLASS_HEADER for name, _value in headers
+    )
 
 
 def test_invalid_schema_and_oversized_stream_are_rejected_before_dispatch() -> None:
@@ -158,10 +192,10 @@ def test_invalid_schema_and_oversized_stream_are_rejected_before_dispatch() -> N
         ResearchTaskDispatcher(engine), secret=_SECRET, max_request_bytes=1024
     )
 
-    invalid_status, invalid_response, _ = _request(
+    invalid_status, invalid_response, invalid_headers = _request(
         app, json.dumps({"schema_version": 99, "credential_capability": _CAPABILITY}).encode()
     )
-    large_status, large_response, _ = _request(
+    large_status, large_response, large_headers = _request(
         app,
         b"",
         chunks=(b"{" + b"x" * 800, b"y" * 800 + b"}"),
@@ -176,6 +210,14 @@ def test_invalid_schema_and_oversized_stream_are_rejected_before_dispatch() -> N
         {"ok": False, "error": "request_too_large"},
     )
     assert _CAPABILITY not in json.dumps(invalid_response)
+    permanent_header = (
+        INTERNAL_DISPATCH_ERROR_CLASS_HEADER,
+        INTERNAL_DISPATCH_PERMANENT_TASK_ERROR_CLASS,
+    )
+    assert permanent_header in invalid_headers
+    assert permanent_header in large_headers
+    assert _CAPABILITY.encode() not in b"".join(value for _name, value in invalid_headers)
+    assert _BODY_MARKER.encode() not in b"".join(value for _name, value in invalid_headers)
     assert engine.calls == []
 
 
@@ -189,7 +231,11 @@ def test_engine_failure_is_sanitized_non_2xx_then_same_delivery_can_retry() -> N
 
     failed_status, failed_response, _ = _request(app, body)
     engine.failure = None
-    retry_status, retry_response, _ = _request(app, body)
+    retry_status, retry_response, _ = _request(
+        app,
+        body,
+        extra_headers=((b"x-kbd-delivery-count", b"2"),),
+    )
 
     assert failed_status == 503
     assert failed_response == {"ok": False, "error": "dispatch_failed"}
@@ -198,6 +244,82 @@ def test_engine_failure_is_sanitized_non_2xx_then_same_delivery_can_retry() -> N
     assert retry_status == 200
     assert retry_response == {"ok": True, "stage": "hydrate_document"}
     assert [method for method, _task_value in engine.calls] == ["document", "document"]
+    assert engine.completion_checks == [_task(ResearchTaskStage.HYDRATE_DOCUMENT)]
+    assert engine.completions == [_task(ResearchTaskStage.HYDRATE_DOCUMENT)]
+
+
+def test_completion_receipt_failure_reschedules_after_successful_processing() -> None:
+    engine = _Engine()
+    engine.completion_failure = RuntimeError(
+        f"receipt store failed with {_CAPABILITY} and {_BODY_MARKER}"
+    )
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+    task = _task(ResearchTaskStage.FINALIZE)
+    body = json.dumps(task.to_queue_payload()).encode()
+
+    failed_status, failed_response, _ = _request(app, body)
+    engine.completion_failure = None
+    retry_status, retry_response, _ = _request(
+        app,
+        body,
+        extra_headers=((b"x-kbd-delivery-count", b"2"),),
+    )
+
+    assert failed_status == 503
+    assert failed_response == {"ok": False, "error": "dispatch_failed"}
+    assert retry_status == 200
+    assert retry_response == {"ok": True, "stage": "finalize"}
+    assert engine.calls == [("finalize", task), ("finalize", task)]
+    assert engine.completion_checks == [task]
+    assert engine.completions == [task, task]
+    assert _CAPABILITY not in json.dumps(failed_response)
+    assert _BODY_MARKER not in json.dumps(failed_response)
+
+
+def test_redelivery_with_completion_receipt_skips_processing_and_child_publish() -> None:
+    engine = _Engine()
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+    task = _task(ResearchTaskStage.COLLECT_METADATA)
+    body = json.dumps(task.to_queue_payload()).encode()
+
+    first_status, first_response, _ = _request(app, body)
+    retry_status, retry_response, _ = _request(
+        app,
+        body,
+        extra_headers=((b"x-kbd-delivery-count", b"2"),),
+    )
+
+    assert first_status == retry_status == 200
+    assert first_response == retry_response == {
+        "ok": True,
+        "stage": "collect_metadata",
+    }
+    assert engine.calls == [("metadata", task)]
+    assert engine.completion_checks == [task]
+    assert engine.completions == [task]
+
+
+def test_redelivery_receipt_read_failure_is_retryable_and_skips_processing() -> None:
+    engine = _Engine()
+    engine.completion_check_failure = RuntimeError(
+        f"receipt read failed with {_CAPABILITY} and {_BODY_MARKER}"
+    )
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+    task = _task(ResearchTaskStage.HYDRATE_DOCUMENT)
+
+    status, response, headers = _request(
+        app,
+        json.dumps(task.to_queue_payload()).encode(),
+        extra_headers=((b"x-kbd-delivery-count", b"2"),),
+    )
+
+    assert status == 503
+    assert response == {"ok": False, "error": "dispatch_failed"}
+    assert engine.completion_checks == [task]
+    assert engine.calls == []
+    assert engine.completions == []
+    assert _CAPABILITY not in json.dumps(response)
+    assert _BODY_MARKER not in json.dumps(response)
 
 
 def test_engine_failure_log_contains_only_bounded_structured_diagnostics(
@@ -293,21 +415,161 @@ def test_barrier_work_kinds_remain_visible_in_safe_failure_logs(
     assert _CAPABILITY not in caplog.text
 
 
-def test_final_failed_delivery_is_recorded_and_acknowledged() -> None:
+def test_failed_delivery_ten_is_rescheduled_without_terminal_marker() -> None:
     engine = _Engine()
     engine.failure = RuntimeError(f"persistent {_CAPABILITY} {_BODY_MARKER}")
     app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
     task = _task(ResearchTaskStage.COLLECT_METADATA)
     body = json.dumps(task.to_queue_payload()).encode()
 
-    status, response, _headers = _request(
+    status, response, headers = _request(
         app,
         body,
         extra_headers=((b"x-kbd-delivery-count", b"10"),),
     )
 
+    assert status == 503
+    assert response == {"ok": False, "error": "dispatch_failed"}
+    assert engine.failures == []
+    assert engine.completions == []
+    assert _CAPABILITY not in json.dumps(response)
+    assert _BODY_MARKER not in json.dumps(response)
+
+
+def test_lightweight_terminal_failure_skips_task_processing() -> None:
+    engine = _Engine()
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+    task = _task(ResearchTaskStage.HYDRATE_DOCUMENT)
+
+    status, response, _headers = _request(
+        app,
+        json.dumps(task.to_queue_payload()).encode(),
+        extra_headers=(
+            (b"x-kbd-delivery-count", b"11"),
+            (
+                INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER,
+                INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE,
+            ),
+        ),
+    )
+
     assert status == 200
-    assert response == {"ok": True, "stage": "collect_metadata"}
+    assert response == {"ok": True, "stage": "hydrate_document"}
+    assert engine.calls == []
+    assert engine.completions == []
+    assert engine.failures == [(task, "task_retry_budget_exhausted")]
+
+
+def test_delivery_ten_receipt_makes_delivery_eleven_terminal_marker_a_noop() -> None:
+    engine = _Engine()
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+    task = _task(ResearchTaskStage.COLLECT_METADATA)
+    body = json.dumps(task.to_queue_payload()).encode()
+
+    normal_status, normal_response, _ = _request(
+        app,
+        body,
+        extra_headers=((b"x-kbd-delivery-count", b"10"),),
+    )
+    marker_status, marker_response, _ = _request(
+        app,
+        body,
+        extra_headers=(
+            (b"x-kbd-delivery-count", b"11"),
+            (
+                INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER,
+                INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE,
+            ),
+        ),
+    )
+
+    assert normal_status == marker_status == 200
+    assert normal_response == marker_response == {
+        "ok": True,
+        "stage": "collect_metadata",
+    }
+    assert engine.calls == [("metadata", task)]
+    assert engine.completions == [task]
+    assert engine.terminal_checks == [task]
+    assert engine.failures == []
+
+
+@pytest.mark.parametrize(
+    ("delivery_count", "terminal_value"),
+    (
+        (b"9", INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE),
+        (b"10", INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE),
+        (b"11", b"unknown_failure_code"),
+        (b"11", b""),
+    ),
+)
+def test_invalid_terminal_failure_request_is_rejected_before_engine_call(
+    delivery_count: bytes,
+    terminal_value: bytes,
+) -> None:
+    engine = _Engine()
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+
+    status, response, headers = _request(
+        app,
+        json.dumps(_task(ResearchTaskStage.FINALIZE).to_queue_payload()).encode(),
+        extra_headers=(
+            (b"x-kbd-delivery-count", delivery_count),
+            (INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER, terminal_value),
+        ),
+    )
+
+    assert status == 400
+    assert response == {"ok": False, "error": "invalid_terminal_failure"}
+    assert engine.calls == []
+    assert engine.failures == []
+    assert not any(
+        name == INTERNAL_DISPATCH_ERROR_CLASS_HEADER for name, _value in headers
+    )
+
+
+def test_delivery_after_ten_without_marker_never_processes_task() -> None:
+    engine = _Engine()
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+
+    status, response, headers = _request(
+        app,
+        json.dumps(_task(ResearchTaskStage.COLLECT_METADATA).to_queue_payload()).encode(),
+        extra_headers=((b"x-kbd-delivery-count", b"11"),),
+    )
+
+    assert status == 400
+    assert response == {"ok": False, "error": "terminal_failure_required"}
+    assert engine.calls == []
+    assert engine.completions == []
+    assert engine.failures == []
+    assert not any(
+        name == INTERNAL_DISPATCH_ERROR_CLASS_HEADER for name, _value in headers
+    )
+
+
+def test_failed_terminal_marker_remains_retryable() -> None:
+    engine = _Engine()
+    engine.terminal_failure = RuntimeError(f"persistent {_CAPABILITY} {_BODY_MARKER}")
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+    task = _task(ResearchTaskStage.COLLECT_METADATA)
+
+    status, response, _headers = _request(
+        app,
+        json.dumps(task.to_queue_payload()).encode(),
+        extra_headers=(
+            (b"x-kbd-delivery-count", b"12"),
+            (
+                INTERNAL_DISPATCH_TERMINAL_FAILURE_HEADER,
+                INTERNAL_DISPATCH_TERMINAL_FAILURE_CODE,
+            ),
+        ),
+    )
+
+    assert status == 503
+    assert response == {"ok": False, "error": "dispatch_failed"}
+    assert engine.calls == []
+    assert engine.completions == []
     assert engine.failures == [(task, "task_retry_budget_exhausted")]
     assert _CAPABILITY not in json.dumps(response)
     assert _BODY_MARKER not in json.dumps(response)
@@ -326,6 +588,9 @@ def test_invalid_delivery_count_is_rejected_before_dispatch(value: bytes) -> Non
 
     assert status == 400
     assert response == {"ok": False, "error": "invalid_delivery_count"}
+    assert not any(
+        name == INTERNAL_DISPATCH_ERROR_CLASS_HEADER for name, _value in _headers
+    )
     assert engine.calls == []
 
 

@@ -477,6 +477,7 @@ class KasmTools:
 
         빠른 응답은 자료를 버리는 것이 아닙니다. 이 도구는 핵심 근거와 함께 관련 법안,
         회의, 의안원문, 전문위원 검토보고서의 전체 목록·건수·기간을 먼저 보여 줍니다.
+        metadata 단계에서는 ``catalog.next_offset``, final 단계에서는
         ``catalog.page.next_offset``이 있으면 같은 page_size로 끝까지 읽으세요. metadata
         단계의 결과는 명시적인 잠정 후보 지도일 뿐이며 결론으로 사용하면 안 됩니다.
 
@@ -502,7 +503,11 @@ class KasmTools:
         catalog_value = payload.get("catalog")
         catalog = catalog_value if isinstance(catalog_value, Mapping) else {}
         page_value = catalog.get("page")
-        page = page_value if isinstance(page_value, Mapping) else {}
+        # The metadata candidate catalog is itself a page, while the final
+        # entity catalog nests its page accounting beside grouped entries.
+        # Treating only the final shape as pageable silently skipped accepted
+        # metadata candidates beyond the first page on broad questions.
+        page = page_value if isinstance(page_value, Mapping) else catalog
         next_offset = page.get("next_offset")
         if next_offset is not None:
             payload["next_action"] = _next_action(
@@ -758,7 +763,12 @@ class KasmTools:
                 "get_research_page",
                 {
                     "research_id": research_id,
-                    "page_size": 100,
+                    # Keep the model-facing connector response bounded. Each
+                    # evidence entry may inline up to 4,000 complete characters,
+                    # so the ordinary 20-item page has an 80,000-character
+                    # source-text ceiling while explicit callers may still
+                    # choose any supported page size and follow its cursor.
+                    "page_size": 20,
                     "exhaustive": True,
                 },
                 ko=(

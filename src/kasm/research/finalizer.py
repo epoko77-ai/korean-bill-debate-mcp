@@ -26,7 +26,6 @@ from kasm.adapters.korea.ingestion import (
 )
 from kasm.adapters.korea.normalizer import normalize_text
 from kasm.adapters.korea.pipeline import OpenAssemblyPipeline
-from kasm.adapters.korea.sources import MeetingSource, classify_meeting
 from kasm.core.models import Agenda, Bill, Meeting, Speech, SpeechRelation
 
 from .contracts import CoverageLedger, EvidenceCoverage, EvidenceType
@@ -608,9 +607,7 @@ def _evidence_records(
             if document_evidence is not None
             else item.related_bill_numbers
         )
-        related_meeting_ids = (
-            document_evidence.meeting_ids if document_evidence is not None else ()
-        )
+        related_meeting_ids = document_evidence.meeting_ids if document_evidence is not None else ()
         event_date = _document_date(
             document,
             item.related_bill_numbers,
@@ -662,16 +659,12 @@ def _evidence_records(
                         ("empty_page", not bool(segment.text.strip())),
                         (
                             "bill_no",
-                            related_bill_numbers[0]
-                            if len(related_bill_numbers) == 1
-                            else None,
+                            related_bill_numbers[0] if len(related_bill_numbers) == 1 else None,
                         ),
                         ("related_bill_numbers", ",".join(related_bill_numbers)),
                         (
                             "meeting_id",
-                            related_meeting_ids[0]
-                            if len(related_meeting_ids) == 1
-                            else None,
+                            related_meeting_ids[0] if len(related_meeting_ids) == 1 else None,
                         ),
                         ("related_meeting_ids", ",".join(related_meeting_ids)),
                     ),
@@ -680,9 +673,7 @@ def _evidence_records(
             )
 
     speech_by_id = {item.speech.id: item.speech for item in prepared.speeches}
-    bill_numbers_by_speech_id = {
-        item.speech.id: item.bill_numbers for item in prepared.speeches
-    }
+    bill_numbers_by_speech_id = {item.speech.id: item.bill_numbers for item in prepared.speeches}
     transcript_by_speech = {
         speech.id: transcript
         for transcript in prepared.transcripts
@@ -720,9 +711,7 @@ def _evidence_records(
                     ("parser_version", speech.parser_version),
                     (
                         "bill_no",
-                        related_bill_numbers[0]
-                        if len(related_bill_numbers) == 1
-                        else None,
+                        related_bill_numbers[0] if len(related_bill_numbers) == 1 else None,
                     ),
                     ("related_bill_numbers", ",".join(related_bill_numbers)),
                 ),
@@ -780,9 +769,7 @@ def _evidence_records(
                     ("meeting_id", source.meeting_id),
                     (
                         "bill_no",
-                        related_bill_numbers[0]
-                        if len(related_bill_numbers) == 1
-                        else None,
+                        related_bill_numbers[0] if len(related_bill_numbers) == 1 else None,
                     ),
                     ("related_bill_numbers", ",".join(related_bill_numbers)),
                 ),
@@ -831,9 +818,7 @@ def _evidence_records(
                     ("meeting_id", response_speech.meeting_id),
                     (
                         "bill_no",
-                        related_bill_numbers[0]
-                        if len(related_bill_numbers) == 1
-                        else None,
+                        related_bill_numbers[0] if len(related_bill_numbers) == 1 else None,
                     ),
                     ("related_bill_numbers", ",".join(related_bill_numbers)),
                 ),
@@ -989,9 +974,7 @@ def _coverage(
         EvidenceType.BILLS: bill_count,
         EvidenceType.BILL_STATUS: status_matched,
         EvidenceType.AGENDAS: agenda_count,
-        EvidenceType.BILL_TEXT: document_counts.get(
-            EvidenceType.BILL_TEXT, (0, 0, 0, 0)
-        )[1],
+        EvidenceType.BILL_TEXT: document_counts.get(EvidenceType.BILL_TEXT, (0, 0, 0, 0))[1],
         EvidenceType.SUBCOMMITTEE_MINUTES: document_counts.get(
             EvidenceType.SUBCOMMITTEE_MINUTES, (0, 0, 0, 0)
         )[1],
@@ -1009,8 +992,7 @@ def _coverage(
         reasons = tuple(dict.fromkeys(gap_reasons[evidence_type]))
         candidate_total: int | None = total
         if any(
-            "source_incomplete" in reason
-            or "candidate_universe_not_scanned" in reason
+            "source_incomplete" in reason or "candidate_universe_not_scanned" in reason
             for reason in reasons
         ):
             candidate_total = None
@@ -1076,29 +1058,25 @@ def _full_text_candidate_universe_gaps(
             )
         )
 
-    rejected_meetings = tuple(
-        item for item in resolution.meetings.decisions if not item.accepted
-    )
+    rejected_meetings = tuple(item for item in resolution.meetings.decisions if not item.accepted)
     if rejected_meetings:
-        rejected_subcommittee = any(
-            classify_meeting(item.candidate) is MeetingSource.SUBCOMMITTEE
-            for item in rejected_meetings
-        )
+        # Hosted discovery keeps rejected decisions compact and preserves each
+        # full official row in immutable page artifacts. A compact rejected
+        # meeting carries only its exact URL, so conservatively treat the
+        # unscanned rejected universe as possibly containing subcommittee
+        # minutes instead of silently under-reporting that requested axis.
+        rejected_subcommittee = bool(rejected_meetings)
         meeting_axes = tuple(
             item
             for item in _MEETING_AXES
             if item in requested
-            and (
-                item is not EvidenceType.SUBCOMMITTEE_MINUTES
-                or rejected_subcommittee
-            )
+            and (item is not EvidenceType.SUBCOMMITTEE_MINUTES or rejected_subcommittee)
         )
         if meeting_axes:
             gaps.append(
                 (
                     meeting_axes,
-                    "meeting_full_text_candidate_universe_not_scanned:"
-                    f"{len(rejected_meetings)}",
+                    f"meeting_full_text_candidate_universe_not_scanned:{len(rejected_meetings)}",
                 )
             )
     return tuple(gaps)

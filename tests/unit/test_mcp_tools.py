@@ -389,6 +389,59 @@ def test_research_overview_routes_core_before_optional_full_inventory() -> None:
     assert overview["comprehensive_answer_allowed"] is False
 
 
+def test_metadata_overview_routes_every_accepted_catalog_page_before_polling() -> None:
+    class PagedMetadataBackend(FakeResearchBackend):
+        def get_research_overview(
+            self,
+            research_id: str,
+            *,
+            offset: int = 0,
+            page_size: int = 20,
+        ) -> dict[str, Any]:
+            assert research_id == "research_1"
+            assert offset == 0
+            assert page_size == 20
+            return {
+                "research_id": research_id,
+                "phase": "metadata",
+                "complete": False,
+                "provisional": True,
+                "substantive_conclusion_available": False,
+                "accepted_total": 25,
+                "catalog": {
+                    "offset": 0,
+                    "page_size": 20,
+                    "total": 25,
+                    "returned_count": 20,
+                    "next_offset": 20,
+                    "complete": False,
+                    "entries": [
+                        {"candidate_id": f"bill:{number:07d}"}
+                        for number in range(20)
+                    ],
+                },
+            }
+
+    backend = PagedMetadataBackend()
+    tools = KasmTools(
+        ServiceContext(
+            search=FakeSearch(),
+            repository=FakeRepository(),
+            research=backend,
+        )
+    )
+
+    overview = tools.get_research_overview("research_1")
+
+    assert overview["next_action"]["tool"] == "get_research_overview"
+    assert overview["next_action"]["arguments"] == {
+        "research_id": "research_1",
+        "offset": 20,
+        "page_size": 20,
+    }
+    assert overview["comprehensive_answer_allowed"] is False
+
+
 def test_research_pages_index_long_text_and_require_lossless_document_reads() -> None:
     tools, _backend = research_tools()
 
@@ -518,7 +571,7 @@ def test_core_document_completion_routes_explicit_exhaustive_requests() -> None:
         "tool": "get_research_page",
         "arguments": {
             "research_id": "research_1",
-            "page_size": 100,
+            "page_size": 20,
             "exhaustive": True,
         },
         "instruction_ko": (

@@ -66,6 +66,7 @@ class Backend:
 class Engine:
     def __init__(self) -> None:
         self.tasks: list[ResearchTask] = []
+        self.completions: list[ResearchTask] = []
         self.oidc_tokens: list[str] = []
 
     def process_metadata_task(self, task: ResearchTask) -> None:
@@ -77,6 +78,12 @@ class Engine:
 
     def process_finalize_task(self, task: ResearchTask) -> None:
         self.tasks.append(task)
+
+    def task_completed(self, task: ResearchTask) -> bool:
+        return task in self.completions
+
+    def complete_task(self, task: ResearchTask) -> None:
+        self.completions.append(task)
 
     def fail_task(self, task: ResearchTask, *, error_code: str) -> None:
         del error_code
@@ -169,6 +176,7 @@ def test_complete_hosted_configuration_wires_one_runtime_to_mcp_and_worker(
 
     assert len(factory_calls) == 1
     assert len(engine.tasks) == 1
+    assert engine.completions == [_task()]
     assert engine.oidc_tokens == ["request-oidc-token"]
     assert backend.oidc_tokens == ["request-oidc-token"]
     assert backend.starts[0][1]["assembly_term"] is None

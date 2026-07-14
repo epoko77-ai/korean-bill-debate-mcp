@@ -387,6 +387,96 @@ def test_remote_connection_rejects_invalid_key_before_issuing_link(tmp_path, mon
     asyncio.run(exercise())
 
 
+def test_remote_oauth_preserves_injected_web_callbacks_and_allows_them_in_csp(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("KBD_REMOTE_TOKEN_SECRET", Fernet.generate_key().decode())
+    monkeypatch.setenv("KBD_DATA_DIR", str(tmp_path / "remote-web-callbacks"))
+
+    from kasm.mcp.deployment import create_asgi_app
+
+    callbacks = (
+        "https://claude.ai/api/mcp/auth_callback",
+        # ChatGPT supplies its current callback in DCR. The production smoke
+        # injects that exact URI; this representative URI proves the server
+        # does not hard-code Claude's callback host or path.
+        "https://chatgpt.com/connector/oauth/callback?surface=web",
+    )
+
+    async def exercise() -> None:
+        application = create_asgi_app()
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1",
+            follow_redirects=False,
+        ) as client:
+            for position, callback_uri in enumerate(callbacks):
+                registered = await client.post(
+                    "/oauth/register",
+                    json={
+                        "client_name": f"web-connector-{position}",
+                        "redirect_uris": [callback_uri],
+                        "token_endpoint_auth_method": "none",
+                    },
+                )
+                assert registered.status_code == 201
+                assert registered.json()["redirect_uris"] == [callback_uri]
+                client_id = registered.json()["client_id"]
+                verifier = f"web-connector-verifier-{position}-" + "v" * 48
+                challenge = base64.urlsafe_b64encode(
+                    hashlib.sha256(verifier.encode()).digest()
+                ).rstrip(b"=").decode()
+                values = {
+                    "client_id": client_id,
+                    "redirect_uri": callback_uri,
+                    "response_type": "code",
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                    "scope": "mcp:tools offline_access",
+                    "resource": "http://127.0.0.1/mcp",
+                    "state": f"web-state-{position}",
+                }
+                consent = await client.get("/oauth/authorize", params=values)
+                assert consent.status_code == 200
+                callback = urllib.parse.urlsplit(callback_uri)
+                callback_origin = f"{callback.scheme}://{callback.netloc}"
+                assert (
+                    f"form-action 'self' {callback_origin}"
+                    in consent.headers["content-security-policy"]
+                )
+                authorized = await client.post(
+                    "/oauth/authorize",
+                    data={**values, "api_key": "web-user-key"},
+                )
+                assert authorized.status_code == 303
+                returned = urllib.parse.urlsplit(authorized.headers["location"])
+                assert (returned.scheme, returned.netloc, returned.path) == (
+                    callback.scheme,
+                    callback.netloc,
+                    callback.path,
+                )
+                returned_values = urllib.parse.parse_qs(returned.query)
+                for name, expected in urllib.parse.parse_qs(callback.query).items():
+                    assert returned_values[name] == expected
+                assert returned_values["state"] == [f"web-state-{position}"]
+                exchanged = await client.post(
+                    "/oauth/token",
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": returned_values["code"][0],
+                        "client_id": client_id,
+                        "redirect_uri": callback_uri,
+                        "code_verifier": verifier,
+                        "resource": "http://127.0.0.1/mcp",
+                    },
+                )
+                assert exchanged.status_code == 200
+                assert exchanged.json()["scope"] == "mcp:tools offline_access"
+
+    asyncio.run(exercise())
+
+
 def test_deployed_services_reject_empty_prepared_database(tmp_path) -> None:
     path = tmp_path / "empty.sqlite3"
     with Database(path):

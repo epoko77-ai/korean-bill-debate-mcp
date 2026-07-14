@@ -23,6 +23,7 @@ from kasm.research.overview import (
     build_provisional_research_overview,
     build_research_overview,
 )
+from kasm.research.overview_transport import build_overview_transport
 from kasm.research.relevance import RelevanceCriteria
 from kasm.research.resolver import (
     CandidateDecision,
@@ -243,6 +244,120 @@ def test_document_title_and_url_never_create_a_guessed_bill_binding() -> None:
     assert overview.inventory.document_groups[0].entity_id == "document-title-only"
     assert overview.inventory.document_groups[0].evidence_ids == (
         "document-page-title-only",
+    )
+
+
+@pytest.mark.parametrize(
+    ("query", "bill_numbers"),
+    (
+        ("의안번호 2219564와 그 회의록을 조사해줘", ("2219564",)),
+        ("보완수사권 관련 법안과 회의록을 조사해줘", ()),
+    ),
+    ids=("exact-bill", "broad-topic"),
+)
+def test_mixed_agenda_cannot_resurrect_rejected_maritime_bill_in_final_catalog(
+    query: str,
+    bill_numbers: tuple[str, ...],
+) -> None:
+    records = (
+        _record(
+            "evidence:bill:2219564",
+            EvidenceType.BILLS,
+            "2026-01-01|10|target",
+            ("bill_no", "2219564"),
+        ),
+        _record(
+            "evidence:agenda:maritime",
+            EvidenceType.AGENDAS,
+            "2026-02-01|30|maritime",
+            ("bill_no", "2217000"),
+            ("meeting_id", "mixed-meeting"),
+        ),
+        _record(
+            "evidence:agenda:target",
+            EvidenceType.AGENDAS,
+            "2026-02-01|30|target",
+            ("bill_no", "2219564"),
+            ("meeting_id", "mixed-meeting"),
+        ),
+        _record(
+            "evidence:document-page:mixed",
+            EvidenceType.SUBCOMMITTEE_MINUTES,
+            "2026-02-01|40|mixed",
+            ("work_id", "minutes:mixed"),
+            ("meeting_id", "mixed-meeting"),
+            ("related_bill_numbers", "2217000,2219564"),
+        ),
+        _record(
+            "evidence:speech:mixed-1",
+            EvidenceType.SPEECHES,
+            "2026-02-01|60|mixed-1",
+            ("meeting_id", "mixed-meeting"),
+            ("related_bill_numbers", "2217000,2219564"),
+        ),
+    )
+    contract = ResearchContract(
+        query=query,
+        as_of=NOW,
+        bill_numbers=bill_numbers,
+        evidence_types=tuple(EvidenceType),
+    )
+    snapshot = ResearchSnapshot(
+        research_id=f"research-mixed-{'exact' if bill_numbers else 'broad'}",
+        contract=contract,
+        index_revision="overview-index-v1",
+        build_sha="build-overview",
+        coverage=_coverage(),
+        evidence=records,
+    )
+
+    overview = build_research_overview(snapshot, core_limit=10)
+    transport = build_overview_transport(snapshot, overview)
+
+    assert [group.entity_id for group in overview.inventory.bill_groups] == [
+        "2219564"
+    ]
+    assert all(
+        binding != (OverviewEntityType.BILL, "2217000")
+        for item in overview.core
+        for binding in item.entity_bindings
+    )
+    assert "evidence:agenda:maritime" not in {
+        item.evidence_id for item in overview.core
+    }
+    assert "evidence:agenda:target" in {item.evidence_id for item in overview.core}
+    assert {
+        group.entity_id
+        for shard in transport.shards
+        for group in shard.groups
+        if group.entity_type is OverviewEntityType.BILL
+    } == {"2219564"}
+    # The official mixed-meeting evidence remains lossless and auditable; only
+    # its unaccepted bill mention is denied canonical catalog identity.
+    mixed = next(item for item in snapshot.evidence if item.id.endswith(":mixed"))
+    assert dict(mixed.metadata)["related_bill_numbers"] == "2217000,2219564"
+    assert "evidence:agenda:maritime" in overview.inventory.evidence_ids
+
+
+def test_bill_mention_without_verified_bill_evidence_stays_uncanonical_and_partial() -> None:
+    record = _record(
+        "evidence:document-page:unverified",
+        EvidenceType.REVIEW_REPORTS,
+        "2026-02-01|50|unverified",
+        ("work_id", "review:unverified"),
+        ("related_bill_numbers", "2217000"),
+    )
+    overview = build_research_overview(
+        _snapshot((record,), provisional_type=EvidenceType.BILLS)
+    )
+
+    assert overview.status is OverviewStatus.PROVISIONAL
+    assert overview.inventory.bill_groups == ()
+    assert overview.inventory.document_groups[0].evidence_ids == (record.id,)
+    assert "axis_incomplete:bills" in overview.provisional_reasons
+    assert any(
+        "candidate_universe_not_scanned" in reason
+        for reason in overview.provisional_reasons
     )
 
 

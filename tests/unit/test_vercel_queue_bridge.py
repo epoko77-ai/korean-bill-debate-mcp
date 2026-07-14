@@ -50,11 +50,18 @@ def test_queue_bridge_never_reads_failure_body_or_logs_task() -> None:
     assert "metadata.deliveryCount" in source
     assert '"x-kbd-delivery-count"' in source
     assert "MAX_PERMANENT_DELIVERY_ATTEMPTS = 3" in source
+    assert "MAX_NORMAL_DELIVERY_ATTEMPTS = 10" in source
+    assert '"x-kbd-terminal-failure"' in source
+    assert '"task_retry_budget_exhausted"' in source
+    assert '"x-kbd-dispatch-error-class"' in source
+    assert '"permanent-task"' in source
     assert "return { acknowledge: true }" in source
     assert "error instanceof PermanentDispatchError" in source
     assert '"x-vercel-oidc-token"' in source
     assert '"x-vercel-trusted-oidc-idp-token"' in source
     assert "DISPATCH_TIMEOUT_MS = 270_000" in source
+    assert "TERMINAL_FAILURE_TIMEOUT_MS = 25_000" in source
+    assert "response.headers.get(ERROR_CLASS_HEADER)" in source
     assert "response.text()" not in source
     assert "console." not in source
 

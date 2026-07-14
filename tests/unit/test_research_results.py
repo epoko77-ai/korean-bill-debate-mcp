@@ -12,6 +12,7 @@ from kasm.research.contracts import (
     ResearchContract,
 )
 from kasm.research.results import (
+    PUBLIC_INLINE_TEXT_CHARACTERS,
     EvidenceCitation,
     EvidenceRecord,
     ResearchSnapshot,
@@ -118,6 +119,32 @@ def test_transport_index_inlines_only_complete_short_evidence() -> None:
     assert page["evidence"][0]["text"] == "짧은 전체 원문"
     assert page["evidence"][0]["text_inline_complete"] is True
     assert page["full_text_required_ids"] == []
+
+
+def test_web_safe_twenty_item_page_has_a_bounded_inline_text_ceiling() -> None:
+    records = tuple(
+        _record(number, text="가" * PUBLIC_INLINE_TEXT_CHARACTERS)
+        for number in range(25)
+    )
+    snapshot = _snapshot(records)
+
+    first = snapshot.page(page_size=20).to_index_dict()
+    inline_characters = sum(
+        len(str(item.get("text") or "")) for item in first["evidence"]
+    )
+
+    assert len(first["evidence"]) == 20
+    assert inline_characters == 20 * PUBLIC_INLINE_TEXT_CHARACTERS == 80_000
+    assert first["page"]["complete"] is False
+    assert first["page"]["next_cursor"]
+
+    second = snapshot.page(
+        cursor=first["page"]["next_cursor"],
+        page_size=20,
+    ).to_index_dict()
+    assert len(second["evidence"]) == 5
+    assert second["page"]["matched_total"] == 25
+    assert second["page"]["complete"] is True
 
 
 def test_transport_index_size_is_bounded_for_100_large_records() -> None:

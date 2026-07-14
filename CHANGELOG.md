@@ -33,6 +33,46 @@
 
 ### Fixed
 
+- Replace the hosted discovery and metadata checkpoints that duplicated every raw row and full
+  rejected candidate with compact, readiness-gated boundaries. Immutable source pages retain the
+  complete official payload, while accepted candidates, exact rejected identities and reasons,
+  coverage accounting, resolver bindings, and deferred-work manifests remain restart-safe without
+  repeatedly decoding a 50-70 MB run object.
+- Persist generic write-once task-completion receipts after every worker's side effects. Queue
+  redelivery can now distinguish a lost HTTP acknowledgement from unfinished work, skip duplicate
+  coordinator fan-out, and avoid marking a late successful delivery as failed.
+- Split Queue poison handling into ten normal attempts and marker-only later deliveries. Ambiguous
+  network/timeout outcomes wait beyond the Python invocation limit before redelivery, exhausted
+  messages never execute the expensive task again, and only a durable terminal marker permits an
+  acknowledgement. Boundary-proven malformed messages and markers whose run has expired are
+  acknowledged idempotently instead of being rescheduled until retention expires.
+- Write independent snapshot text, index, lookup, and overview shards with bounded concurrency,
+  keep their manifests behind the completed shard set, and publish the summary as the final sole
+  readiness marker. This removes the sequential Blob-write timeout while preserving idempotent
+  crash recovery.
+- Remove generic Korean instruction words from issue-term matching and cache deterministic query
+  criteria during candidate resolution. Broad legislative questions no longer accept unrelated
+  bills merely because they contain words such as “committee” or “official,” and the resolver no
+  longer evaluates every rejected candidate twice.
+- Build final bill groups and core bill bindings only from independently verified bill evidence.
+  Bill numbers mentioned by a mixed meeting agenda remain available in immutable provenance and
+  the evidence graph, but can no longer resurrect a resolver-rejected, unrelated bill in the
+  answer-facing catalog.
+- Keep exhaustive evidence traversal lossless while bounding each suggested follow-up page. The
+  default next action now requests 20 inventory entries at a time, preserves the stable cursor
+  until every entry has been visited, and opens long official text through exact hashed ranges
+  instead of silently shortening it.
+- Publish tiny page-readiness records only after their immutable raw source page, and check those
+  fixed keys at incomplete discovery barriers instead of repeatedly downloading and decoding the
+  full page bodies.
+- Materialize accepted bills, status partitions, document work items, and bounded four-item route
+  shards behind final readiness markers. Page, document, and finalization workers now read only
+  their exact routing objects rather than decoding whole-run manifests once per task. Versioned
+  compact state adopts in-flight legacy runs without write-once conflicts, while generation-bound
+  600-second finalization claims prevent concurrent barriers from repeating full assembly and
+  still permit crash recovery.
+- Report the package release version in MCP `initialize.serverInfo.version` instead of leaking the
+  installed MCP SDK version as the server version.
 - Replace per-page and per-document whole-run completion scans with delayed, uniquely identified
   phase and finalization barriers. Concurrent workers can no longer all observe one another as
   incomplete and leave a research job permanently waiting after the last write.
