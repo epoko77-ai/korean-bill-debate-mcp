@@ -174,6 +174,10 @@ additional sources selected by the user. Only an explicit exhaustive request wal
 evidence index with `exhaustive=true` and every long source range. Long text is not replaced by a
 truncated preview: it is routed by exact ID, size, hash, URL, and locator.
 
+As soon as the first complete candidate map is ready, `get_research_status` includes up to 100
+entries in `overview_preview`. Claude.ai and ChatGPT can therefore show useful progress without an
+extra serverless round trip, then continue from the returned `next_offset` when the map is longer.
+
 In local mode, SQLite is a private cache rather than a bundled source database. Hosted instances use
 ephemeral cache storage. Current bill status is refreshed from the official status API. See the
 [Korean README](README.md) and [client guide](docs/mcp-clients.md).

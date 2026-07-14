@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime
 from enum import Enum
@@ -415,14 +416,30 @@ class KasmTools:
         사용자에게 누락 사유를 밝혀야 하며 종합 조사가 끝났다고 표현하면 안 됩니다.
 
         Poll the same research_id. Never call start_research again merely because work is still
-        running, and never infer completeness from progress or a non-empty result.
+        running, and never infer completeness from progress or a non-empty result. When
+        ``overview_preview`` is present, it is the first bounded page of the complete candidate
+        map and may be shown immediately while the same research job continues in the background.
         """
         _validate_identifier(research_id, "research_id")
-        payload = _public_backend_payload(self._research_backend().get_research_status(research_id))
+        backend = self._research_backend()
+        payload = _public_backend_payload(backend.get_research_status(research_id))
         payload.setdefault("research_id", research_id)
         status = str(payload.get("status") or "unknown").lower()
         payload["comprehensive_answer_allowed"] = False
         overview_available = bool(payload.get("overview_available"))
+        if overview_available:
+            # Readiness is published after the compact map artifact. Inline its
+            # bounded first page so web clients can show useful progress without
+            # another serverless round trip. Third-party stores may expose an
+            # optimistic flag, so preserve status if their map is not readable.
+            with suppress(LookupError, RuntimeError):
+                payload["overview_preview"] = _public_backend_payload(
+                    backend.get_research_overview(
+                        research_id,
+                        offset=0,
+                        page_size=100,
+                    )
+                )
         if status in {"complete", "partial"}:
             payload["next_action"] = _next_action(
                 "get_research_overview",

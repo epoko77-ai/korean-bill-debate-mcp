@@ -106,6 +106,10 @@ start_research
 `get_evidence_document`에서 최대 5만 자씩 손실 없이 이어 읽습니다. `coverage.complete`가
 거짓이면 누락 사유를 밝힌 부분 조사이며, 종합 조사가 끝났다고 표현하지 않습니다.
 
+첫 후보 지도가 준비되면 `get_research_status`가 최대 100건의 `overview_preview`를 함께
+돌려주므로 Claude.ai와 ChatGPT는 별도 왕복을 기다리지 않고 진행 중인 자료 지도를 먼저 보여
+줄 수 있습니다. 목록이 더 길면 같은 응답의 `next_offset`부터 이어서 읽습니다.
+
 ## 영어로 질문하고, 영어로 답을 받을 수 있습니다
 
 `v0.8.0`부터 영어 질문을 그대로 보존하면서 실제 열린국회 검색에는 한국어 입법 키워드를

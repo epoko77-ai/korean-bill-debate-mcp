@@ -114,6 +114,8 @@
   a normal long-form MCP investigation cannot be interrupted by its own progress checks.
 - Match durable fan-out windows to the eight-worker Queue ceiling and remove the artificial delay
   between bounded windows, preserving complete traversal while eliminating serial four-item hops.
+- Inline the bounded first candidate-map page in ready status responses, allowing web MCP clients
+  to show useful progress without another serverless round trip while full source work continues.
 
 ### Known limitations
 

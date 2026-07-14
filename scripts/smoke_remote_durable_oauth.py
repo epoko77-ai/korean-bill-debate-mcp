@@ -695,12 +695,17 @@ async def exercise() -> dict[str, object]:
                     time.perf_counter() - status_started,
                 )
                 if status.get("overview_available") and not first_overview_verified:
-                    overview = _structured(
-                        await session.call_tool(
+                    inline_overview = status.get("overview_preview")
+                    overview = (
+                        inline_overview
+                        if isinstance(inline_overview, dict)
+                        else _structured(
+                            await session.call_tool(
+                                "get_research_overview",
+                                {"research_id": research_id, "page_size": 100},
+                            ),
                             "get_research_overview",
-                            {"research_id": research_id, "page_size": 100},
-                        ),
-                        "get_research_overview",
+                        )
                     )
                     phase = str(overview.get("phase") or "")
                     if phase == "metadata":

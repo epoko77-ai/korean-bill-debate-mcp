@@ -155,7 +155,7 @@ class FakeResearchBackend:
     ) -> dict[str, Any]:
         assert research_id == "research_1"
         assert offset == 0
-        assert page_size == 20
+        assert page_size in {20, 100}
         return {
             "research_id": research_id,
             "phase": "final",
@@ -371,6 +371,8 @@ def test_research_status_drives_poll_then_page_without_claiming_completion() -> 
     partial = tools.get_research_status("research_1")
     assert partial["next_action"]["tool"] == "get_research_overview"
     assert partial["comprehensive_answer_allowed"] is False
+    assert partial["overview_preview"]["phase"] == "final"
+    assert partial["overview_preview"]["catalog"]["page"]["complete"] is True
 
 
 def test_research_overview_routes_core_before_optional_full_inventory() -> None:
