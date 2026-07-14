@@ -282,6 +282,7 @@ def test_status_uses_bounded_store_view_without_exhaustive_derivation(tmp_path) 
     assert result["work"]["metadata_pages_complete"] == 7
     assert result["work"]["documents_complete"] == 0
     assert result["work"]["snapshot_ready"] is False
+    assert result["retry_after_seconds"] == 1
 
     # Early/optimistic tool calls must report the same compact checkpoint.
     # Falling back to exhaustive derive_status here would rescan every hosted

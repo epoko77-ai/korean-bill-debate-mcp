@@ -93,7 +93,10 @@ class DurableResearchBackend:
             "stage": derived.stage,
             "progress": _progress(derived),
             "work": _derived_payload(derived),
-            "retry_after_seconds": 2,
+            # Status reads are bounded to a handful of checkpoint objects.
+            # A one-second hint lets web MCP clients surface the first complete
+            # candidate map promptly without restarting or duplicating work.
+            "retry_after_seconds": 1,
             "overview_available": derived.overview_available,
             "overview_phase": (
                 "final"

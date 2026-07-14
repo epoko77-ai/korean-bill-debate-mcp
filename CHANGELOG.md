@@ -110,6 +110,8 @@
   of hiding them behind an unexpected-schema error, while continuing to redact credentials.
 - Make matching existing Claude Code, Codex, and Gemini registrations idempotent while rejecting a
   conflicting command, and propagate a custom credentials path to the registered MCP process.
+- Return a one-second bounded status-poll hint and raise the hosted MCP request budget so
+  a normal long-form MCP investigation cannot be interrupted by its own progress checks.
 
 ### Known limitations
 
