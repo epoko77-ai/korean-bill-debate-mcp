@@ -29,6 +29,9 @@ def test_hosted_runtime_is_composed_lazily_without_network_or_user_key(monkeypat
     assert isinstance(runtime.engine.runs, StatusSnapshotResearchRunStore)
     assert runtime.engine.index_revision.startswith("research-v1+")
     assert runtime.engine.partition_planner.page_size == 1000
+    assert runtime.engine.direct_fanout_limit == 4
+    assert runtime.engine.fanout_chunk_size == 8
+    assert runtime.engine.fanout_delay_seconds == 0
 
 
 def test_hosted_runtime_allows_explicit_smaller_metadata_pages(monkeypatch) -> None:

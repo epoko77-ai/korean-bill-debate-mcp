@@ -1169,7 +1169,9 @@ def test_large_page_expansion_is_chained_without_prior_page_rescans(
     coordinators = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "page_fanout"
     ]
-    assert len(coordinators) == 4
+    assert len(coordinators) == (
+        len(follow_ups) + value.fanout_chunk_size - 1
+    ) // value.fanout_chunk_size
     assert all(
         queue.delays[task.idempotency_key] == value.fanout_delay_seconds
         for task in coordinators[1:]

@@ -112,6 +112,8 @@
   conflicting command, and propagate a custom credentials path to the registered MCP process.
 - Return a one-second bounded status-poll hint and raise the hosted MCP request budget so
   a normal long-form MCP investigation cannot be interrupted by its own progress checks.
+- Match durable fan-out windows to the eight-worker Queue ceiling and remove the artificial delay
+  between bounded windows, preserving complete traversal while eliminating serial four-item hops.
 
 ### Known limitations
 
