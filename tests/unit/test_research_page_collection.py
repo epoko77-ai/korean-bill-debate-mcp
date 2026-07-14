@@ -73,19 +73,36 @@ def test_incomplete_distributed_pages_fail_instead_of_returning_partial_data() -
         assemble_partition_pages(_partition(), (_page(1), _page(3)))
 
 
-def test_total_drift_and_duplicate_rows_fail_closed() -> None:
+def test_total_drift_fails_but_official_duplicate_rows_are_preserved() -> None:
     with pytest.raises(AssemblyApiError, match="total changed"):
         validate_fetched_page(
             _partition(),
             MetadataPageWork("bill-ai", 2, 237),
             _page(2, total=238),
         )
-    with pytest.raises(AssemblyApiError, match="duplicate rows"):
-        validate_fetched_page(
-            _partition(),
-            MetadataPageWork("bill-ai", 1),
-            _page(1, duplicate=True),
-        )
+    duplicate = _page(1, duplicate=True)
+    validate_fetched_page(
+        _partition(),
+        MetadataPageWork("bill-ai", 1),
+        duplicate,
+    )
+    assert duplicate.rows[0] == duplicate.rows[-1]
+
+
+def test_repeated_complete_page_fails_as_pagination_drift() -> None:
+    first = _page(1, total=200)
+    repeated = ApiPage(
+        dataset=first.dataset,
+        page=2,
+        page_size=first.page_size,
+        total_count=first.total_count,
+        rows=first.rows,
+        source_url=first.source_url.replace("pIndex=1", "pIndex=2"),
+        source_hash="f" * 64,
+    )
+
+    with pytest.raises(AssemblyApiError, match="repeated complete page"):
+        assemble_partition_pages(_partition(), (first, repeated))
 
 
 def test_page_artifact_round_trip_is_lossless_and_credential_free() -> None:

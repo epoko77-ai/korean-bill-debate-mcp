@@ -57,6 +57,11 @@ async def exercise() -> dict[str, object]:
         "search_bills",
         "get_bill_status",
         "explore_issue",
+        "start_research",
+        "get_research_status",
+        "get_research_overview",
+        "get_research_page",
+        "get_evidence_document",
     }
     if set(names) != expected:
         raise RuntimeError("deployed MCP tool list is incomplete")

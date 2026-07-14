@@ -9,6 +9,7 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
     root = Path(__file__).resolve().parents[2]
     config = json.loads((root / "vercel.json").read_text())
 
+    assert config["regions"] == ["icn1"]
     assert config["functions"]["api/index.py"] == {
         "maxDuration": 300,
         "includeFiles": "src/**",

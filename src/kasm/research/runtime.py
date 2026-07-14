@@ -75,7 +75,7 @@ def create_hosted_research_runtime(
         timeout=float(os.getenv("KBD_RESEARCH_QUEUE_TIMEOUT_SECONDS", "10")),
     )
 
-    api_timeout = float(os.getenv("KBD_RESEARCH_API_TIMEOUT_SECONDS", "15"))
+    api_timeout = float(os.getenv("KBD_RESEARCH_API_TIMEOUT_SECONDS", "30"))
     cache_root = Path(os.getenv("KBD_RESEARCH_CACHE_DIR", "/tmp/kbd-research"))
     resolved_corpus_provider = corpus_recall_provider
     if resolved_corpus_provider is None:

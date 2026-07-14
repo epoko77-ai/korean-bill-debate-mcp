@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -24,6 +25,18 @@ INTERNAL_DISPATCH_SECRET_HEADER = b"x-kbd-internal-secret"
 INTERNAL_DISPATCH_DELIVERY_COUNT_HEADER = b"x-kbd-delivery-count"
 MAX_RESEARCH_TASK_BYTES = 64 * 1024
 MAX_RESEARCH_TASK_DELIVERIES = 10
+_LOGGER = logging.getLogger(__name__)
+_SAFE_WORK_KINDS = frozenset(
+    {
+        "bill_documents",
+        "deferred_fanout",
+        "discovery_fanout",
+        "document",
+        "document_fanout",
+        "metadata_page",
+        "page_fanout",
+    }
+)
 
 
 class ResearchTaskEngine(Protocol):
@@ -148,7 +161,8 @@ class ResearchTaskDispatchASGI:
         try:
             with bind_vercel_oidc_token(oidc_token):
                 await asyncio.to_thread(self.dispatcher.dispatch, task)
-        except Exception:
+        except Exception as exc:
+            _log_dispatch_failure(exc, task, delivery_count)
             if delivery_count >= MAX_RESEARCH_TASK_DELIVERIES:
                 try:
                     with bind_vercel_oidc_token(oidc_token):
@@ -157,7 +171,8 @@ class ResearchTaskDispatchASGI:
                             task,
                             error_code="task_retry_budget_exhausted",
                         )
-                except Exception:
+                except Exception as terminal_exc:
+                    _log_dispatch_failure(terminal_exc, task, delivery_count)
                     await _json_response(send, 503, "dispatch_failed")
                     return
                 await _json_response(send, 200, "failed", stage=task.stage.value)
@@ -168,6 +183,37 @@ class ResearchTaskDispatchASGI:
             await _json_response(send, 503, "dispatch_failed")
             return
         await _json_response(send, 200, "ok", stage=task.stage.value)
+
+
+def _log_dispatch_failure(
+    error: Exception,
+    task: ResearchTask,
+    delivery_count: int,
+) -> None:
+    """Emit bounded diagnostics without exception text, traceback, or task data."""
+
+    exception_class = type(error).__name__
+    if (
+        len(exception_class) > 128
+        or not exception_class.isascii()
+        or not exception_class.isidentifier()
+    ):
+        exception_class = "Exception"
+    raw_work_kind = dict(task.payload).get("work_kind")
+    work_kind = (
+        raw_work_kind
+        if isinstance(raw_work_kind, str) and raw_work_kind in _SAFE_WORK_KINDS
+        else "unknown"
+    )
+    _LOGGER.error(
+        "research_task_dispatch_failed",
+        extra={
+            "exception_class": exception_class,
+            "task_stage": task.stage.value,
+            "work_kind": work_kind,
+            "delivery_count": delivery_count,
+        },
+    )
 
 
 def _headers(scope: dict[str, Any]) -> dict[bytes, bytes]:

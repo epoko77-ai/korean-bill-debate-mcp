@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Iterable
 from typing import Any
 
@@ -197,6 +198,59 @@ def test_engine_failure_is_sanitized_non_2xx_then_same_delivery_can_retry() -> N
     assert retry_status == 200
     assert retry_response == {"ok": True, "stage": "hydrate_document"}
     assert [method for method, _task_value in engine.calls] == ["document", "document"]
+
+
+def test_engine_failure_log_contains_only_bounded_structured_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret_url = f"https://example.invalid/private?key={_CAPABILITY}"
+    task = ResearchTask(
+        research_id=f"research_{_BODY_MARKER}",
+        stage=ResearchTaskStage.COLLECT_METADATA,
+        work_id=f"work_{_BODY_MARKER}",
+        query_fingerprint="b" * 64,
+        index_revision="index-test",
+        payload=(
+            ("work_kind", "metadata_page"),
+            ("official_url", secret_url),
+            ("api_key", _CAPABILITY),
+        ),
+        credential_capability=_CAPABILITY,
+    )
+    engine = _Engine()
+    engine.failure = RuntimeError(
+        f"upstream leaked {secret_url} {_BODY_MARKER} {_CAPABILITY}"
+    )
+    app = ResearchTaskDispatchASGI(ResearchTaskDispatcher(engine), secret=_SECRET)
+
+    with caplog.at_level(logging.ERROR, logger=dispatch_module.__name__):
+        status, response, _headers = _request(
+            app,
+            json.dumps(task.to_queue_payload()).encode(),
+            extra_headers=((b"x-kbd-delivery-count", b"7"),),
+        )
+
+    assert status == 503
+    assert response == {"ok": False, "error": "dispatch_failed"}
+    records = [
+        record
+        for record in caplog.records
+        if record.name == dispatch_module.__name__
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record.getMessage() == "research_task_dispatch_failed"
+    assert record.exception_class == "RuntimeError"
+    assert record.task_stage == "collect_metadata"
+    assert record.work_kind == "metadata_page"
+    assert record.delivery_count == 7
+    assert record.exc_info is None
+    rendered = caplog.text + repr(record.__dict__)
+    assert secret_url not in rendered
+    assert _CAPABILITY not in rendered
+    assert _BODY_MARKER not in rendered
+    assert "official_url" not in rendered
+    assert "api_key" not in rendered
 
 
 def test_final_failed_delivery_is_recorded_and_acknowledged() -> None:

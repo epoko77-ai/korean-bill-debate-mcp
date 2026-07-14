@@ -93,9 +93,11 @@ def validate_fetched_page(
         )
     _validate_source_url(page.source_url)
     _validate_sha256(page.source_hash, "metadata page source_hash")
-    fingerprints = tuple(_row_fingerprint(row) for row in page.rows)
-    if len(fingerprints) != len(set(fingerprints)):
-        raise AssemblyApiError("metadata page contains duplicate rows")
+    # Official agenda/meeting datasets can legitimately contain byte-for-byte
+    # identical rows for distinct agenda occurrences.  The official client
+    # therefore preserves duplicate-looking rows, and distributed collection
+    # must do the same.  Coherence is checked at the page artifact level below,
+    # not by silently rejecting official row multiplicity.
 
 
 def expand_first_page(
@@ -148,7 +150,7 @@ def assemble_partition_pages(
             f"metadata partition pages are incomplete; missing={missing}, extra={extra}"
         )
 
-    seen: set[str] = set()
+    seen_pages: set[str] = set()
     for page in ordered:
         work = (
             MetadataPageWork(partition.partition_id, 1)
@@ -156,13 +158,12 @@ def assemble_partition_pages(
             else MetadataPageWork(partition.partition_id, page.page, first.total_count)
         )
         validate_fetched_page(partition, work, page)
-        for row in page.rows:
-            fingerprint = _row_fingerprint(row)
-            if fingerprint in seen:
-                raise AssemblyApiError(
-                    "metadata partition contains duplicate rows across pages"
-                )
-            seen.add(fingerprint)
+        fingerprint = _page_fingerprint(page.rows)
+        if fingerprint in seen_pages:
+            raise AssemblyApiError(
+                "metadata partition contains a repeated complete page"
+            )
+        seen_pages.add(fingerprint)
 
     rows = tuple(row for page in ordered for row in page.rows)
     if len(rows) != first.total_count:
@@ -231,15 +232,19 @@ def _validate_sha256(value: str, label: str) -> None:
         raise ValueError(f"{label} must be a SHA-256 hex digest")
 
 
-def _row_fingerprint(row: Mapping[str, Any]) -> str:
-    canonical = json.dumps(
-        row,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(canonical.encode()).hexdigest()
+def _page_fingerprint(rows: Iterable[Mapping[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for row in rows:
+        canonical = json.dumps(
+            row,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        digest.update(canonical.encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 __all__ = [
