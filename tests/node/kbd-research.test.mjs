@@ -23,6 +23,7 @@ const queueModule = await import("../../api/queues/kbd-research.ts");
 const { POST } = queueModule;
 const NODE_HANDLER = queueModule.default;
 const {
+  isRetryableQueueCallbackError,
   isStaleQueueCallbackError,
   runNodeQueueCallback,
   runRoutingOnlyQueueCallback,
@@ -120,8 +121,6 @@ function routingOnlyNodeCallback(messageId = "msg-stale") {
 test("stale queue callback errors are acknowledged without masking real failures", async () => {
   const staleErrors = [
     new MessageAlreadyProcessedError("msg-stale"),
-    new MessageLockedError("msg-stale"),
-    new MessageNotAvailableError("msg-stale"),
     new MessageNotFoundError("msg-stale"),
   ];
 
@@ -139,8 +138,30 @@ test("stale queue callback errors are acknowledged without masking real failures
     assert.deepEqual(callback.result.body, { status: "success" });
   }
 
+  const retryableErrors = [
+    new MessageLockedError("msg-retry"),
+    new MessageNotAvailableError("msg-retry"),
+  ];
+  for (const error of retryableErrors) {
+    assert.equal(isStaleQueueCallbackError(error), false);
+    assert.equal(isRetryableQueueCallbackError(error), true);
+    const callback = nodeCallback(1);
+    await runNodeQueueCallback(
+      async () => {
+        throw error;
+      },
+      callback.request,
+      callback.response,
+    );
+    assert.equal(callback.result.statusCode, 503);
+    assert.deepEqual(callback.result.body, {
+      error: "queue callback retry required",
+    });
+  }
+
   const failure = new Error("actual callback failure");
   assert.equal(isStaleQueueCallbackError(failure), false);
+  assert.equal(isRetryableQueueCallbackError(failure), false);
   const callback = nodeCallback(1);
   await runNodeQueueCallback(
     async () => {
@@ -197,7 +218,6 @@ function installFetch(internalResponses, queueStatus = 204) {
 
 for (const [status, staleState] of [
   [404, "not found"],
-  [409, "not available"],
   [410, "already processed"],
 ]) {
   test(`routing-only ${staleState} callback maps Queue API ${status} to success`, async () => {
@@ -228,6 +248,35 @@ for (const [status, staleState] of [
   });
 }
 
+test("routing-only temporary unavailability remains retryable", async () => {
+  const fake = installFetch(200, 409);
+  const callback = routingOnlyNodeCallback();
+  try {
+    await NODE_HANDLER(callback.request, callback.response);
+    assert.equal(callback.result.statusCode, 503);
+    assert.deepEqual(callback.result.body, {
+      error: "queue callback retry required",
+    });
+    assert.equal(
+      fake.calls.filter(
+        (call) =>
+          call.url.includes("vercel-queue.com") &&
+          call.url.endsWith("/id/msg-stale") &&
+          call.method === "POST",
+      ).length,
+      1,
+    );
+    assert.equal(
+      fake.calls.filter((call) =>
+        call.url.endsWith("/_internal/research/dispatch"),
+      ).length,
+      0,
+    );
+  } finally {
+    fake.restore();
+  }
+});
+
 test("routing-only infrastructure failure remains HTTP 500", async () => {
   const fake = installFetch(200, 503);
   const callback = routingOnlyNodeCallback();
@@ -256,7 +305,7 @@ test("routing-only success delegates handler, lease, retry, and ack to public re
       assert.equal(topic, "kbd-research");
       assert.equal(consumerGroup, "kbd-workers");
       assert.equal(options.messageId, "msg-normal");
-      assert.equal(options.visibilityTimeoutSeconds, 600);
+      assert.equal(options.visibilityTimeoutSeconds, 300);
       assert.equal(typeof options.retry, "function");
       await handler(TASK, {
         messageId: "msg-normal",
@@ -387,12 +436,12 @@ for (const [name, ambiguousFailure] of [
   ["network failure", new TypeError("simulated network failure")],
   ["dispatch timeout", new DOMException("timed out", "TimeoutError")],
 ]) {
-  test(`delivery one waits 600 seconds after ambiguous ${name}`, async () => {
+  test(`delivery one retries promptly after ambiguous ${name}`, async () => {
     const fake = installFetch(ambiguousFailure);
     try {
       const response = await POST(callbackRequest(1));
       assert.equal(response.status, 200);
-      assertVisibilityChange(fake.calls, 600);
+      assertVisibilityChange(fake.calls, 30);
       assert.ok(
         !fake.calls.some(
           (call) =>

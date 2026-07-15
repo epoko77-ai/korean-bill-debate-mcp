@@ -41,10 +41,14 @@
   absence.
 - Add an explicit cross-source caveat when the dedicated subcommittee dataset returns zero, because
   committee minutes can still contain subcommittee discussion.
-- Route receipt-less Queue callbacks through the public receive-by-ID API so stale, already
-  processed, or concurrently claimed deliveries no longer appear as HTTP 500 failures. Genuine
-  authentication and Queue infrastructure failures still fail closed, while retry, visibility,
-  handler, and acknowledgement semantics remain owned by the official Queue SDK.
+- Route receipt-less Queue callbacks through the public receive-by-ID API and upgrade the official
+  Queue SDK to 0.4.0. Already-processed or expired deliveries close successfully, while temporary
+  lease/ticket conflicts remain retryable instead of being acknowledged and stranded until their
+  visibility timeout. Genuine authentication and Queue infrastructure failures still fail closed.
+- Match the Queue lease to the bounded 270-second worker (300 seconds with SDK renewal) and reduce
+  ambiguous early-delivery backoff from ten minutes to 30 seconds. Redeliveries check the durable
+  task-completion receipt before repeating work; the final retry boundary retains its longer safety
+  window.
 
 ### Known limitations
 

@@ -25,7 +25,9 @@ const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_MAX_TASKS = 16;
 const RECOVERY_DISPATCH_TIMEOUT_MS = 210_000;
 const NEW_ROUND_DEADLINE_MS = 60_000;
-const VISIBILITY_TIMEOUT_SECONDS = 600;
+// Active work renews its lease. A 300-second base keeps crash recovery within
+// the user-facing broad-search deadline instead of hiding work for ten minutes.
+const VISIBILITY_TIMEOUT_SECONDS = 300;
 const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 const REGION_PATTERN = /^[a-z][a-z0-9-]{1,15}$/;
 

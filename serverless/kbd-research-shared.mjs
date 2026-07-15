@@ -206,7 +206,13 @@ export function retryDirective(error, metadata) {
     return { afterSeconds: 300 };
   }
   if (error instanceof AmbiguousDispatchError) {
-    return { afterSeconds: 600 };
+    // The target may have completed after the socket outcome became unknown.
+    // Redelivery checks the durable completion receipt before repeating work,
+    // so a short retry preserves safety without stalling a fan-out for ten minutes.
+    return {
+      afterSeconds:
+        metadata.deliveryCount === MAX_NORMAL_DELIVERY_ATTEMPTS ? 600 : 30,
+    };
   }
   if (metadata.deliveryCount === MAX_NORMAL_DELIVERY_ATTEMPTS) {
     return { afterSeconds: 600 };

@@ -126,6 +126,7 @@ test("an available same-group message is recovered immediately", async () => {
       receiver.calls[0].consumer,
       "api_Squeues_Skbd-research_Dts",
     );
+    assert.equal(receiver.calls[0].options.visibilityTimeoutSeconds, 300);
   } finally {
     fake.restore();
   }

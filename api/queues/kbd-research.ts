@@ -81,16 +81,24 @@ function messageHandler(deploymentOrigin: string, oidcToken: string) {
 }
 
 const callbackOptions = {
-  visibilityTimeoutSeconds: 600,
+  // The Python dispatch is bounded to 270 seconds. The SDK renews an active
+  // lease, so 300 seconds is enough for healthy work while a crashed or lost
+  // callback becomes recoverable within the broad-search SLO.
+  visibilityTimeoutSeconds: 300,
   retry: retryDirective,
 };
 
 export function isStaleQueueCallbackError(error: unknown): boolean {
   return (
     error instanceof MessageAlreadyProcessedError ||
-    error instanceof MessageLockedError ||
-    error instanceof MessageNotAvailableError ||
     error instanceof MessageNotFoundError
+  );
+}
+
+export function isRetryableQueueCallbackError(error: unknown): boolean {
+  return (
+    error instanceof MessageLockedError ||
+    error instanceof MessageNotAvailableError
   );
 }
 
@@ -102,12 +110,18 @@ export async function runNodeQueueCallback(
   try {
     await callback(request, response);
   } catch (error) {
-    // Queue callbacks are at-least-once deliveries. A late duplicate can lose
-    // its lease because the work was already acknowledged, another consumer
-    // owns it, or the message expired. Those SDK outcomes are terminal success
-    // for this stale invocation; retrying the callback can only create noise.
+    // Queue callbacks are at-least-once deliveries. A callback for an already
+    // acknowledged or expired message is terminal success; retrying it can
+    // only create noise. Active lease conflicts are handled separately below.
     if (isStaleQueueCallbackError(error)) {
       response.status(200).json({ status: "success" });
+      return;
+    }
+    // A lost lease or temporary ticket mismatch is not terminal. Returning a
+    // success here strands the unacknowledged message until visibility expiry.
+    // Preserve the queue trigger's retry contract instead.
+    if (isRetryableQueueCallbackError(error)) {
+      response.status(503).json({ error: "queue callback retry required" });
       return;
     }
     response.status(500).json({ error: "queue callback unavailable" });
@@ -139,17 +153,28 @@ export async function runRoutingOnlyQueueCallback(
         ...callbackOptions,
       },
     );
-    // A non-success receive-by-ID result means this duplicate callback arrived
-    // after the message was processed, expired, or moved to another consumer.
-    // PollingQueueClient has not invoked the handler in those cases.
+    // Only terminal absence is safe to acknowledge. `not_available` and
+    // `empty` can be a temporary lease/ticket race; acknowledging the callback
+    // would leave its message locked until visibility expiry.
     if (!result.ok) {
-      response.status(200).json({ status: "success" });
+      if (
+        result.reason === "already_processed" ||
+        result.reason === "not_found"
+      ) {
+        response.status(200).json({ status: "success" });
+        return;
+      }
+      response.status(503).json({ error: "queue callback retry required" });
       return;
     }
     response.status(200).json({ status: "success" });
   } catch (error) {
     if (isStaleQueueCallbackError(error)) {
       response.status(200).json({ status: "success" });
+      return;
+    }
+    if (isRetryableQueueCallbackError(error)) {
+      response.status(503).json({ error: "queue callback retry required" });
       return;
     }
     response.status(500).json({ error: "queue callback unavailable" });
