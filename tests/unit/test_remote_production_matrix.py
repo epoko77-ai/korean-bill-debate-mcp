@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import runpy
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -18,9 +20,13 @@ _broad_scenarios = cast(Callable[[str], tuple[Any, Any]], _MATRIX["_broad_scenar
 _mixed_scenarios = cast(Callable[[str], tuple[Any, ...]], _MATRIX["_mixed_scenarios"])
 _child_environment = cast(Callable[..., dict[str, str]], _MATRIX["_child_environment"])
 _contains_credential = cast(Callable[[str, str], bool], _MATRIX["_contains_credential"])
+_merge_continued_payload = cast(Callable[..., dict[str, Any]], _MATRIX["_merge_continued_payload"])
 _acceptance_failures = cast(
     Callable[[Any, dict[str, Any]], list[str]], _MATRIX["_acceptance_failures"]
 )
+_exercise = cast(Callable[[Any], Any], _MATRIX["_exercise"])
+
+_RESEARCH_ID = "research_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def _successful_research_payload() -> dict[str, Any]:
@@ -116,6 +122,167 @@ def test_child_environment_drops_every_paid_llm_credential(
     assert not any("LLM" in name for name in child)
 
 
+def test_child_environment_only_passes_an_explicit_valid_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _first, terminal = _broad_scenarios("2026-07-14")
+    monkeypatch.setenv(
+        "KBD_SMOKE_EXISTING_RESEARCH_ID",
+        "research_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+
+    fresh = _child_environment(
+        terminal,
+        base_url="https://deployment.example",
+        api_key="assembly-user-key",
+    )
+    continued = _child_environment(
+        terminal,
+        base_url="https://deployment.example",
+        api_key="assembly-user-key",
+        existing_research_id=_RESEARCH_ID,
+        prior_research_elapsed_seconds=73.25,
+    )
+
+    assert "KBD_SMOKE_EXISTING_RESEARCH_ID" not in fresh
+    assert continued["KBD_SMOKE_EXISTING_RESEARCH_ID"] == _RESEARCH_ID
+    assert continued["KBD_SMOKE_WAIT_SECONDS"] == "527"
+
+
+@pytest.mark.parametrize(
+    "invalid_research_id",
+    (
+        "research_short",
+        "research_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "research_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa extra",
+        "gAAAAAcredentialshapedvaluecredentialshapedvalue",
+    ),
+)
+def test_child_environment_rejects_an_invalid_continuation_identity(
+    invalid_research_id: str,
+) -> None:
+    _first, terminal = _broad_scenarios("2026-07-14")
+
+    with pytest.raises(RuntimeError, match="continued research identity is invalid"):
+        _child_environment(
+            terminal,
+            base_url="https://deployment.example",
+            api_key="assembly-user-key",
+            existing_research_id=invalid_research_id,
+        )
+
+
+def test_continued_payload_preserves_first_orientation_and_accumulates_elapsed_time() -> None:
+    first_payload = _successful_research_payload()
+    first_payload.update(
+        {
+            "research_id": _RESEARCH_ID,
+            "research_elapsed_seconds": 110.25,
+            "research_receipt_seconds": 0.75,
+            "first_overview_seconds": 109.5,
+            "first_overview_phase": "metadata",
+        }
+    )
+    terminal_payload = _successful_research_payload()
+    terminal_payload.update(
+        {
+            "research_id": _RESEARCH_ID,
+            "research_elapsed_seconds": 450.5,
+            "research_receipt_seconds": 0.0,
+            "first_overview_seconds": 0.1,
+            "first_overview_phase": "final",
+        }
+    )
+
+    merged = _merge_continued_payload(
+        terminal_payload,
+        first_payload,
+        continuation_wall_seconds=451.75,
+    )
+
+    assert merged["research_elapsed_seconds"] == 562.0
+    assert merged["research_receipt_seconds"] == 0.75
+    assert merged["first_overview_seconds"] == 109.5
+    assert merged["first_overview_phase"] == "metadata"
+    _first, terminal = _broad_scenarios("2026-07-14")
+    assert _acceptance_failures(terminal, merged) == []
+
+
+def test_continued_broad_threshold_includes_time_spent_reaching_first_overview() -> None:
+    first_payload = _successful_research_payload()
+    first_payload.update(
+        {
+            "research_id": _RESEARCH_ID,
+            "research_elapsed_seconds": 110.25,
+        }
+    )
+    terminal_payload = _successful_research_payload()
+    terminal_payload.update(
+        {
+            "research_id": _RESEARCH_ID,
+            "research_elapsed_seconds": 500.0,
+        }
+    )
+
+    merged = _merge_continued_payload(terminal_payload, first_payload)
+    _first, terminal = _broad_scenarios("2026-07-14")
+
+    assert merged["research_elapsed_seconds"] == 610.25
+    assert "broad terminal result exceeded 600 seconds" in _acceptance_failures(terminal, merged)
+
+
+def test_broad_suite_reuses_the_first_child_research_instead_of_starting_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_payload = _successful_research_payload()
+    first_payload.update(
+        {
+            "research_id": _RESEARCH_ID,
+            "research_elapsed_seconds": 75.0,
+        }
+    )
+    terminal_payload = _successful_research_payload()
+    calls: list[tuple[str, dict[str, Any] | None]] = []
+
+    async def fake_run_group(
+        scenarios: tuple[Any, ...],
+        *,
+        base_url: str,
+        api_key: str,
+        continuation_payload: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        del base_url, api_key
+        scenario = scenarios[0]
+        calls.append((scenario.role, continuation_payload))
+        payload = first_payload if scenario.role == "broad_first" else terminal_payload
+        return [
+            ChildResult(
+                scenario=scenario,
+                passed=True,
+                wall_seconds=1.0,
+                payload=payload,
+                failures=(),
+            )
+        ]
+
+    monkeypatch.setenv("ASSEMBLY_OPEN_API_KEY", "assembly-user-key")
+    monkeypatch.setitem(_exercise.__globals__, "_run_group", fake_run_group)
+
+    result = asyncio.run(
+        _exercise(
+            SimpleNamespace(
+                suite="broad",
+                base_url="https://deployment.example",
+                broad_date_to="2026-07-14",
+                allow_mixed_load=False,
+            )
+        )
+    )
+
+    assert result["passed"] is True
+    assert calls == [("broad_first", None), ("broad_terminal", first_payload)]
+
+
 @pytest.mark.parametrize(
     "output",
     [
@@ -198,6 +365,7 @@ def test_public_report_is_an_allow_list_and_omits_raw_child_payload() -> None:
     scenario = _exact_scenario()
     payload = _successful_research_payload()
     payload["unexpected_secret"] = "must-not-appear"
+    payload["research_id"] = _RESEARCH_ID
     result = ChildResult(
         scenario=scenario,
         passed=True,
@@ -207,4 +375,5 @@ def test_public_report_is_an_allow_list_and_omits_raw_child_payload() -> None:
     ).report()
     assert "must-not-appear" not in str(result)
     assert "unexpected_secret" not in str(result)
+    assert _RESEARCH_ID not in str(result)
     assert result["metrics"]["long_text_characters"] == 75_000

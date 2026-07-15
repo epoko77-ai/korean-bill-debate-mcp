@@ -41,6 +41,10 @@
   absence.
 - Add an explicit cross-source caveat when the dedicated subcommittee dataset returns zero, because
   committee minutes can still contain subcommittee discussion.
+- Route receipt-less Queue callbacks through the public receive-by-ID API so stale, already
+  processed, or concurrently claimed deliveries no longer appear as HTTP 500 failures. Genuine
+  authentication and Queue infrastructure failures still fail closed, while retry, visibility,
+  handler, and acknowledgement semantics remain owned by the official Queue SDK.
 
 ### Known limitations
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import sys
@@ -64,6 +65,21 @@ _CREDENTIAL_PATTERNS = (
     re.compile(r"/mcp/t/[A-Za-z0-9_-]{20,}"),
     re.compile(r"(?i)(?:code|access_token|refresh_token)=([^&\s]{8,})"),
 )
+_RESEARCH_ID_PATTERN = re.compile(r"research_[0-9a-f]{32}")
+_FIRST_OVERVIEW_FIELDS = (
+    "research_receipt_seconds",
+    "first_overview_seconds",
+    "first_overview_phase",
+    "first_overview_accepted_total",
+    "first_overview_catalog_pages",
+    "first_overview_inventory_complete",
+    "first_overview_source_complete",
+    "first_overview_pending_total_known",
+    "first_overview_coverage_complete",
+    "first_overview_catalog_truncated",
+    "first_overview_verified",
+    "first_overview_duplicate_count",
+)
 
 
 @dataclass(frozen=True)
@@ -98,8 +114,10 @@ class ChildResult:
 
     def report(self) -> dict[str, Any]:
         payload = self.payload or {}
-        oauth = payload.get("oauth") if isinstance(payload.get("oauth"), dict) else {}
-        http = payload.get("http") if isinstance(payload.get("http"), dict) else {}
+        oauth_value = payload.get("oauth")
+        http_value = payload.get("http")
+        oauth: dict[str, Any] = oauth_value if isinstance(oauth_value, dict) else {}
+        http: dict[str, Any] = http_value if isinstance(http_value, dict) else {}
         return {
             "name": self.scenario.name,
             "role": self.scenario.role,
@@ -191,12 +209,6 @@ def _exact_scenario() -> Scenario:
 
 
 def _broad_scenarios(date_to: str) -> tuple[Scenario, Scenario]:
-    common = {
-        "query": _BROAD_QUERY,
-        "expected_bill": "",
-        "date_from": "2026-07-01",
-        "date_to": date_to,
-    }
     return (
         Scenario(
             name="broad_ai_july_first_overview",
@@ -209,7 +221,10 @@ def _broad_scenarios(date_to: str) -> tuple[Scenario, Scenario]:
             ),
             wait_seconds=120,
             stop_at_overview=True,
-            **common,
+            query=_BROAD_QUERY,
+            expected_bill="",
+            date_from="2026-07-01",
+            date_to=date_to,
         ),
         Scenario(
             name="broad_ai_july_terminal",
@@ -218,37 +233,42 @@ def _broad_scenarios(date_to: str) -> tuple[Scenario, Scenario]:
             origin=_CLAUDE_ORIGIN,
             callback_uri=_CLAUDE_CALLBACK,
             wait_seconds=600,
-            **common,
+            query=_BROAD_QUERY,
+            expected_bill="",
+            date_from="2026-07-01",
+            date_to=date_to,
         ),
     )
 
 
 def _mixed_scenarios(date_to: str) -> tuple[Scenario, ...]:
-    broad_common = {
-        "role": "mixed_broad",
-        "wait_seconds": 600,
-        "query": _BROAD_QUERY,
-        "expected_bill": "",
-        "date_from": "2026-07-01",
-        "date_to": date_to,
-    }
     broad = (
         Scenario(
             name="mixed_broad_1_claude",
+            role="mixed_broad",
             platform="claude.ai",
             origin=_CLAUDE_ORIGIN,
             callback_uri=_CLAUDE_CALLBACK,
-            **broad_common,
+            wait_seconds=600,
+            query=_BROAD_QUERY,
+            expected_bill="",
+            date_from="2026-07-01",
+            date_to=date_to,
         ),
         Scenario(
             name="mixed_broad_2_chatgpt",
+            role="mixed_broad",
             platform="chatgpt.com",
             origin=_CHATGPT_ORIGIN,
             callback_uri=(
                 os.getenv("KBD_CHATGPT_REDIRECT_URI", "").strip()
                 or _CHATGPT_REPRESENTATIVE_CALLBACK
             ),
-            **broad_common,
+            wait_seconds=600,
+            query=_BROAD_QUERY,
+            expected_bill="",
+            date_from="2026-07-01",
+            date_to=date_to,
         ),
     )
     exact = tuple(
@@ -283,8 +303,21 @@ def _child_environment(
     *,
     base_url: str,
     api_key: str,
+    existing_research_id: str = "",
+    prior_research_elapsed_seconds: float = 0.0,
 ) -> dict[str, str]:
     """Build an allow-listed environment that cannot expose paid LLM credentials."""
+
+    if existing_research_id and _RESEARCH_ID_PATTERN.fullmatch(existing_research_id) is None:
+        raise RuntimeError("continued research identity is invalid")
+    if prior_research_elapsed_seconds < 0 or not math.isfinite(prior_research_elapsed_seconds):
+        raise RuntimeError("continued research elapsed time is invalid")
+    if prior_research_elapsed_seconds and not existing_research_id:
+        raise RuntimeError("continued research elapsed time has no research identity")
+
+    wait_seconds = scenario.wait_seconds
+    if existing_research_id and wait_seconds:
+        wait_seconds = max(1, math.ceil(wait_seconds - prior_research_elapsed_seconds))
 
     child = {
         name: value for name in _SAFE_PARENT_ENV if (value := os.environ.get(name)) is not None
@@ -296,7 +329,7 @@ def _child_environment(
             "KBD_SMOKE_ORIGIN": scenario.origin,
             "KBD_SMOKE_REDIRECT_URI": scenario.callback_uri,
             "KBD_SMOKE_REQUIRE_WEB_CALLBACK": "1",
-            "KBD_SMOKE_WAIT_SECONDS": str(scenario.wait_seconds),
+            "KBD_SMOKE_WAIT_SECONDS": str(wait_seconds),
             "KBD_SMOKE_QUERY": scenario.query,
             "KBD_SMOKE_EXPECT_BILL_NUMBER": scenario.expected_bill,
             "KBD_SMOKE_ASSEMBLY_TERM": "22",
@@ -313,6 +346,8 @@ def _child_environment(
         child["KBD_SMOKE_STOP_AT_OVERVIEW"] = "1"
     if scenario.exhaustive:
         child["KBD_SMOKE_EXHAUSTIVE"] = "1"
+    if existing_research_id:
+        child["KBD_SMOKE_EXISTING_RESEARCH_ID"] = existing_research_id
     return child
 
 
@@ -344,10 +379,52 @@ def _number(payload: dict[str, Any], name: str) -> float | None:
     return float(value) if isinstance(value, int | float) else None
 
 
+def _continuation_identity(payload: dict[str, Any] | None) -> tuple[str, float]:
+    if payload is None:
+        raise RuntimeError("first overview child returned no reusable research payload")
+    research_id = payload.get("research_id")
+    if not isinstance(research_id, str) or _RESEARCH_ID_PATTERN.fullmatch(research_id) is None:
+        raise RuntimeError("first overview child returned no valid reusable research identity")
+    elapsed = _number(payload, "research_elapsed_seconds")
+    if elapsed is None or elapsed < 0 or not math.isfinite(elapsed):
+        raise RuntimeError("first overview child returned no valid research elapsed time")
+    return research_id, elapsed
+
+
+def _merge_continued_payload(
+    terminal_payload: dict[str, Any],
+    first_payload: dict[str, Any],
+    *,
+    continuation_wall_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Preserve first-orientation metrics and account for the complete research lifetime."""
+
+    research_id, prior_elapsed = _continuation_identity(first_payload)
+    if terminal_payload.get("research_id") != research_id:
+        raise RuntimeError("continued child returned a different research identity")
+    terminal_elapsed = _number(terminal_payload, "research_elapsed_seconds")
+    if terminal_elapsed is None or terminal_elapsed < 0 or not math.isfinite(terminal_elapsed):
+        raise RuntimeError("continued child returned no valid research elapsed time")
+    if continuation_wall_seconds is not None and (
+        continuation_wall_seconds < 0 or not math.isfinite(continuation_wall_seconds)
+    ):
+        raise RuntimeError("continued child wall time is invalid")
+
+    merged = dict(terminal_payload)
+    for name in _FIRST_OVERVIEW_FIELDS:
+        if name in first_payload:
+            merged[name] = first_payload[name]
+    continuation_elapsed = max(terminal_elapsed, continuation_wall_seconds or 0.0)
+    merged["research_elapsed_seconds"] = round(prior_elapsed + continuation_elapsed, 3)
+    return merged
+
+
 def _acceptance_failures(scenario: Scenario, payload: dict[str, Any]) -> list[str]:
     failures: list[str] = []
-    oauth = payload.get("oauth") if isinstance(payload.get("oauth"), dict) else {}
-    http = payload.get("http") if isinstance(payload.get("http"), dict) else {}
+    oauth_value = payload.get("oauth")
+    http_value = payload.get("http")
+    oauth: dict[str, Any] = oauth_value if isinstance(oauth_value, dict) else {}
+    http: dict[str, Any] = http_value if isinstance(http_value, dict) else {}
     if payload.get("passed") is not True:
         failures.append("child did not report passed=true")
     if payload.get("tool_count") != 13 or payload.get("all_tools_read_only") is not True:
@@ -478,8 +555,22 @@ async def _run_child(
     *,
     base_url: str,
     api_key: str,
+    continuation_payload: dict[str, Any] | None = None,
 ) -> ChildResult:
-    environment = _child_environment(scenario, base_url=base_url, api_key=api_key)
+    existing_research_id = ""
+    prior_research_elapsed_seconds = 0.0
+    if continuation_payload is not None:
+        existing_research_id, prior_research_elapsed_seconds = _continuation_identity(
+            continuation_payload
+        )
+    environment = _child_environment(
+        scenario,
+        base_url=base_url,
+        api_key=api_key,
+        existing_research_id=existing_research_id,
+        prior_research_elapsed_seconds=prior_research_elapsed_seconds,
+    )
+    effective_wait_seconds = int(environment["KBD_SMOKE_WAIT_SECONDS"])
     started = time.perf_counter()
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -492,7 +583,11 @@ async def _run_child(
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             process.communicate(),
-            timeout=scenario.process_timeout_seconds,
+            timeout=(
+                scenario.process_timeout_seconds
+                if continuation_payload is None
+                else max(180, effective_wait_seconds + 180)
+            ),
         )
     except TimeoutError:
         process.kill()
@@ -551,6 +646,22 @@ async def _run_child(
                 else _safe_error(stderr, api_key)
             ),
         )
+    if continuation_payload is not None:
+        try:
+            payload = _merge_continued_payload(
+                payload,
+                continuation_payload,
+                continuation_wall_seconds=wall_seconds,
+            )
+        except RuntimeError as exc:
+            return ChildResult(
+                scenario=scenario,
+                passed=False,
+                wall_seconds=wall_seconds,
+                payload=None,
+                failures=("continued child violated the reusable research contract",),
+                error=str(exc),
+            )
     failures = tuple(_acceptance_failures(scenario, payload))
     return ChildResult(
         scenario=scenario,
@@ -566,10 +677,21 @@ async def _run_group(
     *,
     base_url: str,
     api_key: str,
+    continuation_payload: dict[str, Any] | None = None,
 ) -> list[ChildResult]:
+    if continuation_payload is not None and len(scenarios) != 1:
+        raise RuntimeError("one continued research payload can drive exactly one child")
     return list(
         await asyncio.gather(
-            *(_run_child(scenario, base_url=base_url, api_key=api_key) for scenario in scenarios)
+            *(
+                _run_child(
+                    scenario,
+                    base_url=base_url,
+                    api_key=api_key,
+                    continuation_payload=continuation_payload,
+                )
+                for scenario in scenarios
+            )
         )
     )
 
@@ -619,7 +741,14 @@ async def _exercise(args: argparse.Namespace) -> dict[str, Any]:
         first_results = await _run_group((broad_first,), base_url=base_url, api_key=api_key)
         results.extend(first_results)
         if first_results[0].passed:
-            results.extend(await _run_group((broad_terminal,), base_url=base_url, api_key=api_key))
+            results.extend(
+                await _run_group(
+                    (broad_terminal,),
+                    base_url=base_url,
+                    api_key=api_key,
+                    continuation_payload=first_results[0].payload,
+                )
+            )
 
     if args.suite in {"mixed", "all"}:
         prerequisites = [

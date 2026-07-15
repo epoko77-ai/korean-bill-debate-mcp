@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {
+  MessageAlreadyProcessedError,
+  MessageLockedError,
+  MessageNotAvailableError,
+  MessageNotFoundError,
+} from "@vercel/queue";
+
 process.env.KBD_INTERNAL_TASK_SECRET = "i".repeat(48);
 process.env.VERCEL_DEPLOYMENT_ID = "dpl_queue_test";
 process.env.VERCEL = "1";
@@ -15,6 +22,11 @@ process.env.VERCEL_OIDC_TOKEN = TEST_OIDC_TOKEN;
 const queueModule = await import("../../api/queues/kbd-research.ts");
 const { POST } = queueModule;
 const NODE_HANDLER = queueModule.default;
+const {
+  isStaleQueueCallbackError,
+  runNodeQueueCallback,
+  runRoutingOnlyQueueCallback,
+} = queueModule;
 const FETCH = POST;
 
 const TASK = {
@@ -75,7 +87,75 @@ function nodeCallback(deliveryCount) {
   };
 }
 
-function installFetch(internalResponses) {
+function routingOnlyNodeCallback(messageId = "msg-stale") {
+  const result = { statusCode: 0, body: null };
+  return {
+    request: {
+      method: "POST",
+      headers: {
+        "ce-type": "com.vercel.queue.v2beta",
+        "ce-vqsqueuename": "kbd-research",
+        "ce-vqsconsumergroup": "kbd-workers",
+        "ce-vqsmessageid": messageId,
+        "ce-vqsregion": "icn1",
+        "content-type": "application/json",
+        "x-vercel-oidc-token": "header.queue.request.token.value",
+      },
+      body: TASK,
+    },
+    response: {
+      status(code) {
+        result.statusCode = code;
+        return this;
+      },
+      json(body) {
+        result.body = body;
+      },
+      end() {},
+    },
+    result,
+  };
+}
+
+test("stale queue callback errors are acknowledged without masking real failures", async () => {
+  const staleErrors = [
+    new MessageAlreadyProcessedError("msg-stale"),
+    new MessageLockedError("msg-stale"),
+    new MessageNotAvailableError("msg-stale"),
+    new MessageNotFoundError("msg-stale"),
+  ];
+
+  for (const error of staleErrors) {
+    assert.equal(isStaleQueueCallbackError(error), true);
+    const callback = nodeCallback(1);
+    await runNodeQueueCallback(
+      async () => {
+        throw error;
+      },
+      callback.request,
+      callback.response,
+    );
+    assert.equal(callback.result.statusCode, 200);
+    assert.deepEqual(callback.result.body, { status: "success" });
+  }
+
+  const failure = new Error("actual callback failure");
+  assert.equal(isStaleQueueCallbackError(failure), false);
+  const callback = nodeCallback(1);
+  await runNodeQueueCallback(
+    async () => {
+      throw failure;
+    },
+    callback.request,
+    callback.response,
+  );
+  assert.equal(callback.result.statusCode, 500);
+  assert.deepEqual(callback.result.body, {
+    error: "queue callback unavailable",
+  });
+});
+
+function installFetch(internalResponses, queueStatus = 204) {
   const calls = [];
   const responses = Array.isArray(internalResponses)
     ? [...internalResponses]
@@ -101,7 +181,9 @@ function installFetch(internalResponses) {
       });
     }
     if (url.includes("vercel-queue.com")) {
-      return new Response(null, { status: 204 });
+      return new Response(queueStatus === 204 ? null : "queue outcome", {
+        status: queueStatus,
+      });
     }
     throw new Error(`unexpected fetch: ${method} ${url}`);
   };
@@ -112,6 +194,95 @@ function installFetch(internalResponses) {
     },
   };
 }
+
+for (const [status, staleState] of [
+  [404, "not found"],
+  [409, "not available"],
+  [410, "already processed"],
+]) {
+  test(`routing-only ${staleState} callback maps Queue API ${status} to success`, async () => {
+    const fake = installFetch(200, status);
+    const callback = routingOnlyNodeCallback();
+    try {
+      await NODE_HANDLER(callback.request, callback.response);
+      assert.equal(callback.result.statusCode, 200);
+      assert.deepEqual(callback.result.body, { status: "success" });
+      assert.equal(
+        fake.calls.filter(
+          (call) =>
+            call.url.includes("vercel-queue.com") &&
+            call.url.endsWith("/id/msg-stale") &&
+            call.method === "POST",
+        ).length,
+        1,
+      );
+      assert.equal(
+        fake.calls.filter((call) =>
+          call.url.endsWith("/_internal/research/dispatch"),
+        ).length,
+        0,
+      );
+    } finally {
+      fake.restore();
+    }
+  });
+}
+
+test("routing-only infrastructure failure remains HTTP 500", async () => {
+  const fake = installFetch(200, 503);
+  const callback = routingOnlyNodeCallback();
+  try {
+    await NODE_HANDLER(callback.request, callback.response);
+    assert.equal(callback.result.statusCode, 500);
+    assert.deepEqual(callback.result.body, {
+      error: "queue callback unavailable",
+    });
+  } finally {
+    fake.restore();
+  }
+});
+
+test("routing-only success delegates handler, lease, retry, and ack to public receive", async () => {
+  const callback = routingOnlyNodeCallback("msg-normal");
+  const parsed = {
+    queueName: "kbd-research",
+    consumerGroup: "kbd-workers",
+    messageId: "msg-normal",
+    region: "icn1",
+  };
+  let handled = 0;
+  const receiver = {
+    async receive(topic, consumerGroup, handler, options) {
+      assert.equal(topic, "kbd-research");
+      assert.equal(consumerGroup, "kbd-workers");
+      assert.equal(options.messageId, "msg-normal");
+      assert.equal(options.visibilityTimeoutSeconds, 600);
+      assert.equal(typeof options.retry, "function");
+      await handler(TASK, {
+        messageId: "msg-normal",
+        deliveryCount: 1,
+        createdAt: new Date("2026-07-13T00:00:00Z"),
+        expiresAt: new Date("2026-07-14T00:00:00Z"),
+        topicName: topic,
+        consumerGroup,
+        region: "icn1",
+      });
+      return { ok: true };
+    },
+  };
+  await runRoutingOnlyQueueCallback(
+    parsed,
+    async (message) => {
+      assert.deepEqual(message, TASK);
+      handled += 1;
+    },
+    callback.response,
+    receiver,
+  );
+  assert.equal(handled, 1);
+  assert.equal(callback.result.statusCode, 200);
+  assert.deepEqual(callback.result.body, { status: "success" });
+});
 
 function assertVisibilityChange(calls, seconds) {
   const changes = calls.filter(
