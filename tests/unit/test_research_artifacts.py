@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -118,6 +120,47 @@ def test_content_addressed_write_is_idempotent(tmp_path: Path) -> None:
 
     assert first == second
     assert len(store.list("research_1", ArtifactKind.METADATA)) == 1
+
+
+def test_filesystem_write_publishes_only_after_complete_fsync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FilesystemResearchArtifactStore(tmp_path)
+    link_started = Event()
+    allow_publish = Event()
+    real_link = os.link
+
+    def delayed_link(source: str | bytes, destination: str | bytes) -> None:
+        link_started.set()
+        if not allow_publish.wait(timeout=5):
+            raise RuntimeError("test did not release atomic artifact publish")
+        real_link(source, destination)
+
+    monkeypatch.setattr(os, "link", delayed_link)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            store.write_plan,
+            "research_atomic",
+            {"query": "인공지능 입법"},
+        )
+        try:
+            assert link_started.wait(timeout=5)
+            assert (
+                store.read_logical(
+                    "research_atomic",
+                    ArtifactKind.PLAN,
+                    "plan",
+                )
+                is None
+            )
+        finally:
+            allow_publish.set()
+        ref = future.result(timeout=5)
+
+    restored = store.read_logical("research_atomic", ArtifactKind.PLAN, "plan")
+    assert restored is not None and restored.ref == ref
+    assert not tuple(tmp_path.rglob("*.tmp"))
 
 
 def test_write_once_conflict_does_not_replace_original(tmp_path: Path) -> None:

@@ -15,9 +15,11 @@ import json
 import math
 import os
 import re
+import tempfile
 import urllib.parse
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -270,21 +272,42 @@ class FilesystemResearchArtifactStore(BaseResearchArtifactStore):
         path = self._safe_path(ref.object_path)
         try:
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return self._verify_existing(path, encoded, ref)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                dir=path.parent,
+            )
         except OSError as exc:
             raise ArtifactBackendError("artifact filesystem write failed") from exc
+        temporary = Path(temporary_name)
         try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except OSError as exc:
-            # A partial O_EXCL file remains immutable and will fail integrity
-            # checks rather than being silently overwritten.
-            raise ArtifactBackendError("artifact filesystem write failed") from exc
-        return ref
+            try:
+                stream = os.fdopen(descriptor, "wb")
+                descriptor = -1
+                with stream:
+                    stream.write(encoded)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except OSError as exc:
+                raise ArtifactBackendError("artifact filesystem write failed") from exc
+            # Publishing the fully fsynced sibling through a hard link is both
+            # atomic and no-overwrite. Creating the final O_EXCL path before
+            # writing exposed an empty/partial JSON file to concurrent readers.
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                return self._verify_existing(path, encoded, ref)
+            except OSError as exc:
+                raise ArtifactBackendError("artifact filesystem write failed") from exc
+            return ref
+        finally:
+            if descriptor >= 0:
+                with suppress(OSError):
+                    os.close(descriptor)
+            # The immutable final link is already authoritative. A hidden
+            # orphaned sibling is preferable to reporting a false failure.
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
     def read(self, ref: ArtifactRef) -> StoredArtifact | None:
         path = self._safe_path(ref.object_path)

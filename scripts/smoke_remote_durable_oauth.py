@@ -608,6 +608,7 @@ async def exercise() -> dict[str, object]:
     wait_seconds = max(0.0, float(os.getenv("KBD_SMOKE_WAIT_SECONDS", "0")))
     stop_at_overview = os.getenv("KBD_SMOKE_STOP_AT_OVERVIEW", "").strip() == "1"
     exhaustive = os.getenv("KBD_SMOKE_EXHAUSTIVE", "").strip() == "1"
+    require_long_text = os.getenv("KBD_SMOKE_REQUIRE_LONG_TEXT", "1").strip() == "1"
     connection_only = os.getenv("KBD_SMOKE_CONNECTION_ONLY", "").strip() == "1"
     callback_result: tuple[str, str | None] | None = None
     authorization_seconds = 0.0
@@ -911,14 +912,16 @@ async def exercise() -> dict[str, object]:
                             "final overview and exhaustive evidence inventory disagree"
                         )
                     if long_text_item is None:
-                        raise RuntimeError(
-                            "terminal research exposed no long official text to verify"
+                        if require_long_text:
+                            raise RuntimeError(
+                                "terminal research exposed no long official text to verify"
+                            )
+                    else:
+                        long_text_characters, long_text_calls = await _verify_long_text(
+                            session,
+                            research_id,
+                            long_text_item,
                         )
-                    long_text_characters, long_text_calls = await _verify_long_text(
-                        session,
-                        research_id,
-                        long_text_item,
-                    )
                 expected_bill = os.getenv("KBD_SMOKE_EXPECT_BILL_NUMBER", "2219564").strip()
                 if expected_bill:
                     exact_bill_verified = expected_bill in json.dumps(
