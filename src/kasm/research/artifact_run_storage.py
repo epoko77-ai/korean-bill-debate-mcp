@@ -101,6 +101,8 @@ _LEGACY_DISCOVERY_STATE_KEY: Final = "run/discovery"
 _LEGACY_METADATA_STATE_KEY: Final = "run/metadata"
 _DISCOVERY_ROUTING_READY_KEY: Final = "run/discovery-routing-ready"
 _DOCUMENT_ROUTING_READY_KEY: Final = "run/document-routing-ready"
+_FIRST_PAGE_PREVIEW_KEY: Final = "run/first-page-preview"
+_FIRST_PAGE_PREVIEW_READY_KEY: Final = "run/first-page-preview-ready-v1"
 _FINALIZATION_CLAIM_LEASE_SECONDS: Final = 600
 _FINALIZATION_CLAIM_GENERATIONS: Final = 64
 
@@ -329,6 +331,129 @@ class ArtifactResearchRunStore:
         values = [first, *(value for value in following if value is not None)]
         return tuple(values)
 
+    def put_first_page_preview(
+        self,
+        research_id: str,
+        preview: ProvisionalResearchOverview,
+    ) -> ProvisionalResearchOverview:
+        """Publish an observed-only map after every discovery page one is ready.
+
+        The preview is deliberately separate from the complete discovery
+        boundary below.  It may orient a caller while follow-up pages are still
+        running, but it cannot route deferred work or contribute to final
+        coverage.  A small final marker binds the deterministic preview to all
+        planned page-one source hashes.
+        """
+
+        gateway = self._require_active(research_id)
+        first_pages = self._required_discovery_first_pages(research_id, gateway)
+        expected_rows = sum(item.total_count for item in first_pages)
+        fetched_rows = sum(item.row_count for item in first_pages)
+        expected_source_hash = _first_page_collection_source_hash(
+            gateway.discovery_partitions,
+            first_pages,
+        )
+        if (
+            preview.query != gateway.job.contract.query
+            or not preview.provisional
+            or preview.substantive_conclusion_available
+            or preview.source.source_complete is not False
+            or preview.source.source_rows_expected != expected_rows
+            or preview.source.source_rows_fetched != fetched_rows
+            or fetched_rows >= expected_rows
+            or preview.source_hash != expected_source_hash
+        ):
+            raise ValueError("first-page preview binding is invalid")
+
+        first_page_bindings = tuple(
+            {
+                "partition_id": item.partition_id,
+                "source_hash": item.source_hash,
+                "total_count": item.total_count,
+                "row_count": item.row_count,
+            }
+            for item in first_pages
+        )
+        first_pages_hash = canonical_hash(first_page_bindings)
+        pages_expected = sum(
+            max(1, (item.total_count + item.page_size - 1) // item.page_size)
+            for item in first_pages
+        )
+        readiness: dict[str, Any] = {
+            "query_fingerprint": gateway.job.query_fingerprint,
+            "index_revision": gateway.job.index_revision,
+            "source_hash": preview.source_hash,
+            "preview_hash": canonical_hash(_encode(preview)),
+            "first_pages_hash": first_pages_hash,
+            "partition_count": len(first_pages),
+            "partitions_complete": sum(item.total_count <= item.page_size for item in first_pages),
+            "pages_expected": pages_expected,
+            "pages_complete": len(first_pages),
+            "source_rows_expected": expected_rows,
+            "source_rows_fetched": fetched_rows,
+        }
+        existing_readiness = self._get_first_page_preview_readiness(
+            research_id,
+            gateway,
+        )
+        if existing_readiness is not None:
+            if dict(existing_readiness) != readiness:
+                raise ResearchRunConflictError(
+                    "immutable first-page preview readiness contains different state"
+                )
+            stored = self._get_bound_first_page_preview(
+                research_id,
+                gateway,
+                existing_readiness,
+            )
+            if stored is None:
+                raise ResearchRunStorageError("ready first-page preview is missing")
+            return stored
+
+        stored = self._put_fixed(
+            research_id,
+            ArtifactKind.RESOLUTION,
+            _FIRST_PAGE_PREVIEW_KEY,
+            "first_page_preview",
+            {
+                "query_fingerprint": gateway.job.query_fingerprint,
+                "index_revision": gateway.job.index_revision,
+                "source_hash": preview.source_hash,
+                "first_pages_hash": first_pages_hash,
+            },
+            preview,
+            expires_at=gateway.job.expires_at,
+        )
+        # Last write: status and overview readers never observe a payload that
+        # is not bound to every planned discovery page-one marker.
+        self._put_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            _FIRST_PAGE_PREVIEW_READY_KEY,
+            "first_page_preview_readiness",
+            {"research_id": research_id},
+            readiness,
+            expires_at=gateway.job.expires_at,
+        )
+        return stored
+
+    def get_first_page_preview(
+        self,
+        research_id: str,
+    ) -> ProvisionalResearchOverview | None:
+        """Return the immutable observed-only preview in constant reads."""
+
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return None
+        readiness = self._get_first_page_preview_readiness(research_id, gateway)
+        if readiness is None:
+            return None
+        preview = self._get_bound_first_page_preview(research_id, gateway, readiness)
+        if preview is None:
+            raise ResearchRunStorageError("ready first-page preview is missing")
+        return preview
+
     def put_discovery(self, research_id: str, state: DiscoveryStageState) -> DiscoveryStageState:
         gateway = self._require_active(research_id)
         if state.resolution.query != gateway.job.contract.query:
@@ -442,11 +567,14 @@ class ArtifactResearchRunStore:
                 readiness,
                 expires_at=gateway.job.expires_at,
             )
-        elif self._expect(
-            routing_value,
-            DiscoveryBoundaryReadiness,
-            "discovery routing readiness",
-        ) != readiness:
+        elif (
+            self._expect(
+                routing_value,
+                DiscoveryBoundaryReadiness,
+                "discovery routing readiness",
+            )
+            != readiness
+        ):
             raise ResearchRunConflictError(
                 "immutable discovery routing readiness contains different state"
             )
@@ -596,9 +724,7 @@ class ArtifactResearchRunStore:
             return None
         return decision
 
-    def get_status_partition(
-        self, research_id: str, partition_id: str
-    ) -> MetadataPartition | None:
+    def get_status_partition(self, research_id: str, partition_id: str) -> MetadataPartition | None:
         if not partition_id.strip():
             raise ValueError("status partition id is required")
         gateway = self.get_gateway(research_id)
@@ -668,10 +794,7 @@ class ArtifactResearchRunStore:
 
         shards = self._bounded_map(read_shard, shard_numbers, "kbd-deferred-route-read")
         routes = tuple(
-            route
-            for shard in shards
-            for route in shard.routes
-            if start <= route.position < stop
+            route for shard in shards for route in shard.routes if start <= route.position < stop
         )
         if tuple(item.position for item in routes) != tuple(range(start, stop)):
             raise ResearchRunStorageError("deferred route range is incomplete")
@@ -683,7 +806,20 @@ class ArtifactResearchRunStore:
             return None
         readiness = self._discovery_readiness_or_adopt(research_id, gateway)
         if readiness is None:
-            return None
+            preview_readiness = self._get_first_page_preview_readiness(
+                research_id,
+                gateway,
+            )
+            if preview_readiness is None:
+                return None
+            preview = self._get_bound_first_page_preview(
+                research_id,
+                gateway,
+                preview_readiness,
+            )
+            if preview is None:
+                raise ResearchRunStorageError("ready first-page preview is missing")
+            return preview
         record = self._get_fixed_record(
             research_id,
             ArtifactKind.RESOLUTION,
@@ -794,11 +930,9 @@ class ArtifactResearchRunStore:
         existing_readiness = self._get_document_readiness(research_id, gateway)
         if existing_readiness is not None:
             if (
-                existing_readiness.discovery_source_hash
-                != state.discovery.resolution.source_hash
+                existing_readiness.discovery_source_hash != state.discovery.resolution.source_hash
                 or existing_readiness.metadata_hash != canonical_hash(_encode(state))
-                or existing_readiness.manifest_hash
-                != canonical_hash(_encode(state.manifest))
+                or existing_readiness.manifest_hash != canonical_hash(_encode(state.manifest))
                 or existing_readiness.manifest_fingerprint != state.manifest.fingerprint
                 or existing_readiness.item_count != len(state.manifest.items)
             ):
@@ -895,11 +1029,14 @@ class ArtifactResearchRunStore:
                 readiness,
                 expires_at=gateway.job.expires_at,
             )
-        elif self._expect(
-            routing_value,
-            DocumentBoundaryReadiness,
-            "document routing readiness",
-        ) != readiness:
+        elif (
+            self._expect(
+                routing_value,
+                DocumentBoundaryReadiness,
+                "document routing readiness",
+            )
+            != readiness
+        ):
             raise ResearchRunConflictError(
                 "immutable document routing readiness contains different state"
             )
@@ -1102,9 +1239,7 @@ class ArtifactResearchRunStore:
                     or claimed_at.tzinfo is None
                     or not re.fullmatch(r"[0-9a-f]{32}", str(value.get("owner") or ""))
                 ):
-                    raise ResearchRunStorageError(
-                        "phase finalization claim binding is invalid"
-                    )
+                    raise ResearchRunStorageError("phase finalization claim binding is invalid")
                 if (now - claimed_at).total_seconds() < _FINALIZATION_CLAIM_LEASE_SECONDS:
                     return False
                 continue
@@ -1987,6 +2122,153 @@ class ArtifactResearchRunStore:
             raise ResearchRunStorageError("metadata page readiness identity is invalid")
         return readiness
 
+    def _required_discovery_first_pages(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+    ) -> tuple[MetadataPageReadiness, ...]:
+        """Read every planned discovery page-one marker in plan order."""
+
+        partitions = gateway.discovery_partitions
+        if not partitions:
+            raise ValueError("first-page preview requires discovery partitions")
+
+        def read_first(partition: MetadataPartition) -> MetadataPageReadiness | None:
+            return self._get_page_readiness(
+                research_id,
+                gateway,
+                MetadataPhase.DISCOVERY,
+                partition,
+                1,
+            )
+
+        values = self._bounded_map(
+            read_first,
+            partitions,
+            "kbd-first-page-preview-read",
+        )
+        if any(value is None for value in values):
+            raise LookupError("not every discovery first page is ready")
+        return cast(tuple[MetadataPageReadiness, ...], values)
+
+    def _get_first_page_preview_readiness(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+    ) -> Mapping[str, Any] | None:
+        value = self._get_fixed(
+            research_id,
+            ArtifactKind.MANIFEST,
+            _FIRST_PAGE_PREVIEW_READY_KEY,
+            "first_page_preview_readiness",
+        )
+        if value is None:
+            return None
+        expected_fields = {
+            "query_fingerprint",
+            "index_revision",
+            "source_hash",
+            "preview_hash",
+            "first_pages_hash",
+            "partition_count",
+            "partitions_complete",
+            "pages_expected",
+            "pages_complete",
+            "source_rows_expected",
+            "source_rows_fetched",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected_fields:
+            raise ResearchRunStorageError("first-page preview readiness is invalid")
+        if (
+            value.get("query_fingerprint") != gateway.job.query_fingerprint
+            or value.get("index_revision") != gateway.job.index_revision
+            or any(
+                not isinstance(value.get(name), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", cast(str, value.get(name)))
+                for name in ("source_hash", "preview_hash", "first_pages_hash")
+            )
+        ):
+            raise ResearchRunStorageError("first-page preview readiness binding is invalid")
+        count_fields = (
+            "partition_count",
+            "partitions_complete",
+            "pages_expected",
+            "pages_complete",
+            "source_rows_expected",
+            "source_rows_fetched",
+        )
+        if any(type(value.get(name)) is not int for name in count_fields):
+            raise ResearchRunStorageError("first-page preview readiness counts are invalid")
+        partition_count = cast(int, value["partition_count"])
+        partitions_complete = cast(int, value["partitions_complete"])
+        pages_expected = cast(int, value["pages_expected"])
+        pages_complete = cast(int, value["pages_complete"])
+        source_rows_expected = cast(int, value["source_rows_expected"])
+        source_rows_fetched = cast(int, value["source_rows_fetched"])
+        if (
+            partition_count != len(gateway.discovery_partitions)
+            or pages_complete != partition_count
+            or not 0 <= partitions_complete <= partition_count
+            or pages_expected < pages_complete
+            or source_rows_expected < 0
+            or not 0 <= source_rows_fetched <= source_rows_expected
+        ):
+            raise ResearchRunStorageError("first-page preview readiness counts are invalid")
+        return value
+
+    def _get_bound_first_page_preview(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+        readiness: Mapping[str, Any],
+    ) -> ProvisionalResearchOverview | None:
+        record = self._get_fixed_record(
+            research_id,
+            ArtifactKind.RESOLUTION,
+            _FIRST_PAGE_PREVIEW_KEY,
+            "first_page_preview",
+        )
+        if record is None:
+            return None
+        entity, value = record
+        preview = self._expect(value, ProvisionalResearchOverview, "first-page preview")
+        if (
+            set(entity)
+            != {
+                "query_fingerprint",
+                "index_revision",
+                "source_hash",
+                "first_pages_hash",
+            }
+            or entity.get("query_fingerprint") != gateway.job.query_fingerprint
+            or entity.get("index_revision") != gateway.job.index_revision
+            or entity.get("source_hash") != readiness.get("source_hash")
+            or entity.get("first_pages_hash") != readiness.get("first_pages_hash")
+            or preview.query != gateway.job.contract.query
+            or preview.source_hash != readiness.get("source_hash")
+            or preview.source.source_complete is not False
+            or preview.source.source_rows_expected != readiness.get("source_rows_expected")
+            or preview.source.source_rows_fetched != readiness.get("source_rows_fetched")
+            or canonical_hash(_encode(preview)) != readiness.get("preview_hash")
+        ):
+            raise ResearchRunStorageError("first-page preview binding is invalid")
+        return preview
+
+    def _first_page_preview_progress(
+        self,
+        research_id: str,
+        gateway: GatewayPlanState,
+    ) -> tuple[int, int, int, int]:
+        readiness = self._get_first_page_preview_readiness(research_id, gateway)
+        if readiness is None:
+            raise ResearchRunStorageError("first-page preview readiness is missing")
+        return (
+            cast(int, readiness["partition_count"]),
+            cast(int, readiness["partitions_complete"]),
+            cast(int, readiness["pages_expected"]),
+            cast(int, readiness["pages_complete"]),
+        )
+
     def _get_gateway_any(self, research_id: str) -> GatewayPlanState | None:
         value = self._get_fixed(
             research_id,
@@ -2119,8 +2401,7 @@ class ArtifactResearchRunStore:
             entity.get("query_fingerprint") != gateway.job.query_fingerprint
             or entity.get("index_revision") != gateway.job.index_revision
             or entity.get("boundary_hash") != boundary_hash
-            or entity.get("binding_hash")
-            != _hot_binding_hash(boundary_hash, logical_key, value)
+            or entity.get("binding_hash") != _hot_binding_hash(boundary_hash, logical_key, value)
         ):
             raise ResearchRunStorageError("hot routing artifact binding is invalid")
         return entity, value
@@ -2390,9 +2671,7 @@ def _status_partition_key(partition_id: str) -> str:
 
 def _hot_binding_hash(boundary_hash: str, logical_key: str, value: Any) -> str:
     value_hash = canonical_hash(_encode(value))
-    return hashlib.sha256(
-        f"{boundary_hash}\0{logical_key}\0{value_hash}".encode()
-    ).hexdigest()
+    return hashlib.sha256(f"{boundary_hash}\0{logical_key}\0{value_hash}".encode()).hexdigest()
 
 
 def _hot_entity(
@@ -2559,6 +2838,43 @@ def _required_string(value: Mapping[str, Any], name: str) -> str:
     if not isinstance(result, str):
         raise ValueError("encoded run string field is invalid")
     return result
+
+
+def _first_page_collection_source_hash(
+    partitions: Sequence[MetadataPartition],
+    first_pages: Sequence[MetadataPageReadiness],
+) -> str:
+    """Reproduce MetadataCollection.source_hash for page-one-only results."""
+
+    if len(partitions) != len(first_pages):
+        raise ValueError("first-page preview partition accounting is invalid")
+    by_id = {item.partition_id: item for item in first_pages}
+    if len(by_id) != len(first_pages):
+        raise ValueError("first-page preview contains duplicate partitions")
+    ordered = sorted(
+        partitions,
+        key=lambda item: (
+            item.kind.value,
+            item.dataset,
+            tuple((name, str(value)) for name, value in item.parameters),
+            item.partition_id,
+        ),
+    )
+    collection_digest = hashlib.sha256()
+    for partition in ordered:
+        try:
+            first = by_id[partition.partition_id]
+        except KeyError as exc:
+            raise ValueError("first-page preview is missing a planned partition") from exc
+        result_digest = hashlib.sha256()
+        result_digest.update(b"1:")
+        result_digest.update(first.source_hash.encode())
+        result_digest.update(b"\n")
+        collection_digest.update(partition.partition_id.encode())
+        collection_digest.update(b":")
+        collection_digest.update(result_digest.hexdigest().encode())
+        collection_digest.update(b"\n")
+    return collection_digest.hexdigest()
 
 
 def _candidate_bill_number(decision: CandidateDecision) -> str:

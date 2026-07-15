@@ -563,10 +563,7 @@ class DiscoveryBoundaryReadiness:
             < 0
             or self.route_shard_size != ROUTING_SHARD_SIZE
             or self.deferred_route_shard_count
-            != (
-                (self.deferred_route_count + ROUTING_SHARD_SIZE - 1)
-                // ROUTING_SHARD_SIZE
-            )
+            != ((self.deferred_route_count + ROUTING_SHARD_SIZE - 1) // ROUTING_SHARD_SIZE)
         ):
             raise ValueError("discovery readiness binding is invalid")
 
@@ -1013,6 +1010,14 @@ class ResearchRunStore(Protocol):
 
     def get_discovery(self, research_id: str) -> DiscoveryStageState | None: ...
 
+    def put_first_page_preview(
+        self,
+        research_id: str,
+        preview: ProvisionalResearchOverview,
+    ) -> ProvisionalResearchOverview: ...
+
+    def get_first_page_preview(self, research_id: str) -> ProvisionalResearchOverview | None: ...
+
     def get_deferred_manifest(self, research_id: str) -> DeferredWorkManifest | None: ...
 
     def get_accepted_bill(self, research_id: str, bill_number: str) -> CandidateDecision | None: ...
@@ -1131,6 +1136,7 @@ class InMemoryResearchRunStore:
         self._pages: dict[tuple[str, MetadataPhase, str, int], ApiPage] = {}
         self._page_readiness: dict[tuple[str, MetadataPhase, str, int], MetadataPageReadiness] = {}
         self._discoveries: dict[str, DiscoveryStageState] = {}
+        self._first_page_previews: dict[str, ProvisionalResearchOverview] = {}
         self._deferred_manifests: dict[str, DeferredWorkManifest] = {}
         self._accepted_bills: dict[tuple[str, str], CandidateDecision] = {}
         self._document_bills: dict[tuple[str, str], CandidateDecision] = {}
@@ -1276,6 +1282,29 @@ class InMemoryResearchRunStore:
         with self._lock:
             return self._discoveries.get(research_id)
 
+    def put_first_page_preview(
+        self,
+        research_id: str,
+        preview: ProvisionalResearchOverview,
+    ) -> ProvisionalResearchOverview:
+        with self._lock:
+            gateway = self._gateways.get(research_id)
+            if gateway is None:
+                raise LookupError("research gateway is not available")
+            if (
+                preview.query != gateway.job.contract.query
+                or preview.source.source_complete is not False
+                or preview.source.source_rows_expected is None
+                or preview.source.source_rows_fetched is None
+                or preview.source.source_rows_fetched >= preview.source.source_rows_expected
+            ):
+                raise ValueError("first-page preview is not an incomplete bound inventory")
+            return self._put_once(self._first_page_previews, research_id, preview)
+
+    def get_first_page_preview(self, research_id: str) -> ProvisionalResearchOverview | None:
+        with self._lock:
+            return self._first_page_previews.get(research_id)
+
     def get_deferred_manifest(self, research_id: str) -> DeferredWorkManifest | None:
         with self._lock:
             manifest = self._deferred_manifests.get(research_id)
@@ -1295,9 +1324,7 @@ class InMemoryResearchRunStore:
         with self._lock:
             return self._document_bills.get((research_id, bill_number))
 
-    def get_status_partition(
-        self, research_id: str, partition_id: str
-    ) -> MetadataPartition | None:
+    def get_status_partition(self, research_id: str, partition_id: str) -> MetadataPartition | None:
         with self._lock:
             return self._status_partitions.get((research_id, partition_id))
 
@@ -1325,9 +1352,7 @@ class InMemoryResearchRunStore:
                 shard = self._deferred_route_shards.get((research_id, number))
                 if shard is None:
                     return ()
-                selected.extend(
-                    route for route in shard.routes if start <= route.position < stop
-                )
+                selected.extend(route for route in shard.routes if start <= route.position < stop)
             return tuple(selected)
 
     def get_provisional_overview(self, research_id: str) -> ProvisionalResearchOverview | None:
@@ -1338,7 +1363,9 @@ class InMemoryResearchRunStore:
             if overview is not None:
                 return overview
             discovery = self._discoveries.get(research_id)
-            return build_provisional_research_overview(discovery) if discovery is not None else None
+            if discovery is not None:
+                return build_provisional_research_overview(discovery)
+            return self._first_page_previews.get(research_id)
 
     def put_bill_discovery(
         self, research_id: str, outcome: BillDocumentDiscovery
@@ -1959,6 +1986,7 @@ class ResearchEngine:
             stage = "deferred_metadata"
         else:
             stage = "metadata_discovery"
+        first_page_preview = self.runs.get_first_page_preview(research_id)
         return DerivedResearchStatus(
             research_id=research_id,
             stage=stage,
@@ -1971,7 +1999,9 @@ class ResearchEngine:
             documents_expected=documents_expected,
             documents_complete=len(terminal_outcomes),
             documents_failed=documents_failed,
-            overview_available=snapshot is not None or deferred is not None,
+            overview_available=(
+                snapshot is not None or deferred is not None or first_page_preview is not None
+            ),
             snapshot_ready=snapshot is not None,
             complete=bool(snapshot is not None and snapshot.coverage.complete),
         )
@@ -2474,7 +2504,106 @@ class ResearchEngine:
                         follow_up,
                         task.credential_capability,
                     )
+            if phase is MetadataPhase.DISCOVERY:
+                self._try_publish_first_page_preview(task.research_id)
         return existing
+
+    def _try_publish_first_page_preview(
+        self,
+        research_id: str,
+    ) -> ProvisionalResearchOverview | None:
+        """Publish a truthful observed-only map without gating full discovery.
+
+        Every planned discovery partition must have its immutable first page. The
+        preview is never used for deferred routing, exact absence decisions, corpus
+        recall, coverage completion, or finalization. Full page collection continues
+        unchanged and later replaces this bounded view.
+        """
+
+        from .overview import build_provisional_research_overview
+
+        gateway = self._required_gateway(research_id)
+        # Exact bill requests already have a bounded complete path. More importantly,
+        # an absent identity cannot be rejected from an observed source prefix.
+        if gateway.research_plan.contract.bill_numbers:
+            return None
+        existing = self.runs.get_first_page_preview(research_id)
+        if existing is not None:
+            # The payload/readiness marker may have become durable just before a
+            # hosted status-checkpoint write failed. Re-put idempotently so Queue
+            # redelivery heals that final visibility boundary.
+            return self.runs.put_first_page_preview(research_id, existing)
+        if self.runs.get_deferred_manifest(research_id) is not None:
+            return None
+
+        partitions = gateway.discovery_partitions
+        results: dict[str, ApiResult] = {}
+        for partition in partitions:
+            readiness = self.runs.page_readiness_for(
+                research_id,
+                MetadataPhase.DISCOVERY,
+                partition.partition_id,
+                (1,),
+            )
+            if len(readiness) != 1:
+                return None
+            first = self.runs.get_page(
+                research_id,
+                MetadataPhase.DISCOVERY,
+                partition.partition_id,
+                1,
+            )
+            if first is None or first.total_count is None:
+                return None
+            validate_fetched_page(
+                partition,
+                MetadataPageWork(partition.partition_id, 1),
+                first,
+            )
+            results[partition.partition_id] = ApiResult(
+                dataset=first.dataset,
+                page_size=first.page_size,
+                total_count=first.total_count,
+                rows=first.rows,
+                pages=(first,),
+            )
+
+        client = _ArtifactResultClient(partitions, results)
+        collection = MetadataCollector(cast(AssemblyOpenApiClient, client)).collect(partitions)
+        # If every source happens to fit on page one, the normal discovery barrier
+        # will publish the authoritative complete map immediately; a second artifact
+        # would add no latency or information.
+        if collection.coverage.source_complete:
+            return None
+        filtered, report = _strict_filter(
+            collection,
+            date_from=gateway.partition_plan.effective_date_from,
+            date_to=gateway.partition_plan.effective_date_to,
+            committees=gateway.research_plan.contract.committees,
+        )
+        entity_plan = replace(
+            gateway.research_plan,
+            contract=replace(
+                gateway.research_plan.contract,
+                date_from=None,
+                date_to=None,
+            ),
+        )
+        resolution = self.resolver.resolve(entity_plan, filtered)
+        preview = build_provisional_research_overview(
+            DiscoveryStageState(
+                collection=collection,
+                filtered_collection=filtered,
+                filter_report=report,
+                resolution=resolution,
+                status_partitions=(),
+                document_bill_numbers=(),
+                corpus_recall=None,
+            )
+        )
+        if preview.accepted_total == 0:
+            return None
+        return self.runs.put_first_page_preview(research_id, preview)
 
     def _complete_discovery(
         self,

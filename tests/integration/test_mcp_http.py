@@ -93,8 +93,9 @@ class _ResearchBackend:
         *,
         offset: int = 0,
         page_size: int = 20,
+        view_source_hash: str | None = None,
     ) -> dict[str, Any]:
-        del offset, page_size
+        del offset, page_size, view_source_hash
         return {
             "research_id": research_id,
             "phase": "final",

@@ -16,10 +16,12 @@ from .engine import (
     GatewayPlanState,
     MetadataStageState,
 )
+from .overview import ProvisionalResearchOverview
 from .results import ResearchSnapshotSummary
 
 _STATUS_KEYS: Final = {
     "gateway": "run/status/gateway-v1",
+    "preview": "run/status/preview-v1",
     "discovery": "run/status/discovery-v1",
     "metadata": "run/status/metadata-v1",
 }
@@ -33,7 +35,7 @@ class BoundedResearchStatusView:
 
 
 class StatusSnapshotResearchRunStore(ArtifactResearchRunStore):
-    """Add three immutable checkpoints without changing source artifact storage."""
+    """Add immutable bounded checkpoints without changing source artifacts."""
 
     def put_gateway(self, research_id: str, state: GatewayPlanState) -> GatewayPlanState:
         stored = super().put_gateway(research_id, state)
@@ -44,6 +46,17 @@ class StatusSnapshotResearchRunStore(ArtifactResearchRunStore):
         stored = super().put_discovery(research_id, state)
         gateway = self._required_status_gateway(research_id)
         self._put_status("discovery", gateway, _discovery_status(gateway, stored))
+        return stored
+
+    def put_first_page_preview(
+        self,
+        research_id: str,
+        preview: ProvisionalResearchOverview,
+    ) -> ProvisionalResearchOverview:
+        stored = super().put_first_page_preview(research_id, preview)
+        gateway = self._required_status_gateway(research_id)
+        progress = self._first_page_preview_progress(research_id, gateway)
+        self._put_status("preview", gateway, _preview_status(gateway, progress))
         return stored
 
     def put_metadata(self, research_id: str, state: MetadataStageState) -> MetadataStageState:
@@ -120,7 +133,7 @@ class StatusSnapshotResearchRunStore(ArtifactResearchRunStore):
         research_id: str,
         gateway: GatewayPlanState,
     ) -> DerivedResearchStatus | None:
-        for boundary in ("metadata", "discovery", "gateway"):
+        for boundary in ("metadata", "discovery", "preview", "gateway"):
             value = self._get_fixed(
                 research_id,
                 ArtifactKind.MANIFEST,
@@ -160,6 +173,22 @@ def _gateway_status(gateway: GatewayPlanState) -> DerivedResearchStatus:
         "metadata_discovery",
         partitions=partitions,
         pages=partitions,
+    )
+
+
+def _preview_status(
+    gateway: GatewayPlanState,
+    progress: tuple[int, int, int, int],
+) -> DerivedResearchStatus:
+    partitions, partitions_done, pages, pages_done = progress
+    return _status(
+        gateway.job.id,
+        "metadata_discovery",
+        partitions=partitions,
+        partitions_done=partitions_done,
+        pages=pages,
+        pages_done=pages_done,
+        overview=True,
     )
 
 

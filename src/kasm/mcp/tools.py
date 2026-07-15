@@ -59,6 +59,7 @@ class ResearchBackend(Protocol):
         *,
         offset: int = 0,
         page_size: int = 20,
+        view_source_hash: str | None = None,
     ) -> Any: ...
 
     def get_research_page(
@@ -417,8 +418,9 @@ class KasmTools:
 
         Poll the same research_id. Never call start_research again merely because work is still
         running, and never infer completeness from progress or a non-empty result. When
-        ``overview_preview`` is present, it is the first bounded page of the complete candidate
-        map and may be shown immediately while the same research job continues in the background.
+        ``overview_preview`` is present, it may be an explicitly incomplete map of candidates
+        observed on the first official pages. Show it as early orientation while the same job
+        continues; only ``metadata_inventory_complete=true`` closes metadata discovery.
         """
         _validate_identifier(research_id, "research_id")
         backend = self._research_backend()
@@ -465,12 +467,14 @@ class KasmTools:
                 "get_research_overview",
                 {"research_id": research_id, "page_size": 20},
                 ko=(
-                    "원문 조사가 진행되는 동안 확인된 전체 후보 지도를 먼저 읽으세요. "
+                    "원문 조사가 진행되는 동안 먼저 확인된 후보 지도를 읽으세요. "
+                    "metadata_inventory_complete가 false이면 아직 전체 후보 목록도 아니며, "
                     "이 단계에서는 실질적 결론을 내리면 안 됩니다."
                 ),
                 en=(
-                    "Read the complete provisional candidate map while source documents are "
-                    "still being verified; do not draw a substantive conclusion yet."
+                    "Read the observed candidate map while source documents are still being "
+                    "verified. If metadata_inventory_complete is false, even candidate discovery "
+                    "is still incomplete; do not draw a substantive conclusion yet."
                 ),
             )
         else:
@@ -489,6 +493,7 @@ class KasmTools:
         research_id: str,
         offset: int = 0,
         page_size: int = 20,
+        view_source_hash: str | None = None,
     ) -> dict[str, Any]:
         """Return the core-first map before opening selected or exhaustive source text.
 
@@ -498,9 +503,12 @@ class KasmTools:
         ``catalog.page.next_offset``이 있으면 같은 page_size로 끝까지 읽으세요. metadata
         단계의 결과는 명시적인 잠정 후보 지도일 뿐이며 결론으로 사용하면 안 됩니다.
 
-        This is the complete orientation layer, not a top-N result. Exhaust its catalog pages,
-        then open the routed core evidence. Use get_research_page only when the user requests the
-        full evidence inventory and use scope="all" only for an exhaustive source-text read.
+        Once ``metadata_inventory_complete=true``, this is the complete metadata orientation
+        layer rather than a top-N result. Before then it is an observed first-page preview only.
+        Follow ``next_action`` exactly: metadata pagination includes ``view_source_hash`` so every
+        offset remains pinned to one immutable map even if final results become ready. Use
+        get_research_page for the full evidence inventory and scope="all" only for an exhaustive
+        source-text read.
         """
 
         _validate_identifier(research_id, "research_id")
@@ -508,11 +516,21 @@ class KasmTools:
             raise ValueError("offset must not be negative")
         if not 1 <= page_size <= 100:
             raise ValueError("page_size must be between 1 and 100")
+        if view_source_hash is not None and (
+            len(view_source_hash) != 64
+            or any(character not in "0123456789abcdef" for character in view_source_hash)
+        ):
+            raise ValueError("view_source_hash must be a lowercase SHA-256 digest")
+        overview_arguments: dict[str, Any] = {
+            "offset": offset,
+            "page_size": page_size,
+        }
+        if view_source_hash is not None:
+            overview_arguments["view_source_hash"] = view_source_hash
         payload = _public_backend_payload(
             self._research_backend().get_research_overview(
                 research_id,
-                offset=offset,
-                page_size=page_size,
+                **overview_arguments,
             )
         )
         payload.setdefault("research_id", research_id)
@@ -527,13 +545,19 @@ class KasmTools:
         page = page_value if isinstance(page_value, Mapping) else catalog
         next_offset = page.get("next_offset")
         if next_offset is not None:
+            next_arguments: dict[str, Any] = {
+                "research_id": research_id,
+                "offset": int(next_offset),
+                "page_size": page_size,
+            }
+            if payload.get("phase") == "metadata":
+                source_hash = str(payload.get("source_hash") or "")
+                if len(source_hash) != 64:
+                    raise RuntimeError("metadata overview lacks a stable source hash")
+                next_arguments["view_source_hash"] = source_hash
             payload["next_action"] = _next_action(
                 "get_research_overview",
-                {
-                    "research_id": research_id,
-                    "offset": int(next_offset),
-                    "page_size": page_size,
-                },
+                next_arguments,
                 ko="같은 page_size로 법안·회의·문서 지도의 다음 페이지를 읽으세요.",
                 en="Read the next bill, meeting, and document catalog page.",
             )
@@ -545,8 +569,14 @@ class KasmTools:
             payload["next_action"] = _next_action(
                 "get_research_status",
                 {"research_id": research_id},
-                ko="후보 지도는 확보했습니다. 같은 연구 ID의 원문 조사 완료를 확인하세요.",
-                en="The candidate map is ready; poll the same research ID for source completion.",
+                ko=(
+                    "현재 확인된 후보 지도는 확보했습니다. 같은 연구 ID를 계속 확인해 "
+                    "전체 후보·공식 원문 조사를 이어가세요."
+                ),
+                en=(
+                    "The currently observed candidate map is ready. Poll the same research ID "
+                    "for complete candidate discovery and official-source verification."
+                ),
                 retry_after_seconds=2,
             )
             return payload
@@ -627,10 +657,7 @@ class KasmTools:
         full_text_required_total = int(payload.get("full_text_required_total") or 0)
         first_full_text_id = str(payload.get("first_full_text_required_id") or "").strip()
         payload["comprehensive_answer_allowed"] = (
-            exhaustive
-            and page_complete
-            and coverage_complete
-            and full_text_required_total == 0
+            exhaustive and page_complete and coverage_complete and full_text_required_total == 0
         )
         if next_cursor:
             payload["next_action"] = _next_action(
@@ -932,8 +959,7 @@ class KasmTools:
         exact_speeches = [
             speech
             for speech in speeches
-            if isinstance(speech, dict)
-            and str(speech.get("speech_id") or "") in allowed_speech_ids
+            if isinstance(speech, dict) and str(speech.get("speech_id") or "") in allowed_speech_ids
         ]
         payload["speeches"] = exact_speeches
         raw_threads = payload.get("discussion_threads")
@@ -945,9 +971,7 @@ class KasmTools:
             raw_matched_ids = thread.get("matched_speech_ids")
             matched_ids = raw_matched_ids if isinstance(raw_matched_ids, list) else []
             allowed_matches = sorted(
-                str(speech_id)
-                for speech_id in matched_ids
-                if str(speech_id) in allowed_speech_ids
+                str(speech_id) for speech_id in matched_ids if str(speech_id) in allowed_speech_ids
             )
             if not allowed_matches:
                 continue
@@ -968,10 +992,7 @@ class KasmTools:
             for event in timeline
             if isinstance(event, dict)
             and (
-                (
-                    event.get("bill_no")
-                    and str(event.get("bill_no")) in requested_bill_numbers
-                )
+                (event.get("bill_no") and str(event.get("bill_no")) in requested_bill_numbers)
                 or (
                     event.get("event_type") == "debate"
                     and str(event.get("meeting_id") or "") in allowed_meeting_ids
@@ -990,9 +1011,7 @@ class KasmTools:
                     if isinstance(item, dict)
                     and str(item.get("bill_no") or "") in requested_bill_numbers
                 ]
-                bill_candidates.update(
-                    {"items": exact_items, "total": len(exact_items)}
-                )
+                bill_candidates.update({"items": exact_items, "total": len(exact_items)})
             speech_candidates = inventory.get("speech_candidates")
             if isinstance(speech_candidates, dict):
                 raw_items = speech_candidates.get("items")
@@ -1003,14 +1022,10 @@ class KasmTools:
                     if isinstance(item, dict)
                     and str(item.get("speech_id") or "") in allowed_speech_ids
                 ]
-                speech_candidates.update(
-                    {"items": exact_items, "total": len(exact_items)}
-                )
+                speech_candidates.update({"items": exact_items, "total": len(exact_items)})
             link_inventory = inventory.get("links")
             if isinstance(link_inventory, dict):
-                link_inventory.update(
-                    {"items": exact_links, "total": len(exact_links)}
-                )
+                link_inventory.update({"items": exact_links, "total": len(exact_links)})
             selected = inventory.get("selected_for_synthesis")
             if isinstance(selected, dict):
                 selected.update(

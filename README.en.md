@@ -168,15 +168,22 @@ natural-language question
   → answer-ready evidence with official URLs and source locators
 ```
 
-For broad research, `v1.0.0` returns a `research_id` immediately, then guides the client through
-status polling, a complete paginated bill/meeting/document map, prioritized core sources, and any
-additional sources selected by the user. Only an explicit exhaustive request walks the entire
-evidence index with `exhaustive=true` and every long source range. Long text is not replaced by a
-truncated preview: it is routed by exact ID, size, hash, URL, and locator.
+For broad research, `v1.0.0` returns a `research_id` immediately. It first exposes candidates
+validated on the first official page of every planned source family, explicitly marked
+`metadata_inventory_complete=false`, while the same job continues through every source page. It
+then guides the client through the complete paginated bill/meeting/document map, prioritized core
+sources, and any additional sources selected by the user. Only an explicit exhaustive request
+walks the entire evidence index with `exhaustive=true` and every long source range. Long text is
+not replaced by a truncated preview: it is routed by exact ID, size, hash, URL, and locator.
 
-As soon as the first complete candidate map is ready, `get_research_status` includes up to 100
-entries in `overview_preview`. Claude.ai and ChatGPT can therefore show useful progress without an
-extra serverless round trip, then continue from the returned `next_offset` when the map is longer.
+As soon as all planned first pages are ready, `get_research_status` includes up to 100 observed
+entries in `overview_preview`. Claude.ai and ChatGPT can show useful progress without waiting for
+full discovery. This preview is one orientation page of at most 100 entries. While
+`metadata_inventory_complete=false`, clients must keep polling the same `research_id` rather than
+mixing offset pages from a changing inventory. Only the complete metadata map is paged through
+every returned `next_offset`.
+Its `next_action` includes a `view_source_hash`, pinning every offset to one immutable candidate map
+even if the final result becomes ready during traversal.
 
 In local mode, SQLite is a private cache rather than a bundled source database. Hosted instances use
 ephemeral cache storage. Current bill status is refreshed from the official status API. See the

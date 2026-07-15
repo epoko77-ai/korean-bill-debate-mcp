@@ -26,13 +26,9 @@ _CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 _CHATGPT_ORIGIN = "https://chatgpt.com"
 _CHATGPT_REPRESENTATIVE_CALLBACK = "https://chatgpt.com/kbd-mcp-protocol-callback"
 _EXACT_QUERY = (
-    "2219564번 의안의 처리상태, 회의록, 전문위원 검토보고서를 "
-    "공식 원문 기준으로 조사해줘"
+    "2219564번 의안의 처리상태, 회의록, 전문위원 검토보고서를 공식 원문 기준으로 조사해줘"
 )
-_BROAD_QUERY = (
-    "2026년 7월 인공지능 관련 법안과 위원회 논의를 "
-    "공식 원문 기준으로 조사해줘"
-)
+_BROAD_QUERY = "2026년 7월 인공지능 관련 법안과 위원회 논의를 공식 원문 기준으로 조사해줘"
 _SAFE_PARENT_ENV = (
     "ALL_PROXY",
     "HOME",
@@ -118,10 +114,17 @@ class ChildResult:
                 "research_receipt_seconds": payload.get("research_receipt_seconds"),
                 "first_overview_seconds": payload.get("first_overview_seconds"),
                 "first_overview_phase": payload.get("first_overview_phase"),
-                "accepted_total": payload.get("first_overview_accepted_total"),
-                "metadata_or_final_catalog_pages": payload.get(
-                    "first_overview_catalog_pages"
+                "first_overview_inventory_complete": payload.get(
+                    "first_overview_inventory_complete"
                 ),
+                "first_overview_source_complete": payload.get("first_overview_source_complete"),
+                "first_overview_pending_total_known": payload.get(
+                    "first_overview_pending_total_known"
+                ),
+                "first_overview_coverage_complete": payload.get("first_overview_coverage_complete"),
+                "first_overview_catalog_truncated": payload.get("first_overview_catalog_truncated"),
+                "accepted_total": payload.get("first_overview_accepted_total"),
+                "metadata_or_final_catalog_pages": payload.get("first_overview_catalog_pages"),
                 "terminal_status": payload.get("terminal_status"),
                 "research_elapsed_seconds": payload.get("research_elapsed_seconds"),
                 "final_catalog_total": payload.get("final_catalog_total"),
@@ -131,12 +134,8 @@ class ChildResult:
                 "evidence_pages": payload.get("evidence_inventory_pages"),
                 "long_text_characters": payload.get("long_text_characters"),
                 "long_text_calls": payload.get("long_text_calls"),
-                "first_overview_duplicates": payload.get(
-                    "first_overview_duplicate_count"
-                ),
-                "final_catalog_duplicates": payload.get(
-                    "final_catalog_duplicate_count"
-                ),
+                "first_overview_duplicates": payload.get("first_overview_duplicate_count"),
+                "final_catalog_duplicates": payload.get("final_catalog_duplicate_count"),
                 "evidence_duplicates": payload.get("evidence_duplicate_count"),
                 "slowest_status_seconds": payload.get("slowest_status_seconds"),
             },
@@ -155,8 +154,7 @@ def _mount_scenarios() -> tuple[Scenario, ...]:
     # inject the exact URI observed during a real connector registration; the
     # default deliberately identifies itself as a representative HTTPS path.
     chatgpt_callback = (
-        os.getenv("KBD_CHATGPT_REDIRECT_URI", "").strip()
-        or _CHATGPT_REPRESENTATIVE_CALLBACK
+        os.getenv("KBD_CHATGPT_REDIRECT_URI", "").strip() or _CHATGPT_REPRESENTATIVE_CALLBACK
     )
     return (
         Scenario(
@@ -185,8 +183,7 @@ def _exact_scenario() -> Scenario:
         platform="chatgpt.com",
         origin=_CHATGPT_ORIGIN,
         callback_uri=(
-            os.getenv("KBD_CHATGPT_REDIRECT_URI", "").strip()
-            or _CHATGPT_REPRESENTATIVE_CALLBACK
+            os.getenv("KBD_CHATGPT_REDIRECT_URI", "").strip() or _CHATGPT_REPRESENTATIVE_CALLBACK
         ),
         wait_seconds=180,
         exhaustive=True,
@@ -290,9 +287,7 @@ def _child_environment(
     """Build an allow-listed environment that cannot expose paid LLM credentials."""
 
     child = {
-        name: value
-        for name in _SAFE_PARENT_ENV
-        if (value := os.environ.get(name)) is not None
+        name: value for name in _SAFE_PARENT_ENV if (value := os.environ.get(name)) is not None
     }
     child.update(
         {
@@ -384,19 +379,36 @@ def _acceptance_failures(scenario: Scenario, payload: dict[str, Any]) -> list[st
     ):
         failures.append("research receipt exceeded 15 seconds")
     if payload.get("first_overview_verified") is not True:
-        failures.append("first complete candidate map was not verified")
+        failures.append("first candidate orientation was not verified")
     if payload.get("first_overview_duplicate_count") != 0:
         failures.append("first candidate map duplicate count was not verified as zero")
     first_seconds = _number(payload, "first_overview_seconds")
     accepted_total = int(payload.get("first_overview_accepted_total") or 0)
     if accepted_total < 1:
         failures.append("candidate map contained no accepted entities")
+    first_phase = payload.get("first_overview_phase")
+    if first_phase == "metadata":
+        if (
+            payload.get("first_overview_source_complete") is not False
+            or payload.get("first_overview_pending_total_known") is not False
+            or payload.get("first_overview_coverage_complete") is not False
+            or type(payload.get("first_overview_inventory_complete")) is not bool
+            or type(payload.get("first_overview_catalog_truncated")) is not bool
+        ):
+            failures.append("metadata orientation violated fail-closed readiness semantics")
+    elif first_phase == "final":
+        if payload.get("first_overview_pending_total_known") is not True or (
+            payload.get("first_overview_source_complete")
+            is not payload.get("first_overview_coverage_complete")
+        ):
+            failures.append("final orientation readiness semantics are inconsistent")
+    else:
+        failures.append("first candidate orientation phase is invalid")
 
     if scenario.role == "broad_first":
         if (
             first_seconds is None
-            or first_seconds
-            > _ACCEPTANCE_THRESHOLDS["broad_first_overview_seconds"]
+            or first_seconds > _ACCEPTANCE_THRESHOLDS["broad_first_overview_seconds"]
         ):
             failures.append("broad first overview exceeded 120 seconds")
         return failures
@@ -409,14 +421,10 @@ def _acceptance_failures(scenario: Scenario, payload: dict[str, Any]) -> list[st
     if scenario.role == "exact":
         if (
             first_seconds is None
-            or first_seconds
-            > _ACCEPTANCE_THRESHOLDS["exact_first_overview_seconds"]
+            or first_seconds > _ACCEPTANCE_THRESHOLDS["exact_first_overview_seconds"]
         ):
             failures.append("exact first overview exceeded 35 seconds")
-        if (
-            elapsed is None
-            or elapsed > _ACCEPTANCE_THRESHOLDS["exact_terminal_seconds"]
-        ):
+        if elapsed is None or elapsed > _ACCEPTANCE_THRESHOLDS["exact_terminal_seconds"]:
             failures.append("exact terminal result exceeded 180 seconds")
         if payload.get("exact_bill_verified") is not True:
             failures.append("exact bill 2219564 identity was not preserved")
@@ -435,42 +443,30 @@ def _acceptance_failures(scenario: Scenario, payload: dict[str, Any]) -> list[st
     elif scenario.role == "broad_terminal":
         if (
             first_seconds is None
-            or first_seconds
-            > _ACCEPTANCE_THRESHOLDS["broad_first_overview_seconds"]
+            or first_seconds > _ACCEPTANCE_THRESHOLDS["broad_first_overview_seconds"]
         ):
             failures.append("broad first overview exceeded 120 seconds")
-        if (
-            elapsed is None
-            or elapsed > _ACCEPTANCE_THRESHOLDS["broad_terminal_seconds"]
-        ):
+        if elapsed is None or elapsed > _ACCEPTANCE_THRESHOLDS["broad_terminal_seconds"]:
             failures.append("broad terminal result exceeded 600 seconds")
         if int(payload.get("evidence_count") or 0) < 1:
             failures.append("broad terminal evidence was empty")
     elif scenario.role == "mixed_exact":
         if (
             first_seconds is None
-            or first_seconds
-            > _ACCEPTANCE_THRESHOLDS["mixed_exact_first_overview_seconds"]
+            or first_seconds > _ACCEPTANCE_THRESHOLDS["mixed_exact_first_overview_seconds"]
         ):
             failures.append("mixed exact first overview exceeded 60 seconds")
-        if (
-            elapsed is None
-            or elapsed > _ACCEPTANCE_THRESHOLDS["mixed_exact_terminal_seconds"]
-        ):
+        if elapsed is None or elapsed > _ACCEPTANCE_THRESHOLDS["mixed_exact_terminal_seconds"]:
             failures.append("mixed exact terminal result exceeded 300 seconds")
         if payload.get("exact_bill_verified") is not True:
             failures.append("mixed exact bill identity was not preserved")
     elif scenario.role == "mixed_broad":
         if (
             first_seconds is None
-            or first_seconds
-            > _ACCEPTANCE_THRESHOLDS["mixed_broad_first_overview_seconds"]
+            or first_seconds > _ACCEPTANCE_THRESHOLDS["mixed_broad_first_overview_seconds"]
         ):
             failures.append("mixed broad first overview exceeded 180 seconds")
-        if (
-            elapsed is None
-            or elapsed > _ACCEPTANCE_THRESHOLDS["mixed_broad_terminal_seconds"]
-        ):
+        if elapsed is None or elapsed > _ACCEPTANCE_THRESHOLDS["mixed_broad_terminal_seconds"]:
             failures.append("mixed broad terminal result exceeded 600 seconds")
         if int(payload.get("evidence_count") or 0) < 1:
             failures.append("mixed broad terminal evidence was empty")
@@ -573,10 +569,7 @@ async def _run_group(
 ) -> list[ChildResult]:
     return list(
         await asyncio.gather(
-            *(
-                _run_child(scenario, base_url=base_url, api_key=api_key)
-                for scenario in scenarios
-            )
+            *(_run_child(scenario, base_url=base_url, api_key=api_key) for scenario in scenarios)
         )
     )
 
@@ -595,9 +588,7 @@ def _summary(results: list[ChildResult]) -> dict[str, Any]:
         "failed_count": sum(not result.passed for result in results),
         "critical_http_failure_count": critical_http,
         "acceptance_thresholds": _ACCEPTANCE_THRESHOLDS,
-        "max_wall_seconds": round(
-            max((result.wall_seconds for result in results), default=0.0), 3
-        ),
+        "max_wall_seconds": round(max((result.wall_seconds for result in results), default=0.0), 3),
         "results": reports,
         "passed": bool(results) and all(result.passed for result in results),
     }
@@ -615,37 +606,26 @@ async def _exercise(args: argparse.Namespace) -> dict[str, Any]:
 
     results: list[ChildResult] = []
     if args.suite in {"mount", "protocol", "all"}:
-        protocol_results = await _run_group(
-            _mount_scenarios(), base_url=base_url, api_key=api_key
-        )
+        protocol_results = await _run_group(_mount_scenarios(), base_url=base_url, api_key=api_key)
         results.extend(protocol_results)
         if args.suite == "all" and not all(result.passed for result in protocol_results):
             return {"base_url": base_url, "suite": args.suite, **_summary(results)}
 
     if args.suite in {"exact", "all"}:
-        results.extend(
-            await _run_group((_exact_scenario(),), base_url=base_url, api_key=api_key)
-        )
+        results.extend(await _run_group((_exact_scenario(),), base_url=base_url, api_key=api_key))
 
     if args.suite in {"broad", "all"}:
         broad_first, broad_terminal = _broad_scenarios(str(args.broad_date_to))
-        first_results = await _run_group(
-            (broad_first,), base_url=base_url, api_key=api_key
-        )
+        first_results = await _run_group((broad_first,), base_url=base_url, api_key=api_key)
         results.extend(first_results)
         if first_results[0].passed:
-            results.extend(
-                await _run_group(
-                    (broad_terminal,), base_url=base_url, api_key=api_key
-                )
-            )
+            results.extend(await _run_group((broad_terminal,), base_url=base_url, api_key=api_key))
 
     if args.suite in {"mixed", "all"}:
         prerequisites = [
             result
             for result in results
-            if result.scenario.role
-            in {"protocol", "exact", "broad_first", "broad_terminal"}
+            if result.scenario.role in {"protocol", "exact", "broad_first", "broad_terminal"}
         ]
         if args.suite == "mixed" or all(result.passed for result in prerequisites):
             results.extend(
@@ -668,9 +648,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--base-url",
-        default=os.getenv(
-            "KBD_REMOTE_BASE_URL", "https://korean-bill-debate-mcp.vercel.app"
-        ),
+        default=os.getenv("KBD_REMOTE_BASE_URL", "https://korean-bill-debate-mcp.vercel.app"),
     )
     parser.add_argument("--broad-date-to", default="2026-07-14")
     parser.add_argument(

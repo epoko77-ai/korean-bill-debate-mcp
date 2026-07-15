@@ -33,6 +33,13 @@
 
 ### Fixed
 
+- Publish a separately bound, observed-only first-page candidate map before broad discovery queue
+  fan-out finishes. It is always labeled as incomplete (`metadata_inventory_complete=false`,
+  unknown pending total, no substantive conclusion), while the original exhaustive discovery,
+  source hydration, coverage accounting, and lossless evidence traversal continue unchanged.
+- Bind complete-metadata pagination to an immutable `view_source_hash`, preventing a page walk from
+  silently switching to the differently shaped final catalog when the snapshot becomes ready.
+
 - Replace the hosted discovery and metadata checkpoints that duplicated every raw row and full
   rejected candidate with compact, readiness-gated boundaries. Immutable source pages retain the
   complete official payload, while accepted candidates, exact rejected identities and reasons,

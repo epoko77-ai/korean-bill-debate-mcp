@@ -152,7 +152,9 @@ class FakeResearchBackend:
         *,
         offset: int = 0,
         page_size: int = 20,
+        view_source_hash: str | None = None,
     ) -> dict[str, Any]:
+        del view_source_hash
         assert research_id == "research_1"
         assert offset == 0
         assert page_size in {20, 100}
@@ -273,9 +275,7 @@ class FakeResearchBackend:
             "scope": scope,
             "next_evidence_id": (
                 "e2"
-                if scope in {"core", "all"}
-                and evidence_id == "e1"
-                and end == len(text)
+                if scope in {"core", "all"} and evidence_id == "e1" and end == len(text)
                 else None
             ),
             "selected_evidence_complete": end == len(text),
@@ -399,13 +399,16 @@ def test_metadata_overview_routes_every_accepted_catalog_page_before_polling() -
             *,
             offset: int = 0,
             page_size: int = 20,
+            view_source_hash: str | None = None,
         ) -> dict[str, Any]:
             assert research_id == "research_1"
             assert offset == 0
             assert page_size == 20
+            assert view_source_hash is None
             return {
                 "research_id": research_id,
                 "phase": "metadata",
+                "source_hash": "a" * 64,
                 "complete": False,
                 "provisional": True,
                 "substantive_conclusion_available": False,
@@ -417,10 +420,7 @@ def test_metadata_overview_routes_every_accepted_catalog_page_before_polling() -
                     "returned_count": 20,
                     "next_offset": 20,
                     "complete": False,
-                    "entries": [
-                        {"candidate_id": f"bill:{number:07d}"}
-                        for number in range(20)
-                    ],
+                    "entries": [{"candidate_id": f"bill:{number:07d}"} for number in range(20)],
                 },
             }
 
@@ -440,8 +440,60 @@ def test_metadata_overview_routes_every_accepted_catalog_page_before_polling() -
         "research_id": "research_1",
         "offset": 20,
         "page_size": 20,
+        "view_source_hash": "a" * 64,
     }
     assert overview["comprehensive_answer_allowed"] is False
+
+
+def test_observed_first_page_preview_exhaustion_still_polls_same_research() -> None:
+    class PreviewBackend(FakeResearchBackend):
+        def get_research_overview(
+            self,
+            research_id: str,
+            *,
+            offset: int = 0,
+            page_size: int = 20,
+            view_source_hash: str | None = None,
+        ) -> dict[str, Any]:
+            assert view_source_hash is None
+            assert research_id == "research_1"
+            return {
+                "research_id": research_id,
+                "phase": "metadata",
+                "metadata_stage": "first_page_preview",
+                "metadata_inventory_complete": False,
+                "source_complete": False,
+                "complete": False,
+                "provisional": True,
+                "substantive_conclusion_available": False,
+                "pending_total": None,
+                "pending_total_known": False,
+                "accepted_total": 1,
+                "catalog": {
+                    "offset": offset,
+                    "page_size": page_size,
+                    "total": 1,
+                    "returned_count": 1,
+                    "next_offset": None,
+                    "complete": True,
+                    "inventory_complete": False,
+                    "entries": [{"candidate_id": "bill:2219564"}],
+                },
+            }
+
+    tools = KasmTools(
+        ServiceContext(
+            search=FakeSearch(),
+            repository=FakeRepository(),
+            research=PreviewBackend(),
+        )
+    )
+
+    preview = tools.get_research_overview("research_1")
+
+    assert preview["next_action"]["tool"] == "get_research_status"
+    assert preview["next_action"]["arguments"] == {"research_id": "research_1"}
+    assert preview["comprehensive_answer_allowed"] is False
 
 
 def test_research_pages_index_long_text_and_require_lossless_document_reads() -> None:
@@ -464,9 +516,7 @@ def test_research_pages_index_long_text_and_require_lossless_document_reads() ->
     assert last["comprehensive_answer_allowed"] is False
     assert last["next_action"]["optional"] is True
 
-    exhaustive = tools.get_research_page(
-        "research_1", cursor="stable-cursor", exhaustive=True
-    )
+    exhaustive = tools.get_research_page("research_1", cursor="stable-cursor", exhaustive=True)
     assert exhaustive["next_action"]["tool"] == "get_evidence_document"
     assert exhaustive["next_action"]["arguments"] == {
         "research_id": "research_1",

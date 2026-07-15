@@ -94,13 +94,15 @@ class DurableResearchBackend:
             "progress": _progress(derived),
             "work": _derived_payload(derived),
             # Status reads are bounded to a handful of checkpoint objects.
-            # A one-second hint lets web MCP clients surface the first complete
-            # candidate map promptly without restarting or duplicating work.
+            # A one-second hint lets web MCP clients surface an observed, explicitly
+            # incomplete first-page map promptly without restarting or duplicating work.
             "retry_after_seconds": 1,
             "overview_available": derived.overview_available,
             "overview_phase": (
                 "final"
                 if derived.snapshot_ready
+                else "metadata_first_page_preview"
+                if derived.overview_available and derived.stage == "metadata_discovery"
                 else "metadata"
                 if derived.overview_available
                 else None
@@ -123,6 +125,71 @@ class DurableResearchBackend:
             payload.update(summary.to_dict())
             if job is not None:
                 payload["contract"] = job.contract.canonical_payload()
+        terminal = status in {
+            JobStatus.COMPLETE,
+            JobStatus.PARTIAL,
+            JobStatus.FAILED,
+            JobStatus.EXPIRED,
+        }
+        coverage_complete = bool(summary is not None and summary.coverage.complete)
+        if summary is not None:
+            warning_codes = [] if coverage_complete else ["coverage_incomplete"]
+            coverage_value = payload.get("coverage")
+            coverage = dict(coverage_value) if isinstance(coverage_value, dict) else {}
+            coverage.update(
+                {
+                    "state": "complete" if coverage_complete else "partial",
+                    "complete": coverage_complete,
+                    "warning_codes": warning_codes,
+                }
+            )
+            payload.update(
+                {
+                    "terminal": True,
+                    "provisional": not coverage_complete,
+                    "source_complete": coverage_complete,
+                    "pending_total": 0,
+                    "pending_total_known": True,
+                    "warning_codes": warning_codes,
+                    "coverage": coverage,
+                }
+            )
+        elif terminal:
+            warning_codes = [f"research_{status.value}", "coverage_unavailable"]
+            payload.update(
+                {
+                    "terminal": True,
+                    "provisional": True,
+                    "source_complete": False,
+                    "pending_total": None,
+                    "pending_total_known": False,
+                    "warning_codes": warning_codes,
+                    "coverage": {
+                        "state": status.value,
+                        "complete": False,
+                        "warning_codes": warning_codes,
+                    },
+                }
+            )
+        else:
+            warning_codes = ["official_source_verification_pending"]
+            if derived.overview_available and derived.stage == "metadata_discovery":
+                warning_codes.insert(0, "metadata_source_prefix_incomplete")
+            payload.update(
+                {
+                    "terminal": False,
+                    "provisional": True,
+                    "source_complete": False,
+                    "pending_total": None,
+                    "pending_total_known": False,
+                    "warning_codes": warning_codes,
+                    "coverage": {
+                        "state": "pending",
+                        "complete": False,
+                        "warning_codes": warning_codes,
+                    },
+                }
+            )
         return payload
 
     def get_research_overview(
@@ -131,66 +198,173 @@ class DurableResearchBackend:
         *,
         offset: int = 0,
         page_size: int = 20,
+        view_source_hash: str | None = None,
     ) -> dict[str, Any]:
-        """Return a quick complete map before callers choose source depth."""
+        """Return a core-first map while exhaustive source work continues."""
 
         if offset < 0:
             raise ValueError("offset must not be negative")
         if not 1 <= page_size <= 100:
             raise ValueError("page_size must be between 1 and 100")
-        final = self.engine.runs.get_overview_page(
-            research_id,
-            offset=offset,
-            page_size=page_size,
+        if view_source_hash is not None and (
+            len(view_source_hash) != 64
+            or any(character not in "0123456789abcdef" for character in view_source_hash)
+        ):
+            raise ValueError("view_source_hash must be a lowercase SHA-256 digest")
+
+        def metadata_overview() -> Any:
+            compact_getter = getattr(self.engine.runs, "get_provisional_overview", None)
+            if callable(compact_getter):
+                return compact_getter(research_id)
+            # Compatibility for third-party/legacy run stores. Hosted and local
+            # built-in stores always serve the compact accepted-only artifact.
+            discovery = self.engine.runs.get_discovery(research_id)
+            return build_provisional_research_overview(discovery) if discovery is not None else None
+
+        overview = metadata_overview() if view_source_hash is not None else None
+        if view_source_hash is not None and (
+            overview is None or overview.source_hash != view_source_hash
+        ):
+            raise RuntimeError(
+                "요청한 후보 지도 버전을 찾을 수 없습니다. 같은 research_id의 상태를 "
+                "다시 확인해 최신 next_action을 사용하세요."
+            )
+
+        final = (
+            None
+            if view_source_hash is not None
+            else self.engine.runs.get_overview_page(
+                research_id,
+                offset=offset,
+                page_size=page_size,
+            )
         )
         if final is not None:
+            coverage_complete = bool(final.get("complete"))
+            warning_codes = [] if coverage_complete else ["coverage_incomplete"]
+            coverage_value = final.get("coverage")
+            coverage = dict(coverage_value) if isinstance(coverage_value, dict) else {}
+            coverage.update(
+                {
+                    "state": "complete" if coverage_complete else "partial",
+                    "complete": coverage_complete,
+                    "warning_codes": warning_codes,
+                }
+            )
             return {
                 **final,
                 "research_id": research_id,
                 "phase": "final",
-                "provisional": not bool(final.get("complete")),
+                "terminal": True,
+                "provisional": not coverage_complete,
+                "source_complete": coverage_complete,
+                "pending_total": 0,
+                "pending_total_known": True,
+                "warning_codes": warning_codes,
+                "coverage": coverage,
                 "substantive_conclusion_available": True,
                 "full_evidence_inventory_delivery": "get_research_page",
             }
 
-        compact_getter = getattr(self.engine.runs, "get_provisional_overview", None)
-        if callable(compact_getter):
-            overview = compact_getter(research_id)
-        else:
-            # Compatibility for third-party/legacy run stores. Hosted and local
-            # built-in stores always serve the compact accepted-only artifact.
-            discovery = self.engine.runs.get_discovery(research_id)
-            overview = (
-                build_provisional_research_overview(discovery) if discovery is not None else None
-            )
+        if overview is None:
+            overview = metadata_overview()
         if overview is None:
             status = self._derived_status(research_id)
             raise RuntimeError(
                 f"조사 자료 지도가 아직 준비되지 않았습니다. 현재 단계: {status.stage}"
             )
-        page = overview.page(offset=offset, page_size=page_size)
         priority_candidate_limit = 12
         priority_candidates = tuple(
             item.to_dict() for item in overview.entries[:priority_candidate_limit]
         )
+        metadata_inventory_complete = overview.source.source_complete is True
+        if not metadata_inventory_complete and offset != 0:
+            raise RuntimeError(
+                "첫 페이지 후보 미리보기는 추가 페이지를 제공하지 않습니다. "
+                "같은 research_id의 상태를 확인해 전체 후보 지도를 기다리세요."
+            )
+        page = overview.page(offset=offset, page_size=page_size)
+        source = {
+            **overview.source.to_dict(),
+            "scope": "metadata_discovery_partitions",
+            "scope_complete": metadata_inventory_complete,
+        }
+        if metadata_inventory_complete:
+            catalog = {
+                **page.to_dict(),
+                "inventory_complete": True,
+                "truncated": False,
+            }
+        else:
+            # A preview is one stable, relevance-ranked orientation page only. Never
+            # issue an offset into it: full discovery may replace the preferred map
+            # between calls, which would otherwise mix two immutable inventories.
+            entries = [item.to_dict() for item in page.entries]
+            catalog = {
+                "offset": 0,
+                "page_size": page_size,
+                "total": len(entries),
+                "observed_accepted_total": overview.accepted_total,
+                "returned_count": len(entries),
+                "next_offset": None,
+                "complete": True,
+                "inventory_complete": False,
+                "truncated": len(entries) < overview.accepted_total,
+                "selection": "deterministic_relevance_ranked_orientation",
+                "entries": entries,
+            }
+        warning_codes = ["official_source_verification_pending"]
+        if not metadata_inventory_complete:
+            warning_codes.insert(0, "metadata_source_prefix_incomplete")
         return {
             "research_id": research_id,
             "phase": "metadata",
+            "metadata_stage": (
+                "complete_discovery" if metadata_inventory_complete else "first_page_preview"
+            ),
             "query": overview.query,
             "source_hash": overview.source_hash,
             "provisional": True,
             "complete": False,
+            "terminal": False,
+            # Top-level source completeness covers the requested research, not merely
+            # metadata pagination. It remains false until a complete final snapshot.
+            "source_complete": False,
+            "metadata_inventory_complete": metadata_inventory_complete,
             "substantive_conclusion_available": False,
             "warning": (
-                "메타데이터 후보 지도이며 원문·회의록·검토보고서 확인 전입니다. "
+                (
+                    "공식 API 첫 페이지들에서 먼저 확인된 후보 지도입니다. 전체 후보 수집과 "
+                    if not metadata_inventory_complete
+                    else "전체 메타데이터 후보 지도입니다. "
+                )
+                + "원문·회의록·검토보고서 확인 전이므로 "
                 "실질적 결론으로 사용하지 마세요."
             ),
+            "warning_codes": warning_codes,
+            "coverage": {
+                "state": "pending",
+                "complete": False,
+                "warning_codes": warning_codes,
+            },
             "accepted_total": overview.accepted_total,
+            "accepted_total_scope": (
+                "complete_metadata_discovery"
+                if metadata_inventory_complete
+                else "observed_first_pages"
+            ),
             "rejected_total": sum(item.rejected_count for item in overview.families),
-            "pending_total": 0,
-            "source_complete": overview.source.source_complete,
+            "family_accounting_scope": (
+                "complete_metadata_discovery"
+                if metadata_inventory_complete
+                else "observed_first_pages"
+            ),
+            # Full deferred work is not planned until discovery closes, so zero would
+            # be a false completeness signal here.
+            "pending_total": None,
+            "pending_total_known": False,
             "families": [item.to_dict() for item in overview.families],
-            "source": overview.source.to_dict(),
+            "source": source,
             "priority_candidates": list(priority_candidates),
             "priority_candidates_selection": {
                 "policy": "deterministic_core_first_preview",
@@ -198,14 +372,25 @@ class DurableResearchBackend:
                 "returned": len(priority_candidates),
                 "accepted_total": overview.accepted_total,
                 "complete": overview.accepted_total <= priority_candidate_limit,
-                "full_inventory": "catalog",
+                "inventory_complete": metadata_inventory_complete,
+                "full_inventory": (
+                    "catalog"
+                    if metadata_inventory_complete
+                    else "pending_complete_metadata_catalog"
+                ),
             },
-            "catalog": page.to_dict(),
-            "catalog_scope": "accepted_metadata_inventory_page",
+            "catalog": catalog,
+            "catalog_scope": (
+                "accepted_metadata_inventory_page"
+                if metadata_inventory_complete
+                else "observed_first_pages_core_orientation"
+            ),
             "catalog_completion_meaning": (
-                "catalog의 complete는 이 accepted metadata 목록 페이지의 끝만 뜻합니다. "
-                "원문 조사는 계속 진행 중이므로 status를 확인한 뒤 final overview와 "
-                "evidence tools를 사용하세요."
+                "catalog.complete는 현재 반환한 orientation 페이지의 끝만 뜻합니다. "
+                "catalog.inventory_complete가 false이면 이 목록은 페이지 순회 대상이 아니며 "
+                "전체 메타데이터 수집도 계속됩니다. "
+                "같은 research_id의 status를 확인한 뒤 final overview와 evidence tools를 "
+                "사용하세요."
             ),
         }
 

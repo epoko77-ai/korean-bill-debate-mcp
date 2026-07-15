@@ -283,6 +283,12 @@ def test_status_uses_bounded_store_view_without_exhaustive_derivation(tmp_path) 
     assert result["work"]["documents_complete"] == 0
     assert result["work"]["snapshot_ready"] is False
     assert result["retry_after_seconds"] == 1
+    assert result["terminal"] is False
+    assert result["provisional"] is True
+    assert result["source_complete"] is False
+    assert result["pending_total"] is None
+    assert result["pending_total_known"] is False
+    assert result["coverage"]["state"] == "pending"
 
     # Early/optimistic tool calls must report the same compact checkpoint.
     # Falling back to exhaustive derive_status here would rescan every hosted
@@ -340,13 +346,176 @@ def test_metadata_overview_uses_compact_complete_accounting(tmp_path) -> None:
 
     assert result["accepted_total"] == 1
     assert result["rejected_total"] == 6
-    assert result["pending_total"] == 0
-    assert result["source_complete"] is True
+    assert result["pending_total"] is None
+    assert result["pending_total_known"] is False
+    assert result["source_complete"] is False
+    assert result["metadata_inventory_complete"] is True
+    assert result["family_accounting_scope"] == "complete_metadata_discovery"
+    assert result["source"]["scope"] == "metadata_discovery_partitions"
+    assert result["source"]["scope_complete"] is True
+    assert result["coverage"]["complete"] is False
     assert result["substantive_conclusion_available"] is False
     assert result["catalog"]["complete"] is True
+    assert result["catalog"]["inventory_complete"] is True
     assert result["catalog_scope"] == "accepted_metadata_inventory_page"
-    assert "원문 조사는 계속" in result["catalog_completion_meaning"]
+    assert "status" in result["catalog_completion_meaning"]
     assert "next_action" not in result
+
+
+def test_first_page_preview_is_explicitly_observed_and_incomplete(tmp_path) -> None:
+    overview = ProvisionalResearchOverview(
+        "AI 입법",
+        "b" * 64,
+        tuple(
+            ProvisionalCandidateEntry(
+                index,
+                MetadataKind.BILL,
+                f"bill:{2219500 + index:07d}",
+                12,
+                ("issue_term:인공지능",),
+                (("bill_no", f"{2219500 + index:07d}"),),
+                f"인공지능 기본법 제{index}호 일부개정법률안",
+            )
+            for index in range(25)
+        ),
+        (
+            ProvisionalFamilyAccounting(MetadataKind.BILL, 1000, 25, 975, (("low_score", 975),)),
+            ProvisionalFamilyAccounting(MetadataKind.MEETING, 3, 0, 3, (("low_score", 3),)),
+        ),
+        ProvisionalSourceAccounting(False, 18_293, 1_003, 1_000, 1_000, 3, 3),
+    )
+
+    class PreviewRuns(Runs):
+        def get_provisional_overview(self, research_id: str):
+            assert research_id == "research_1"
+            return overview
+
+    class PreviewEngine(Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.runs = PreviewRuns()
+
+    result = backend(tmp_path, PreviewEngine()).get_research_overview("research_1")
+
+    assert result["metadata_stage"] == "first_page_preview"
+    assert result["accepted_total_scope"] == "observed_first_pages"
+    assert result["family_accounting_scope"] == "observed_first_pages"
+    assert result["metadata_inventory_complete"] is False
+    assert result["source_complete"] is False
+    assert result["pending_total"] is None
+    assert result["pending_total_known"] is False
+    assert result["catalog"]["complete"] is True
+    assert result["catalog"]["inventory_complete"] is False
+    assert result["catalog"]["returned_count"] == 20
+    assert result["catalog"]["truncated"] is True
+    assert result["catalog_scope"] == "observed_first_pages_core_orientation"
+    assert result["catalog"]["next_offset"] is None
+    assert result["catalog"]["observed_accepted_total"] == 25
+    assert "metadata_source_prefix_incomplete" in result["warning_codes"]
+
+    with pytest.raises(RuntimeError, match="추가 페이지를 제공하지"):
+        backend(tmp_path, PreviewEngine()).get_research_overview("research_1", offset=20)
+
+
+def test_complete_metadata_pagination_remains_pinned_when_final_appears(tmp_path) -> None:
+    entries = tuple(
+        ProvisionalCandidateEntry(
+            index,
+            MetadataKind.BILL,
+            f"bill:{2219500 + index:07d}",
+            12,
+            ("issue_term:인공지능",),
+            (("bill_no", f"{2219500 + index:07d}"),),
+            f"인공지능 기본법 제{index}호 일부개정법률안",
+        )
+        for index in range(25)
+    )
+    overview = ProvisionalResearchOverview(
+        "AI 입법",
+        "c" * 64,
+        entries,
+        (
+            ProvisionalFamilyAccounting(MetadataKind.BILL, 25, 25, 0, ()),
+            ProvisionalFamilyAccounting(MetadataKind.MEETING, 0, 0, 0, ()),
+        ),
+        ProvisionalSourceAccounting(True, 25, 25, 25, 25, 0, 0),
+    )
+
+    class RacingRuns(Runs):
+        def get_provisional_overview(self, research_id: str):
+            assert research_id == "research_1"
+            return overview
+
+    class RacingEngine(Engine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.runs = RacingRuns()
+
+    engine = RacingEngine()
+    research = backend(tmp_path, engine)
+    first = research.get_research_overview("research_1", page_size=20)
+    assert first["phase"] == "metadata"
+    assert first["catalog"]["next_offset"] == 20
+
+    engine.runs.snapshot = snapshot()
+    pinned = research.get_research_overview(
+        "research_1",
+        offset=20,
+        page_size=20,
+        view_source_hash=first["source_hash"],
+    )
+    assert pinned["phase"] == "metadata"
+    assert pinned["source_hash"] == first["source_hash"]
+    assert pinned["catalog"]["returned_count"] == 5
+    assert pinned["catalog"]["complete"] is True
+
+    latest = research.get_research_overview("research_1", page_size=20)
+    assert latest["phase"] == "final"
+
+    with pytest.raises(RuntimeError, match="후보 지도 버전을 찾을 수 없습니다"):
+        research.get_research_overview("research_1", view_source_hash="d" * 64)
+
+
+def test_final_overview_and_status_share_complete_partial_truth_table(tmp_path) -> None:
+    complete_snapshot = snapshot()
+    partial_coverage = CoverageLedger(
+        complete_snapshot.contract.evidence_types,
+        (
+            EvidenceCoverage(
+                EvidenceType.REVIEW_REPORTS,
+                1,
+                0,
+                0,
+                failed_count=1,
+                gap_reasons=("document_failed:review:parse_error",),
+            ),
+        ),
+    )
+    partial_snapshot = ResearchSnapshot(
+        complete_snapshot.research_id,
+        complete_snapshot.contract,
+        complete_snapshot.index_revision,
+        complete_snapshot.build_sha,
+        partial_coverage,
+        (),
+    )
+
+    for value, expected_complete in (
+        (complete_snapshot, True),
+        (partial_snapshot, False),
+    ):
+        research = backend(tmp_path, Engine(value))
+        status = research.get_research_status("research_1")
+        overview = research.get_research_overview("research_1")
+
+        for payload in (status, overview):
+            assert payload["terminal"] is True
+            assert payload["provisional"] is (not expected_complete)
+            assert payload["source_complete"] is expected_complete
+            assert payload["pending_total"] == 0
+            assert payload["pending_total_known"] is True
+            assert payload["coverage"]["complete"] is expected_complete
+            assert payload["coverage"]["state"] == ("complete" if expected_complete else "partial")
 
 
 def test_compact_overview_readiness_none_never_falls_back_to_discovery(

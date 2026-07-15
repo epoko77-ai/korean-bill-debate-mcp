@@ -14,16 +14,10 @@ Scenario = _MATRIX["Scenario"]
 ChildResult = _MATRIX["ChildResult"]
 _mount_scenarios = cast(Callable[[], tuple[Any, ...]], _MATRIX["_mount_scenarios"])
 _exact_scenario = cast(Callable[[], Any], _MATRIX["_exact_scenario"])
-_broad_scenarios = cast(
-    Callable[[str], tuple[Any, Any]], _MATRIX["_broad_scenarios"]
-)
-_mixed_scenarios = cast(
-    Callable[[str], tuple[Any, ...]], _MATRIX["_mixed_scenarios"]
-)
+_broad_scenarios = cast(Callable[[str], tuple[Any, Any]], _MATRIX["_broad_scenarios"])
+_mixed_scenarios = cast(Callable[[str], tuple[Any, ...]], _MATRIX["_mixed_scenarios"])
 _child_environment = cast(Callable[..., dict[str, str]], _MATRIX["_child_environment"])
-_contains_credential = cast(
-    Callable[[str, str], bool], _MATRIX["_contains_credential"]
-)
+_contains_credential = cast(Callable[[str, str], bool], _MATRIX["_contains_credential"])
 _acceptance_failures = cast(
     Callable[[Any, dict[str, Any]], list[str]], _MATRIX["_acceptance_failures"]
 )
@@ -45,6 +39,12 @@ def _successful_research_payload() -> dict[str, Any]:
         "research_receipt_seconds": 0.4,
         "first_overview_verified": True,
         "first_overview_seconds": 4.0,
+        "first_overview_phase": "metadata",
+        "first_overview_inventory_complete": True,
+        "first_overview_source_complete": False,
+        "first_overview_pending_total_known": False,
+        "first_overview_coverage_complete": False,
+        "first_overview_catalog_truncated": False,
         "first_overview_accepted_total": 2,
         "terminal_status": "complete",
         "final_overview_verified": True,
@@ -149,8 +149,48 @@ def test_broad_thresholds_distinguish_first_overview_and_terminal() -> None:
     assert _acceptance_failures(terminal, payload) == []
 
     payload["first_overview_seconds"] = 121
-    assert "broad first overview exceeded 120 seconds" in _acceptance_failures(
-        terminal, payload
+    assert "broad first overview exceeded 120 seconds" in _acceptance_failures(terminal, payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        ("first_overview_source_complete", True),
+        ("first_overview_pending_total_known", True),
+        ("first_overview_coverage_complete", True),
+        ("first_overview_inventory_complete", None),
+        ("first_overview_catalog_truncated", None),
+    ),
+)
+def test_metadata_orientation_fail_closed_fields_are_release_gates(
+    field: str,
+    invalid: Any,
+) -> None:
+    payload = _successful_research_payload()
+    payload[field] = invalid
+
+    failures = _acceptance_failures(_exact_scenario(), payload)
+
+    assert "metadata orientation violated fail-closed readiness semantics" in failures
+
+
+def test_final_orientation_requires_known_terminal_accounting() -> None:
+    payload = _successful_research_payload()
+    payload.update(
+        {
+            "first_overview_phase": "final",
+            "first_overview_inventory_complete": None,
+            "first_overview_source_complete": False,
+            "first_overview_pending_total_known": True,
+            "first_overview_coverage_complete": False,
+            "first_overview_catalog_truncated": None,
+        }
+    )
+    assert _acceptance_failures(_exact_scenario(), payload) == []
+
+    payload["first_overview_pending_total_known"] = False
+    assert "final orientation readiness semantics are inconsistent" in _acceptance_failures(
+        _exact_scenario(), payload
     )
 
 

@@ -97,15 +97,12 @@ class HTTPMetrics:
             if status >= 400
         }
         critical = sum(
-            count
-            for status, count in self.status_counts.items()
-            if status == 429 or status >= 500
+            count for status, count in self.status_counts.items() if status == 429 or status >= 500
         )
         return {
             "request_count": self.request_count,
             "status_counts": {
-                str(status): count
-                for status, count in sorted(self.status_counts.items())
+                str(status): count for status, count in sorted(self.status_counts.items())
             },
             "failure_status_counts": failures,
             "critical_failure_count": critical,
@@ -150,14 +147,63 @@ def _safe_failure_message(exc: Exception) -> str:
 def _structured(result: Any, operation: str) -> dict[str, Any]:
     value = result.structuredContent
     if result.isError or not isinstance(value, dict):
-        detail = " | ".join(
-            str(getattr(item, "text", item)) for item in (result.content or [])
-        )
+        detail = " | ".join(str(getattr(item, "text", item)) for item in (result.content or []))
         raise RuntimeError(
-            f"{operation} returned an MCP error"
-            + (f": {detail[:2000]}" if detail else "")
+            f"{operation} returned an MCP error" + (f": {detail[:2000]}" if detail else "")
         )
     return value
+
+
+def _verify_status_readiness(payload: dict[str, Any]) -> None:
+    """Enforce one fail-closed readiness truth table across every poll."""
+
+    status = str(payload.get("status") or "")
+    coverage = payload.get("coverage")
+    if not isinstance(coverage, dict):
+        raise RuntimeError("research status coverage envelope is missing")
+    terminal = status in {"complete", "partial", "failed", "expired"}
+    if payload.get("terminal") is not terminal:
+        raise RuntimeError("research status terminal flag is inconsistent")
+    if status in {"complete", "partial"}:
+        coverage_complete = coverage.get("complete") is True
+        expected_complete = status == "complete"
+        if (
+            coverage_complete is not expected_complete
+            or payload.get("provisional") is not (not expected_complete)
+            or payload.get("pending_total") != 0
+            or payload.get("pending_total_known") is not True
+            or payload.get("source_complete") is not coverage_complete
+            or coverage.get("state") != ("complete" if coverage_complete else "partial")
+        ):
+            raise RuntimeError("terminal research readiness semantics are inconsistent")
+    elif status in {"failed", "expired"}:
+        if (
+            payload.get("provisional") is not True
+            or payload.get("source_complete") is not False
+            or payload.get("pending_total") is not None
+            or payload.get("pending_total_known") is not False
+            or coverage.get("state") != status
+            or coverage.get("complete") is not False
+        ):
+            raise RuntimeError("failed research status overstates readiness")
+    else:
+        warning_codes = payload.get("warning_codes")
+        coverage_warnings = coverage.get("warning_codes")
+        if (
+            not isinstance(warning_codes, list)
+            or coverage_warnings != warning_codes
+            or "official_source_verification_pending" not in warning_codes
+        ):
+            raise RuntimeError("running research status lacks readiness warnings")
+    if not terminal and (
+        payload.get("provisional") is not True
+        or payload.get("source_complete") is not False
+        or payload.get("pending_total") is not None
+        or payload.get("pending_total_known") is not False
+        or coverage.get("state") != "pending"
+        or coverage.get("complete") is not False
+    ):
+        raise RuntimeError("running research status overstates readiness")
 
 
 def _redirect_origin(uri: str) -> str:
@@ -247,6 +293,19 @@ async def _verify_final_catalog(
             or payload.get("substantive_conclusion_available") is not True
         ):
             raise RuntimeError("final catalog traversal left the final research phase")
+        coverage = payload.get("coverage")
+        if not isinstance(coverage, dict):
+            raise RuntimeError("final overview coverage is missing")
+        coverage_complete = coverage.get("complete") is True
+        if (
+            payload.get("terminal") is not True
+            or payload.get("pending_total") != 0
+            or payload.get("pending_total_known") is not True
+            or payload.get("source_complete") is not coverage_complete
+            or payload.get("provisional") is coverage_complete
+            or coverage.get("state") != ("complete" if coverage_complete else "partial")
+        ):
+            raise RuntimeError("final overview readiness semantics are inconsistent")
         catalog = payload.get("catalog")
         if not isinstance(catalog, dict):
             raise RuntimeError("final overview catalog is missing")
@@ -285,13 +344,17 @@ async def _verify_metadata_catalog(
     research_id: str,
     first: dict[str, Any],
 ) -> tuple[int, int]:
-    """Traverse the complete accepted-candidate map before deeper work finishes."""
+    """Traverse the currently published candidate map without overstating coverage."""
 
     payload = first
     offset = 0
     candidate_ids: list[str] = []
     page_count = 0
     expected_total: int | None = None
+    inventory_complete_seen: bool | None = None
+    view_source_hash = str(first.get("source_hash") or "")
+    if len(view_source_hash) != 64:
+        raise RuntimeError("metadata catalog lacks a stable source hash")
     while True:
         if page_count:
             payload = _structured(
@@ -301,6 +364,7 @@ async def _verify_metadata_catalog(
                         "research_id": research_id,
                         "offset": offset,
                         "page_size": 100,
+                        "view_source_hash": view_source_hash,
                     },
                 ),
                 "get_research_overview",
@@ -309,6 +373,7 @@ async def _verify_metadata_catalog(
             payload.get("phase") != "metadata"
             or payload.get("provisional") is not True
             or payload.get("substantive_conclusion_available") is not False
+            or payload.get("source_hash") != view_source_hash
         ):
             raise RuntimeError("metadata catalog was exposed as a substantive conclusion")
         source = payload.get("source")
@@ -316,31 +381,63 @@ async def _verify_metadata_catalog(
         families = payload.get("families")
         if (
             not isinstance(source, dict)
-            or source.get("source_complete") is not True
             or not isinstance(catalog, dict)
             or not isinstance(families, list)
         ):
-            raise RuntimeError("metadata catalog does not prove complete source accounting")
+            raise RuntimeError("metadata catalog lacks bounded source accounting")
+        inventory_complete = payload.get("metadata_inventory_complete") is True
+        inventory_complete_seen = (
+            inventory_complete if inventory_complete_seen is None else inventory_complete_seen
+        )
+        if inventory_complete is not inventory_complete_seen:
+            raise RuntimeError("metadata inventory changed while its catalog was being read")
+        if (
+            payload.get("source_complete") is not False
+            or payload.get("pending_total") is not None
+            or payload.get("pending_total_known") is not False
+            or source.get("scope") != "metadata_discovery_partitions"
+            or source.get("scope_complete") is not inventory_complete
+            or source.get("source_complete") is not inventory_complete
+            or catalog.get("inventory_complete") is not inventory_complete
+        ):
+            raise RuntimeError("metadata catalog overstates research or inventory completeness")
+        coverage = payload.get("coverage")
+        warning_codes = payload.get("warning_codes")
+        if (
+            not isinstance(coverage, dict)
+            or coverage.get("complete") is not False
+            or coverage.get("state") != "pending"
+            or not isinstance(warning_codes, list)
+            or "official_source_verification_pending" not in warning_codes
+        ):
+            raise RuntimeError("metadata catalog lacks fail-closed coverage semantics")
+        if not inventory_complete and (
+            payload.get("metadata_stage") != "first_page_preview"
+            or payload.get("accepted_total_scope") != "observed_first_pages"
+            or payload.get("family_accounting_scope") != "observed_first_pages"
+            or "metadata_source_prefix_incomplete" not in warning_codes
+        ):
+            raise RuntimeError("first-page preview was not labeled as incomplete")
+        if inventory_complete and (
+            payload.get("accepted_total_scope") != "complete_metadata_discovery"
+            or payload.get("family_accounting_scope") != "complete_metadata_discovery"
+        ):
+            raise RuntimeError("complete metadata accounting scope is invalid")
         accepted_total = int(payload.get("accepted_total") or 0)
         expected_total = accepted_total if expected_total is None else expected_total
         if accepted_total != expected_total:
             raise RuntimeError("metadata accepted total changed between pages")
         rejected_total = sum(
-            int(item.get("rejected_count") or 0)
-            for item in families
-            if isinstance(item, dict)
+            int(item.get("rejected_count") or 0) for item in families if isinstance(item, dict)
         )
         if int(payload.get("rejected_total") or 0) != rejected_total:
             raise RuntimeError("metadata rejected accounting is inconsistent")
-        if int(payload.get("pending_total") or 0) != 0:
-            raise RuntimeError("metadata catalog was published with unresolved candidates")
         entries = catalog.get("entries")
         if not isinstance(entries, list):
             raise RuntimeError("metadata catalog entries are malformed")
-        if (
-            int(catalog.get("offset") or 0) != offset
-            or int(catalog.get("returned_count") or 0) != len(entries)
-        ):
+        if int(catalog.get("offset") or 0) != offset or int(
+            catalog.get("returned_count") or 0
+        ) != len(entries):
             raise RuntimeError("metadata catalog page accounting is inconsistent")
         for entry in entries:
             if not isinstance(entry, dict) or not str(entry.get("candidate_id") or ""):
@@ -348,14 +445,31 @@ async def _verify_metadata_catalog(
             candidate_ids.append(str(entry["candidate_id"]))
         page_count += 1
         next_offset = catalog.get("next_offset")
+        if not inventory_complete:
+            if (
+                offset != 0
+                or next_offset is not None
+                or catalog.get("complete") is not True
+                or int(catalog.get("total") or 0) != len(entries)
+                or int(catalog.get("observed_accepted_total") or 0) != accepted_total
+                or catalog.get("selection") != "deterministic_relevance_ranked_orientation"
+                or catalog.get("truncated") is not (len(entries) < accepted_total)
+            ):
+                raise RuntimeError("first-page preview is not a stable bounded orientation")
+            break
         if bool(catalog.get("complete")) is not (next_offset is None):
             raise RuntimeError("metadata catalog completion flag is inconsistent")
         if next_offset is None:
             break
         offset = int(next_offset)
-    if expected_total != len(candidate_ids) or len(set(candidate_ids)) != len(candidate_ids):
-        raise RuntimeError("metadata catalog is incomplete or contains duplicates")
-    return len(candidate_ids), page_count
+    if len(set(candidate_ids)) != len(candidate_ids):
+        raise RuntimeError("metadata catalog contains duplicate candidates")
+    if inventory_complete_seen:
+        if expected_total != len(candidate_ids):
+            raise RuntimeError("complete metadata catalog is incomplete")
+    elif expected_total is None or len(candidate_ids) > expected_total:
+        raise RuntimeError("first-page preview accounting is invalid")
+    return int(expected_total or 0), page_count
 
 
 async def _verify_evidence_inventory(
@@ -387,9 +501,7 @@ async def _verify_evidence_inventory(
             raise RuntimeError("evidence inventory page is malformed")
         current_total = int(page.get("matched_total") or 0)
         matched_total = current_total if matched_total is None else matched_total
-        if current_total != matched_total or int(page.get("returned_count") or 0) != len(
-            evidence
-        ):
+        if current_total != matched_total or int(page.get("returned_count") or 0) != len(evidence):
             raise RuntimeError("evidence inventory accounting changed between pages")
         for item in evidence:
             if not isinstance(item, dict) or not str(item.get("id") or ""):
@@ -442,10 +554,9 @@ async def _verify_long_text(
         text = payload.get("text")
         if not isinstance(returned, dict) or not isinstance(text, str):
             raise RuntimeError("evidence document range is malformed")
-        if (
-            int(returned.get("character_start") or 0) != character_end
-            or int(returned.get("characters") or 0) != len(text)
-        ):
+        if int(returned.get("character_start") or 0) != character_end or int(
+            returned.get("characters") or 0
+        ) != len(text):
             raise RuntimeError("evidence document ranges are not contiguous")
         expected_end = character_end + len(text)
         character_end = int(returned.get("character_end") or 0)
@@ -476,25 +587,22 @@ async def _verify_long_text(
 async def exercise() -> dict[str, object]:
     global _LAST_HTTP_METRICS, _LAST_RESEARCH_ID, _LAST_STATUS
 
-    base_url = os.getenv(
-        "KBD_REMOTE_BASE_URL", "https://korean-bill-debate-mcp.vercel.app"
-    ).rstrip("/")
+    base_url = os.getenv("KBD_REMOTE_BASE_URL", "https://korean-bill-debate-mcp.vercel.app").rstrip(
+        "/"
+    )
     api_key = os.getenv("ASSEMBLY_OPEN_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("ASSEMBLY_OPEN_API_KEY is required")
     origin = os.getenv("KBD_SMOKE_ORIGIN", "https://chatgpt.com").strip()
-    redirect_uri = os.getenv(
-        "KBD_SMOKE_REDIRECT_URI", "http://127.0.0.1:8765/callback"
-    ).strip()
+    redirect_uri = os.getenv("KBD_SMOKE_REDIRECT_URI", "http://127.0.0.1:8765/callback").strip()
     callback_origin = _redirect_origin(redirect_uri)
-    require_web_callback = (
-        os.getenv("KBD_SMOKE_REQUIRE_WEB_CALLBACK", "").strip() == "1"
-    )
+    require_web_callback = os.getenv("KBD_SMOKE_REQUIRE_WEB_CALLBACK", "").strip() == "1"
     redirect_host = (urllib.parse.urlsplit(redirect_uri).hostname or "").lower()
-    web_callback = (
-        urllib.parse.urlsplit(redirect_uri).scheme == "https"
-        and redirect_host not in {"127.0.0.1", "localhost", "::1"}
-    )
+    web_callback = urllib.parse.urlsplit(redirect_uri).scheme == "https" and redirect_host not in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    }
     if require_web_callback and not web_callback:
         raise RuntimeError("the production web-connector smoke requires an HTTPS callback URI")
     wait_seconds = max(0.0, float(os.getenv("KBD_SMOKE_WAIT_SECONDS", "0")))
@@ -532,9 +640,8 @@ async def exercise() -> dict[str, object]:
             consent.raise_for_status()
             if "본인의 열린국회 API 키" not in consent.text:
                 raise RuntimeError("OAuth consent did not request the Open Assembly key")
-            if (
-                f"form-action 'self' {callback_origin}"
-                not in consent.headers.get("content-security-policy", "")
+            if f"form-action 'self' {callback_origin}" not in consent.headers.get(
+                "content-security-policy", ""
             ):
                 raise RuntimeError("OAuth consent CSP blocks the registered web callback")
             started = time.perf_counter()
@@ -580,9 +687,7 @@ async def exercise() -> dict[str, object]:
                 headers=headers,
                 event_hooks=event_hooks,
             ) as oauth_client,
-            streamable_http_client(
-                f"{base_url}/mcp", http_client=oauth_client
-            ) as streams,
+            streamable_http_client(f"{base_url}/mcp", http_client=oauth_client) as streams,
             ClientSession(streams[0], streams[1]) as session,
         ):
             initialized = await session.initialize()
@@ -611,9 +716,7 @@ async def exercise() -> dict[str, object]:
                     "health": {
                         "durable_research": health.get("durable_research"),
                         "mcp_tool_count": health.get("mcp_tool_count"),
-                        "corpus_revision_configured": health.get(
-                            "corpus_revision_configured"
-                        ),
+                        "corpus_revision_configured": health.get("corpus_revision_configured"),
                     },
                     "oauth": {
                         "official_mcp_sdk": True,
@@ -633,9 +736,7 @@ async def exercise() -> dict[str, object]:
                 }
             started = time.perf_counter()
             research_started = started
-            existing_research_id = os.getenv(
-                "KBD_SMOKE_EXISTING_RESEARCH_ID", ""
-            ).strip()
+            existing_research_id = os.getenv("KBD_SMOKE_EXISTING_RESEARCH_ID", "").strip()
             if existing_research_id:
                 if not re.fullmatch(r"research_[0-9a-f]{32}", existing_research_id):
                     raise RuntimeError("KBD_SMOKE_EXISTING_RESEARCH_ID is invalid")
@@ -647,9 +748,7 @@ async def exercise() -> dict[str, object]:
                     "공식 원문 기준으로 조사해줘"
                 )
                 research_arguments: dict[str, Any] = {"query": query}
-                raw_assembly_term = os.getenv(
-                    "KBD_SMOKE_ASSEMBLY_TERM", "22"
-                ).strip()
+                raw_assembly_term = os.getenv("KBD_SMOKE_ASSEMBLY_TERM", "22").strip()
                 if raw_assembly_term:
                     research_arguments["assembly_term"] = int(raw_assembly_term)
                 date_from = os.getenv("KBD_SMOKE_DATE_FROM", "").strip()
@@ -680,14 +779,18 @@ async def exercise() -> dict[str, object]:
             first_overview_accepted_total = 0
             first_overview_catalog_pages = 0
             first_overview_verified = False
+            first_overview_inventory_complete: bool | None = None
+            first_overview_source_complete: bool | None = None
+            first_overview_pending_total_known: bool | None = None
+            first_overview_coverage_complete: bool | None = None
+            first_overview_catalog_truncated: bool | None = None
             while wait_seconds > 0:
                 status_started = time.perf_counter()
                 status = _structured(
-                    await session.call_tool(
-                        "get_research_status", {"research_id": research_id}
-                    ),
+                    await session.call_tool("get_research_status", {"research_id": research_id}),
                     "get_research_status",
                 )
+                _verify_status_readiness(status)
                 _LAST_STATUS = status
                 status_poll_count += 1
                 slowest_status_seconds = max(
@@ -718,12 +821,10 @@ async def exercise() -> dict[str, object]:
                             overview,
                         )
                     elif phase == "final":
-                        accepted_total, first_overview_catalog_pages = (
-                            await _verify_final_catalog(
-                                session,
-                                research_id,
-                                overview,
-                            )
+                        accepted_total, first_overview_catalog_pages = await _verify_final_catalog(
+                            session,
+                            research_id,
+                            overview,
                         )
                     else:
                         raise RuntimeError("available research overview has an invalid phase")
@@ -732,6 +833,21 @@ async def exercise() -> dict[str, object]:
                     first_overview_seconds = time.perf_counter() - research_started
                     first_overview_phase = phase
                     first_overview_accepted_total = accepted_total
+                    first_overview_inventory_complete = overview.get("metadata_inventory_complete")
+                    first_overview_source_complete = overview.get("source_complete")
+                    first_overview_pending_total_known = overview.get("pending_total_known")
+                    overview_coverage = overview.get("coverage")
+                    first_overview_coverage_complete = (
+                        overview_coverage.get("complete")
+                        if isinstance(overview_coverage, dict)
+                        else None
+                    )
+                    overview_catalog = overview.get("catalog")
+                    first_overview_catalog_truncated = (
+                        overview_catalog.get("truncated")
+                        if isinstance(overview_catalog, dict)
+                        else None
+                    )
                     first_overview_verified = True
                     if stop_at_overview:
                         break
@@ -803,17 +919,13 @@ async def exercise() -> dict[str, object]:
                         research_id,
                         long_text_item,
                     )
-                expected_bill = os.getenv(
-                    "KBD_SMOKE_EXPECT_BILL_NUMBER", "2219564"
-                ).strip()
+                expected_bill = os.getenv("KBD_SMOKE_EXPECT_BILL_NUMBER", "2219564").strip()
                 if expected_bill:
                     exact_bill_verified = expected_bill in json.dumps(
                         overview, ensure_ascii=False, sort_keys=True
                     )
                     if not exact_bill_verified:
-                        raise RuntimeError(
-                            "final overview lost the expected exact bill identity"
-                        )
+                        raise RuntimeError("final overview lost the expected exact bill identity")
             research_elapsed_seconds = time.perf_counter() - research_started
 
     if storage.tokens is None or not storage.tokens.refresh_token:
@@ -848,13 +960,16 @@ async def exercise() -> dict[str, object]:
         "status_poll_count": status_poll_count,
         "slowest_status_seconds": round(slowest_status_seconds, 3),
         "first_overview_seconds": (
-            round(first_overview_seconds, 3)
-            if first_overview_seconds is not None
-            else None
+            round(first_overview_seconds, 3) if first_overview_seconds is not None else None
         ),
         "first_overview_phase": first_overview_phase,
         "first_overview_accepted_total": first_overview_accepted_total,
         "first_overview_catalog_pages": first_overview_catalog_pages,
+        "first_overview_inventory_complete": first_overview_inventory_complete,
+        "first_overview_source_complete": first_overview_source_complete,
+        "first_overview_pending_total_known": first_overview_pending_total_known,
+        "first_overview_coverage_complete": first_overview_coverage_complete,
+        "first_overview_catalog_truncated": first_overview_catalog_truncated,
         "first_overview_verified": first_overview_verified,
         "first_overview_duplicate_count": 0 if first_overview_verified else None,
         "terminal_status": status.get("status") if status else None,

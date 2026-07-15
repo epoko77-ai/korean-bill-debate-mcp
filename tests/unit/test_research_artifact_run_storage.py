@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -14,7 +15,7 @@ import pytest
 
 import kasm.research.artifact_run_storage as run_storage_codec
 from kasm.adapters.korea.bills import BILL_STATUS_DATASET
-from kasm.adapters.korea.client import ApiPage
+from kasm.adapters.korea.client import ApiPage, ApiResult
 from kasm.research.artifact_run_storage import (
     ArtifactResearchRunStore,
     ResearchRunConflictError,
@@ -31,6 +32,7 @@ from kasm.research.artifacts import (
 from kasm.research.collector import (
     CollectionCoverage,
     MetadataCollection,
+    MetadataCollector,
     MetadataKind,
     MetadataPartition,
     PageProvenance,
@@ -58,7 +60,10 @@ from kasm.research.engine import (
     StrictFilterReport,
 )
 from kasm.research.jobs import InMemoryResearchJobStore
-from kasm.research.overview import build_provisional_research_overview
+from kasm.research.overview import (
+    ProvisionalResearchOverview,
+    build_provisional_research_overview,
+)
 from kasm.research.partitioning import ResearchPartitionPlanner
 from kasm.research.planner import plan_research
 from kasm.research.queue import ResearchTask, ResearchTaskStage
@@ -417,8 +422,7 @@ def _scaled_boundary(
         for number in numbers[1:]
     )
     discoveries = tuple(
-        BillDocumentDiscovery(number, (item,))
-        for number, item in zip(numbers, items, strict=True)
+        BillDocumentDiscovery(number, (item,)) for number, item in zip(numbers, items, strict=True)
     )
     manifest = DocumentWorkManifest.create(items, discoveries)
     metadata = replace(state.metadata, discovery=discovery, manifest=manifest)
@@ -444,6 +448,93 @@ def _page(partition: MetadataPartition, number: int = 1) -> ApiPage:
         ),
         hashlib.sha256(repr(rows).encode()).hexdigest(),
     )
+
+
+def _first_page_preview_fixture(
+    state: FixtureState,
+) -> tuple[
+    GatewayPlanState,
+    tuple[tuple[MetadataPartition, ApiPage], ...],
+    ProvisionalResearchOverview,
+]:
+    original = replace(state.gateway.discovery_partitions[0], page_size=1)
+    second = MetadataPartition.create(
+        "bill-metadata:preview-second",
+        MetadataKind.BILL,
+        original.dataset,
+        parameters={"AGE": 21},
+        page_size=1,
+    )
+    gateway = replace(state.gateway, discovery_partitions=(original, second))
+    rows = (
+        (
+            {
+                "BILL_NO": "2219564",
+                "BILL_NAME": "형사소송법 일부개정법률안",
+            },
+        ),
+        (
+            {
+                "BILL_NO": "2199999",
+                "BILL_NAME": "다른 법률 일부개정법률안",
+            },
+        ),
+    )
+    pages = tuple(
+        ApiPage(
+            partition.dataset,
+            1,
+            partition.page_size,
+            2,
+            page_rows,
+            (
+                f"https://open.assembly.go.kr/portal/openapi/{partition.dataset}"
+                f"?KEY=%2A%2A%2A&pIndex=1&pSize={partition.page_size}"
+            ),
+            hashlib.sha256(repr((partition.partition_id, page_rows)).encode()).hexdigest(),
+        )
+        for partition, page_rows in zip(gateway.discovery_partitions, rows, strict=True)
+    )
+    result_by_parameters = {
+        partition.parameters: ApiResult(
+            page.dataset,
+            page.page_size,
+            page.total_count or 0,
+            page.rows,
+            (page,),
+        )
+        for partition, page in zip(gateway.discovery_partitions, pages, strict=True)
+    }
+
+    class FirstPageClient:
+        def fetch_all(
+            self,
+            _dataset: str,
+            *,
+            page_size: int,
+            parameters: Mapping[str, str | int] | None = None,
+            refresh: bool = False,
+        ) -> ApiResult:
+            del page_size, refresh
+            return result_by_parameters[tuple(sorted((parameters or {}).items()))]
+
+    collection = MetadataCollector(FirstPageClient()).collect(gateway.discovery_partitions)
+    resolution = resolve_metadata_candidates(gateway.research_plan, collection)
+    preview = build_provisional_research_overview(
+        replace(
+            state.discovery,
+            collection=collection,
+            filtered_collection=collection,
+            filter_report=StrictFilterReport(
+                FamilyFilterAccounting(2, 2),
+                FamilyFilterAccounting(0, 0),
+            ),
+            resolution=resolution,
+            status_partitions=(),
+            document_bill_numbers=(),
+        )
+    )
+    return gateway, tuple(zip(gateway.discovery_partitions, pages, strict=True)), preview
 
 
 def _result(state: FixtureState, text: str) -> DocumentWorkResult:
@@ -785,9 +876,7 @@ def test_partial_metadata_boundary_is_hidden_until_document_readiness_write(
         lambda state: "run/accepted-bill/2219564",
         lambda state: (
             "run/status-partition/"
-            + hashlib.sha256(
-                state.discovery.status_partitions[0].partition_id.encode()
-            ).hexdigest()
+            + hashlib.sha256(state.discovery.status_partitions[0].partition_id.encode()).hexdigest()
         ),
         lambda state: "run/deferred-route-shard/0",
     ),
@@ -900,9 +989,7 @@ def test_fixed_hot_reads_are_size_invariant_and_routes_are_exhaustive(
         for label, getter, expected_key in checks:
             artifacts.reset_counts()
             assert getter() is not None
-            expected_ready = (
-                "run/document-ready" if label == "document" else "run/discovery-ready"
-            )
+            expected_ready = "run/document-ready" if label == "document" else "run/discovery-ready"
             assert artifacts.logical_reads == [
                 "run/gateway",
                 expected_ready,
@@ -918,9 +1005,7 @@ def test_fixed_hot_reads_are_size_invariant_and_routes_are_exhaustive(
 
         if verify_routes:
             artifacts.reset_counts()
-            deferred_total = len(discovery.status_partitions) + len(
-                discovery.document_bill_numbers
-            )
+            deferred_total = len(discovery.status_partitions) + len(discovery.document_bill_numbers)
             deferred_routes = tuple(
                 route
                 for start in range(0, deferred_total, 4)
@@ -1045,9 +1130,7 @@ def test_phase_finalization_claim_is_atomic_and_recovers_after_hard_limit(
 ) -> None:
     state = _fixture()
     artifacts = FilesystemResearchArtifactStore(tmp_path)
-    stores = tuple(
-        ArtifactResearchRunStore(artifacts, now=lambda: state.now[0]) for _ in range(2)
-    )
+    stores = tuple(ArtifactResearchRunStore(artifacts, now=lambda: state.now[0]) for _ in range(2))
     research_id = state.gateway.job.id
     stores[0].put_gateway(research_id, state.gateway)
 
@@ -2008,6 +2091,111 @@ def test_status_snapshots_avoid_page_and_outcome_scans_and_remain_conservative(
     assert artifacts.logical_read_calls == 3
 
 
+def test_first_page_preview_is_bound_to_every_page_and_hidden_until_ready(
+    tmp_path: Path,
+) -> None:
+    state = _fixture()
+    gateway, partition_pages, preview = _first_page_preview_fixture(state)
+    artifacts = FailLogicalWriteOnceStore(
+        tmp_path,
+        "run/first-page-preview-ready-v1",
+    )
+    store = StatusSnapshotResearchRunStore(artifacts, now=lambda: state.now[0])
+    research_id = gateway.job.id
+    store.put_gateway(research_id, gateway)
+    first_partition, first_page = partition_pages[0]
+    store.put_page(
+        research_id,
+        MetadataPhase.DISCOVERY,
+        first_partition.partition_id,
+        first_page,
+    )
+
+    with pytest.raises(LookupError, match="not every discovery first page"):
+        store.put_first_page_preview(research_id, preview)
+
+    second_partition, second_page = partition_pages[1]
+    store.put_page(
+        research_id,
+        MetadataPhase.DISCOVERY,
+        second_partition.partition_id,
+        second_page,
+    )
+    with pytest.raises(ArtifactBackendError, match="boundary"):
+        store.put_first_page_preview(research_id, preview)
+
+    assert "run/first-page-preview" in artifacts.successful_logical_writes
+    assert store.get_first_page_preview(research_id) is None
+    assert store.get_provisional_overview(research_id) is None
+
+    assert store.put_first_page_preview(research_id, preview) == preview
+    assert store.get_first_page_preview(research_id) == preview
+    assert store.get_provisional_overview(research_id) == preview
+    with pytest.raises(ValueError, match="binding"):
+        store.put_first_page_preview(
+            research_id,
+            replace(preview, source_hash="f" * 64),
+        )
+    with pytest.raises(ValueError, match="binding"):
+        store.put_first_page_preview(
+            research_id,
+            replace(
+                preview,
+                source=replace(
+                    preview.source,
+                    source_rows_expected=(preview.source.source_rows_expected or 0) + 1,
+                ),
+            ),
+        )
+
+
+def test_preview_status_checkpoint_retry_heals_without_rewriting_payload(
+    tmp_path: Path,
+) -> None:
+    state = _fixture()
+    gateway, partition_pages, preview = _first_page_preview_fixture(state)
+    artifacts = RecordingFilesystemStore(tmp_path)
+    store = FailStatusCheckpointOnceStore(
+        artifacts,
+        now=lambda: state.now[0],
+        boundary="preview",
+    )
+    research_id = gateway.job.id
+    store.put_gateway(research_id, gateway)
+    for partition, page in partition_pages:
+        store.put_page(
+            research_id,
+            MetadataPhase.DISCOVERY,
+            partition.partition_id,
+            page,
+        )
+
+    with pytest.raises(ArtifactBackendError, match="checkpoint"):
+        store.put_first_page_preview(research_id, preview)
+    assert store.get_first_page_preview(research_id) == preview
+    before = store.get_status_view(research_id)
+    assert before is not None
+    assert before.derived.overview_available is False
+
+    store.put_first_page_preview(research_id, preview)
+
+    healed = store.get_status_view(research_id)
+    assert healed is not None
+    assert healed.derived.stage == "metadata_discovery"
+    assert healed.derived.overview_available is True
+    assert healed.derived.metadata_partitions_expected == 2
+    assert healed.derived.metadata_pages_expected == 4
+    assert healed.derived.metadata_pages_complete == 2
+    # Re-put is byte-identical and write-once; the recording store observes the
+    # idempotent verification call but the artifact backend retains one object.
+    preview_refs = tuple(
+        ref
+        for ref in artifacts.list(research_id, ArtifactKind.RESOLUTION)
+        if ref.logical_key == "run/first-page-preview"
+    )
+    assert len(preview_refs) == 1
+
+
 @pytest.mark.parametrize(
     ("failed_boundary", "expected_stage"),
     (("discovery", "deferred_metadata"), ("metadata", "documents")),
@@ -2089,9 +2277,9 @@ def test_pre_v010_discovery_and_metadata_are_adopted_without_key_conflicts(
 
     assert deferred is not None
     assert store.get_discovery(research_id) is not None
-    assert artifacts.read_logical(
-        research_id, ArtifactKind.RESOLUTION, "run/discovery-v2"
-    ) is not None
+    assert (
+        artifacts.read_logical(research_id, ArtifactKind.RESOLUTION, "run/discovery-v2") is not None
+    )
     store.put_bill_discovery(research_id, state.bill_discovery)
     artifacts.write(
         research_id,
@@ -2108,6 +2296,4 @@ def test_pre_v010_discovery_and_metadata_are_adopted_without_key_conflicts(
 
     assert store.get_document_item(research_id, state.work_item.work_id) == state.work_item
     assert store.get_metadata(research_id) is not None
-    assert artifacts.read_logical(
-        research_id, ArtifactKind.METADATA, "run/metadata-v2"
-    ) is not None
+    assert artifacts.read_logical(research_id, ArtifactKind.METADATA, "run/metadata-v2") is not None

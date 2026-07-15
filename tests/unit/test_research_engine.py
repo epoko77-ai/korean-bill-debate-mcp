@@ -614,19 +614,17 @@ def test_exact_identifier_gateway_replaces_56_way_scan_with_seven_bounded_tasks(
     gateway = runs.get_gateway(receipt.research_id)
     assert gateway is not None
     meeting_partitions = tuple(
-        partition
-        for partition in gateway.discovery_partitions
-        if partition.kind.value == "meeting"
+        partition for partition in gateway.discovery_partitions if partition.kind.value == "meeting"
     )
     assert len(meeting_partitions) == 6
     assert all(
-        partition.parameters_dict().get("SUB_NAME") == "2219564"
-        for partition in meeting_partitions
+        partition.parameters_dict().get("SUB_NAME") == "2219564" for partition in meeting_partitions
     )
-    assert {
-        partition.parameters_dict().get("CONF_DATE")
-        for partition in meeting_partitions
-    } == {"2024", "2025", "2026"}
+    assert {partition.parameters_dict().get("CONF_DATE") for partition in meeting_partitions} == {
+        "2024",
+        "2025",
+        "2026",
+    }
     direct = tuple(
         task
         for task in queue.tasks
@@ -635,19 +633,16 @@ def test_exact_identifier_gateway_replaces_56_way_scan_with_seven_bounded_tasks(
     )
     assert len(direct) == 7
     coordinators = [
-        task
-        for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "discovery_fanout"
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
     ]
     assert coordinators == []
     assert len(queue.tasks) == 8
-    assert len(
-        [
-            task
-            for task in queue.tasks
-            if dict(task.payload).get("work_kind") == "phase_barrier"
-        ]
-    ) == 1
+    assert (
+        len(
+            [task for task in queue.tasks if dict(task.payload).get("work_kind") == "phase_barrier"]
+        )
+        == 1
+    )
 
 
 def test_exact_fast_path_produces_overview_and_terminal_result_with_bounded_work() -> None:
@@ -701,9 +696,7 @@ def test_exact_fast_path_produces_overview_and_terminal_result_with_bounded_work
                     "CONF_DATE": "2026-07-08",
                     "COMM_NAME": "법제사법위원회",
                     "TITLE": "제22대 법제사법위원회 제1차 회의",
-                    "SUB_NAME": (
-                        "형사소송법 일부개정법률안(의안번호 2219564)"
-                    ),
+                    "SUB_NAME": ("형사소송법 일부개정법률안(의안번호 2219564)"),
                     "PDF_LINK_URL": "https://record.assembly.go.kr/exact.pdf",
                 },
                 {
@@ -712,9 +705,7 @@ def test_exact_fast_path_produces_overview_and_terminal_result_with_bounded_work
                     "CONF_DATE": "2026-07-08",
                     "COMM_NAME": "법제사법위원회",
                     "TITLE": "제22대 법제사법위원회 제2차 회의",
-                    "SUB_NAME": (
-                        "형사소송법 일부개정법률안(의안번호 2219614)"
-                    ),
+                    "SUB_NAME": ("형사소송법 일부개정법률안(의안번호 2219614)"),
                     "PDF_LINK_URL": "https://record.assembly.go.kr/wrong.pdf",
                 },
             ]
@@ -742,13 +733,14 @@ def test_exact_fast_path_produces_overview_and_terminal_result_with_bounded_work
     assert receipt.metadata_task_count == len(discovery_pages) == 3
     for task in discovery_pages:
         value.process_metadata_task(task)
+    assert runs.get_first_page_preview(receipt.research_id) is None
     process_phase_barrier(value, queue, "discovery")
 
     discovery = runs.get_discovery(receipt.research_id)
     assert discovery is not None
-    assert [
-        item.candidate_id for item in discovery.resolution.meetings.accepted
-    ] == ["meeting:https://record.assembly.go.kr/exact.pdf"]
+    assert [item.candidate_id for item in discovery.resolution.meetings.accepted] == [
+        "meeting:https://record.assembly.go.kr/exact.pdf"
+    ]
     wrong = next(
         item
         for item in discovery.resolution.meetings.decisions
@@ -761,9 +753,7 @@ def test_exact_fast_path_produces_overview_and_terminal_result_with_bounded_work
 
     for task in tuple(queue.tasks):
         payload = dict(task.payload)
-        if payload.get("phase") == "bill_status" or payload.get("work_kind") == (
-            "bill_documents"
-        ):
+        if payload.get("phase") == "bill_status" or payload.get("work_kind") == ("bill_documents"):
             value.process_metadata_task(task)
     process_phase_barrier(value, queue, "bill_status")
     for task in tuple(queue.tasks):
@@ -860,14 +850,17 @@ def test_concurrent_duplicate_barriers_allow_only_one_full_assembly(
 
     assert assemblies == [MetadataPhase.DISCOVERY]
     assert runs.get_discovery(receipt.research_id) is not None
-    assert len(
-        [
-            task
-            for task in queue.tasks
-            if dict(task.payload).get("work_kind") == "phase_barrier"
-            and dict(task.payload).get("attempt") == 2
-        ]
-    ) == 1
+    assert (
+        len(
+            [
+                task
+                for task in queue.tasks
+                if dict(task.payload).get("work_kind") == "phase_barrier"
+                and dict(task.payload).get("attempt") == 2
+            ]
+        )
+        == 1
+    )
 
 
 def test_broad_gateway_uses_bounded_coordinators_instead_of_serial_queue_fanout() -> None:
@@ -1188,9 +1181,10 @@ def test_large_page_expansion_is_chained_without_prior_page_rescans(
     coordinators = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "page_fanout"
     ]
-    assert len(coordinators) == (
-        len(follow_ups) + value.fanout_chunk_size - 1
-    ) // value.fanout_chunk_size
+    assert (
+        len(coordinators)
+        == (len(follow_ups) + value.fanout_chunk_size - 1) // value.fanout_chunk_size
+    )
     assert all(
         queue.delays[task.idempotency_key] == value.fanout_delay_seconds
         for task in coordinators[1:]
@@ -1262,6 +1256,14 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     monkeypatch.setattr(value, "_try_assemble_collection", counted_assembly)
 
     value.process_metadata_task(queue.tasks[0])
+
+    preview = runs.get_first_page_preview(receipt.research_id)
+    assert preview is not None
+    assert preview.accepted_total == 100
+    assert preview.source.source_complete is False
+    assert preview.source.source_rows_expected == 103
+    assert preview.source.source_rows_fetched == 100
+    assert value.derive_status(receipt.research_id).overview_available is True
     process_phase_barrier(value, queue, "discovery", attempt=1)
 
     assert assembled_phases == []
@@ -1279,6 +1281,10 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     assert discovery.filter_report.bills.outside_date_count == 0
     assert discovery.filter_report.bills.missing_date_count == 0
     assert discovery.resolution.bills.accepted_count == 103
+    complete_overview = runs.get_provisional_overview(receipt.research_id)
+    assert complete_overview is not None
+    assert complete_overview.accepted_total == 103
+    assert complete_overview.source.source_complete is True
     initial_fanout_tasks = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
