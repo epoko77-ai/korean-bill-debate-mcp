@@ -114,3 +114,38 @@ def test_complete_evidence_page_cannot_claim_another_cursor() -> None:
             returned_through=12,
             next_cursor="unexpected",
         )
+
+
+def test_proposer_roles_are_fingerprint_bound_and_serialized() -> None:
+    representative = ResearchContract(
+        query="김남근 의원이 대표발의한 법안",
+        as_of=datetime(2026, 7, 13, tzinfo=UTC),
+        representative_proposer_names=("김남근",),
+    )
+    co_proposer = ResearchContract(
+        query=representative.query,
+        as_of=representative.as_of,
+        co_proposer_names=("김남근",),
+    )
+
+    assert representative.fingerprint("revision") != co_proposer.fingerprint(
+        "revision"
+    )
+    assert representative.canonical_payload()["representative_proposer_names"] == [
+        "김남근"
+    ]
+
+
+def test_contract_rejects_duplicate_or_empty_proposer_names() -> None:
+    with pytest.raises(ValueError, match="representative proposer names must be unique"):
+        ResearchContract(
+            query="대표발의자 검색",
+            as_of=datetime(2026, 7, 13, tzinfo=UTC),
+            representative_proposer_names=("김남근", "김남근"),
+        )
+    with pytest.raises(ValueError, match="co-proposer names must not be empty"):
+        ResearchContract(
+            query="공동발의자 검색",
+            as_of=datetime(2026, 7, 13, tzinfo=UTC),
+            co_proposer_names=("",),
+        )

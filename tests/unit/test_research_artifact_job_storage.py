@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+import kasm.research.artifact_job_storage as artifact_job_module
 from kasm.research.artifact_job_storage import ArtifactResearchJobStore
 from kasm.research.artifacts import (
     ArtifactIntegrityError,
@@ -15,6 +16,7 @@ from kasm.research.artifacts import (
     FilesystemResearchArtifactStore,
     SecretMaterialError,
     StoredArtifact,
+    canonical_hash,
 )
 from kasm.research.contracts import (
     CoverageLedger,
@@ -23,7 +25,7 @@ from kasm.research.contracts import (
     ResearchContract,
     ResearchIntent,
 )
-from kasm.research.jobs import JobStatus, ResearchJobStore
+from kasm.research.jobs import JobStatus, ResearchJob, ResearchJobStore
 
 
 class Clock:
@@ -107,6 +109,9 @@ def contract(
         assembly_term=22,
         committees=("과학기술정보방송통신위원회",),
         bill_numbers=("2219564",),
+        representative_proposer_names=("김남근",),
+        co_proposer_names=("김윤",),
+        proposer_names=("박정",),
         evidence_types=(
             EvidenceType.BILLS,
             EvidenceType.SUBCOMMITTEE_MINUTES,
@@ -187,6 +192,44 @@ def test_round_trip_is_canonical_and_survives_restart(tmp_path: Path) -> None:
     assert restored.status is JobStatus.COMPLETE
     assert restored.coverage == coverage(complete=True)
     assert len(event_refs(artifacts, created.id)) == 2
+
+
+def test_pre_proposer_schema_fingerprint_remains_readable() -> None:
+    legacy_contract = ResearchContract(
+        query="AI 법안 처리 흐름",
+        as_of=datetime(2026, 7, 13, 9, 30, tzinfo=UTC),
+    )
+    legacy_payload = legacy_contract.canonical_payload()
+    for field in (
+        "representative_proposer_names",
+        "co_proposer_names",
+        "proposer_names",
+    ):
+        legacy_payload.pop(field)
+    index_revision = "legacy-revision"
+    fingerprint = canonical_hash(
+        {"contract": legacy_payload, "index_revision": index_revision}
+    )
+    created_at = datetime(2026, 7, 13, 12, tzinfo=UTC)
+    job = ResearchJob(
+        id="research_legacy_proposer_schema",
+        contract=legacy_contract,
+        query_fingerprint=fingerprint,
+        index_revision=index_revision,
+        status=JobStatus.QUEUED,
+        stage="queued",
+        progress=0.0,
+        created_at=created_at,
+        updated_at=created_at,
+        expires_at=created_at + timedelta(hours=1),
+    )
+    initial = artifact_job_module._initial_payload(job, "f" * 32)
+    initial["contract"] = legacy_payload
+
+    restored = artifact_job_module._initial_from_payload(initial, job.id)
+
+    assert restored.query_fingerprint == fingerprint
+    assert restored.contract.representative_proposer_names == ()
 
 
 def test_job_fixed_state_and_history_skip_unrelated_outcome_reads(

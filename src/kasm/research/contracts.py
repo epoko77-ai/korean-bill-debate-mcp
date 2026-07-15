@@ -56,6 +56,9 @@ class ResearchContract:
     assembly_terms: tuple[int, ...] = ()
     committees: tuple[str, ...] = ()
     bill_numbers: tuple[str, ...] = ()
+    representative_proposer_names: tuple[str, ...] = ()
+    co_proposer_names: tuple[str, ...] = ()
+    proposer_names: tuple[str, ...] = ()
     evidence_types: tuple[EvidenceType, ...] = DEFAULT_EVIDENCE_TYPES
     intents: tuple[ResearchIntent, ...] = (ResearchIntent.DISCOVER,)
     ordering: str = "chronological"
@@ -91,6 +94,15 @@ class ResearchContract:
             raise ValueError("research intents must be unique")
         if any(not number.isdigit() or len(number) != 7 for number in self.bill_numbers):
             raise ValueError("bill numbers must contain exactly seven digits")
+        for label, names in (
+            ("representative proposer", self.representative_proposer_names),
+            ("co-proposer", self.co_proposer_names),
+            ("proposer", self.proposer_names),
+        ):
+            if len(names) != len(set(names)):
+                raise ValueError(f"{label} names must be unique")
+            if any(not name.strip() for name in names):
+                raise ValueError(f"{label} names must not be empty")
         if self.ordering not in {"chronological", "relevance"}:
             raise ValueError("ordering must be chronological or relevance")
         if self.completeness not in {"comprehensive", "focused"}:
@@ -112,6 +124,11 @@ class ResearchContract:
             "assembly_terms": list(self.assembly_terms),
             "committees": list(self.committees),
             "bill_numbers": list(self.bill_numbers),
+            "representative_proposer_names": list(
+                self.representative_proposer_names
+            ),
+            "co_proposer_names": list(self.co_proposer_names),
+            "proposer_names": list(self.proposer_names),
             "evidence_types": [item.value for item in self.evidence_types],
             "intents": [item.value for item in self.intents],
             "ordering": self.ordering,

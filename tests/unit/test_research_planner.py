@@ -334,6 +334,17 @@ def test_explicit_assembly_term_cannot_conflict_with_exact_bill_number() -> None
         plan_research("제22대 국회 2112345 의안", as_of=AS_OF)
 
 
+def test_exact_bill_number_cannot_conflict_with_requested_dates() -> None:
+    with pytest.raises(ValueError, match="bill number.*date range"):
+        plan_research("2010년 2219564 의안", as_of=AS_OF)
+
+    plan = plan_research(
+        "2020년 5월 30일부터 현재까지 2219564 의안",
+        as_of=AS_OF,
+    )
+    assert plan.contract.assembly_terms == (21, 22)
+
+
 def test_interpreted_scope_serializes_intent_and_its_query_evidence() -> None:
     scope = plan_research("왜 막혔고 누가 반대했어", as_of=AS_OF).interpreted_scope.to_dict()
 
@@ -342,3 +353,40 @@ def test_interpreted_scope_serializes_intent_and_its_query_evidence() -> None:
         {"intent": "explain_issues", "matched_phrases": ["왜", "막혔"]},
         {"intent": "compare_positions", "matched_phrases": ["반대"]},
     ]
+
+
+@pytest.mark.parametrize(
+    ("query", "representatives", "co_proposers", "proposers"),
+    (
+        ("김남근 의원이 대표발의한 법안", ("김남근",), (), ()),
+        ("김남근 대표발의 법안", ("김남근",), (), ()),
+        ("김남근이 대표 발의한 법안", ("김남근",), (), ()),
+        ("공동발의자 김윤 의원의 인공지능 법안", (), ("김윤",), ()),
+        ("김윤 공동발의 법안", (), ("김윤",), ()),
+        ("박정 의원이 발의한 법안을 찾아줘", (), (), ("박정",)),
+        ("박정이 발의한 법안", (), (), ("박정",)),
+    ),
+)
+def test_planner_extracts_exact_proposer_roles_into_immutable_scope(
+    query: str,
+    representatives: tuple[str, ...],
+    co_proposers: tuple[str, ...],
+    proposers: tuple[str, ...],
+) -> None:
+    plan = plan_research(query, as_of=AS_OF)
+
+    assert plan.contract.representative_proposer_names == representatives
+    assert plan.contract.co_proposer_names == co_proposers
+    assert plan.contract.proposer_names == proposers
+    payload = plan.interpreted_scope.to_dict()
+    assert payload["representative_proposer_names"] == list(representatives)
+    assert payload["co_proposer_names"] == list(co_proposers)
+    assert payload["proposer_names"] == list(proposers)
+
+
+def test_planner_does_not_guess_a_proposer_from_a_bare_member_mention() -> None:
+    plan = plan_research("김남근 의원의 인공지능 관련 발언", as_of=AS_OF)
+
+    assert plan.contract.representative_proposer_names == ()
+    assert plan.contract.co_proposer_names == ()
+    assert plan.contract.proposer_names == ()

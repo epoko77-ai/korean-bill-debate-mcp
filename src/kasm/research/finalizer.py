@@ -512,6 +512,10 @@ def _evidence_records(
 ) -> tuple[EvidenceRecord, ...]:
     records: list[EvidenceRecord] = []
     bill_by_no = {item.bill_no: item for item in prepared.bills}
+    bill_decision_by_no = {
+        _required_bill_number(item.candidate): item
+        for item in context.metadata.discovery.resolution.bills.accepted
+    }
     bill_rows = dict(prepared.bill_rows)
     statuses = dict(prepared.status_rows)
     meeting_by_id = {item.id: item for item in prepared.meetings}
@@ -526,6 +530,7 @@ def _evidence_records(
 
     for bill in prepared.bills:
         row = bill_rows[bill.bill_no]
+        decision = bill_decision_by_no[bill.bill_no]
         records.append(
             _record(
                 identifier=f"evidence:bill:{bill.bill_no}",
@@ -542,6 +547,15 @@ def _evidence_records(
                     ("bill_no", bill.bill_no),
                     ("committee", bill.committee),
                     ("proposer", bill.proposer),
+                    (
+                        "representative_proposers",
+                        _first_text(row, ("RST_PROPOSER",)),
+                    ),
+                    ("co_proposers", _first_text(row, ("PUBL_PROPOSER",))),
+                    (
+                        "selection_match_reasons",
+                        "|".join(decision.match_reasons),
+                    ),
                 ),
             )
         )
@@ -1221,6 +1235,14 @@ def _normalized_title(value: str) -> str:
 
 def _contains_status(row: Mapping[str, Any]) -> bool:
     return any(row.get(field) not in (None, "") for field in _STATUS_FIELDS)
+
+
+def _first_text(row: Mapping[str, Any], fields: Sequence[str]) -> str | None:
+    for field in fields:
+        value = row.get(field)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
 
 
 def _bill_number(row: Mapping[str, Any]) -> str | None:

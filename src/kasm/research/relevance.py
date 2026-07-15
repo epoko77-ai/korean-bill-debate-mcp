@@ -25,6 +25,7 @@ from datetime import date, datetime
 from functools import lru_cache
 from typing import Final
 
+from kasm.research.proposers import extract_proposer_query_scope, valid_member_name
 from kasm.search.terminology import (
     LEGAL_TERMINOLOGY,
     TERMINOLOGY_VERSION,
@@ -35,7 +36,9 @@ from kasm.search.terminology import (
 
 _BILL_NUMBER = re.compile(r"(?<!\d)\d{7}(?!\d)")
 _STATUTE = re.compile(r"[가-힣]{2,30}(?:기본)?법(?=$|[^가-힣])")
-_DATE = re.compile(r"(?P<year>20\d{2})[-./년 ](?P<month>\d{1,2})[-./월 ](?P<day>\d{1,2})")
+_DATE = re.compile(
+    r"(?P<year>(?:19|20)\d{2})[-./년 ](?P<month>\d{1,2})[-./월 ](?P<day>\d{1,2})"
+)
 _QUERY_WORD = re.compile(r"[0-9A-Za-z가-힣]+")
 _HANGUL = re.compile(r"[가-힣]")
 _DIGIT = re.compile(r"\d")
@@ -61,6 +64,8 @@ _GENERIC_TERMS: Final = frozenset(
         "문서",
         "방안",
         "발언",
+        "발의",
+        "발의자",
         "법률",
         "법률안",
         "법안",
@@ -77,6 +82,13 @@ _GENERIC_TERMS: Final = frozenset(
         "입법",
         "자료",
         "전체",
+        "의원",
+        "대표",
+        "대표발의",
+        "대표발의자",
+        "공동",
+        "공동발의",
+        "공동발의자",
         "쟁점",
         "정리",
         "지원",
@@ -171,6 +183,32 @@ _BODY_FIELDS: Final = (
     "status",
     "process_result",
 )
+_REPRESENTATIVE_PROPOSER_FIELDS: Final = (
+    "RST_PROPOSER",
+    "representative_proposer",
+    "representative_proposers",
+)
+_CO_PROPOSER_FIELDS: Final = (
+    "PUBL_PROPOSER",
+    "co_proposer",
+    "co_proposers",
+)
+_DISPLAY_PROPOSER_FIELDS: Final = ("PROPOSER", "proposer")
+_PROPOSER_CODE_FIELD: Final = {
+    "RST_PROPOSER": "RST_MONA_CD",
+    "PUBL_PROPOSER": "PUBL_MONA_CD",
+    "representative_proposer": "representative_proposer_code",
+    "representative_proposers": "representative_proposer_codes",
+    "co_proposer": "co_proposer_code",
+    "co_proposers": "co_proposer_codes",
+}
+_PROPOSER_SPLIT: Final = re.compile(r"\s*[,·ㆍ;|/]\s*")
+_DISPLAY_REPRESENTATIVE: Final = re.compile(
+    r"^\s*(?P<name>[가-힣]{2,5})\s*의원(?:\s*등\s*\d+\s*인)?\s*$"
+)
+_PROPOSER_INSTRUCTION_TERM: Final = re.compile(
+    r"^(?:대표|공동)?발의(?:자|자가|자는|자의|자로|한|한.*|했.*)?$"
+)
 _COMMITTEE_FIELDS: Final = (
     "committee",
     "committee_name",
@@ -202,6 +240,9 @@ class RelevanceCriteria:
     related_statute_terms: tuple[str, ...] = ()
     related_issue_terms: tuple[str, ...] = ()
     committees: tuple[str, ...] = ()
+    representative_proposer_names: tuple[str, ...] = ()
+    co_proposer_names: tuple[str, ...] = ()
+    proposer_names: tuple[str, ...] = ()
     date_from: date | None = None
     date_to: date | None = None
     minimum_score: int = DEFAULT_MINIMUM_SCORE
@@ -217,6 +258,15 @@ class RelevanceCriteria:
             raise ValueError("date_from must be on or before date_to")
         if self.minimum_score < 1:
             raise ValueError("minimum_score must be positive")
+        for names in (
+            self.representative_proposer_names,
+            self.co_proposer_names,
+            self.proposer_names,
+        ):
+            if len(names) != len(set(names)) or any(
+                not valid_member_name(name) for name in names
+            ):
+                raise ValueError("proposer names must be unique Korean full names")
         if self.terminology_version != TERMINOLOGY_VERSION:
             raise ValueError("relevance criteria uses an unsupported terminology version")
 
@@ -235,6 +285,9 @@ class RelevanceCriteria:
         statute_terms: Sequence[str] = (),
         issue_terms: Sequence[str] = (),
         committees: Sequence[str] = (),
+        representative_proposer_names: Sequence[str] = (),
+        co_proposer_names: Sequence[str] = (),
+        proposer_names: Sequence[str] = (),
         date_from: date | None = None,
         date_to: date | None = None,
         minimum_score: int = DEFAULT_MINIMUM_SCORE,
@@ -242,6 +295,22 @@ class RelevanceCriteria:
         """Build criteria while conservatively extracting known query concepts."""
 
         terminology = LEGAL_TERMINOLOGY.expand(query, include_related=True)
+        extracted_proposers = extract_proposer_query_scope(query)
+        representative_names = _distinct(
+            (
+                *representative_proposer_names,
+                *extracted_proposers.representative_proposer_names,
+            )
+        )
+        co_names = _distinct(
+            (*co_proposer_names, *extracted_proposers.co_proposer_names)
+        )
+        role_specific = {*representative_names, *co_names}
+        any_names = _distinct(
+            name
+            for name in (*proposer_names, *extracted_proposers.proposer_names)
+            if name not in role_specific
+        )
         normalized_query = _normalize_text(query)
         extracted_numbers = tuple(_BILL_NUMBER.findall(query))
         extracted_statutes = tuple(_STATUTE.findall(normalized_query))
@@ -279,6 +348,9 @@ class RelevanceCriteria:
                 *related_statutes,
                 *related_issues,
                 *committees,
+                *representative_names,
+                *co_names,
+                *any_names,
             ),
         )
         return cls(
@@ -298,6 +370,9 @@ class RelevanceCriteria:
             related_statute_terms=_meaningful_terms(related_statutes),
             related_issue_terms=_meaningful_terms(related_issues),
             committees=_distinct(committees),
+            representative_proposer_names=representative_names,
+            co_proposer_names=co_names,
+            proposer_names=any_names,
             date_from=date_from,
             date_to=date_to,
             minimum_score=minimum_score,
@@ -331,6 +406,9 @@ class _PreparedCriteria:
     issues: tuple[str, ...]
     related_statutes: tuple[str, ...]
     related_issues: tuple[str, ...]
+    representative_proposer_names: tuple[str, ...]
+    co_proposer_names: tuple[str, ...]
+    proposer_names: tuple[str, ...]
 
     @property
     def meaningful(self) -> bool:
@@ -340,6 +418,20 @@ class _PreparedCriteria:
             or self.related_statutes
             or self.related_issues
         )
+
+    @property
+    def has_proposer_scope(self) -> bool:
+        return bool(
+            self.representative_proposer_names
+            or self.co_proposer_names
+            or self.proposer_names
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _OfficialProposers:
+    representatives: tuple[tuple[str, str, str | None], ...]
+    co_proposers: tuple[tuple[str, str, str | None], ...]
 
 
 def evaluate_candidate(
@@ -381,7 +473,21 @@ def evaluate_candidate(
     if matched_date is not None and has_date_scope:
         reasons.append(f"date_in_range:{matched_date.isoformat()}")
 
+    bill_candidate = _is_bill_candidate(candidate)
+    proposer_match_count = 0
+    if prepared.has_proposer_scope and bill_candidate:
+        proposer_reasons, proposer_rejection = _match_proposer_scope(
+            candidate,
+            prepared,
+        )
+        if proposer_rejection is not None:
+            return _rejected(candidate, candidate_id, proposer_rejection)
+        proposer_match_count = len(proposer_reasons)
+        score += proposer_match_count * 100
+        reasons.extend(proposer_reasons)
+
     texts = _candidate_text(candidate)
+    topic_score = 0
     for kind, terms, weights in (
         # A direct reviewed concept must outrank any combination of merely
         # related concepts.  This prevents a document mentioning both a nearby
@@ -408,11 +514,19 @@ def evaluate_candidate(
             if source is None:
                 continue
             score += weights[source]
+            topic_score += weights[source]
             reasons.append(f"{kind}:{term}@{source}")
 
     # Bill-number lookup is itself conclusive.  All other searches require at
     # least one non-generic term and must clear the configured threshold.
-    if requested_numbers:
+    if prepared.has_proposer_scope and bill_candidate:
+        # A proposer name is an identity filter, not another fuzzy keyword.
+        # When the user also supplies a subject, both must independently pass.
+        relevant = bool(
+            proposer_match_count
+            and (not prepared.meaningful or topic_score >= criteria.minimum_score)
+        )
+    elif requested_numbers:
         relevant = score >= 100
     elif not prepared.meaningful and (
         matched_committee is not None or matched_date is not None
@@ -434,7 +548,11 @@ def evaluate_candidate(
     else:
         relevant = score >= criteria.minimum_score
 
-    rejection = () if relevant else ("below_minimum_score",)
+    rejection = () if relevant else (
+        "proposer_topic_mismatch"
+        if prepared.has_proposer_scope and bill_candidate and prepared.meaningful
+        else "below_minimum_score",
+    )
     return RelevanceResult(
         candidate=candidate,
         candidate_id=candidate_id,
@@ -463,6 +581,9 @@ def _prepare_criteria(criteria: RelevanceCriteria) -> _PreparedCriteria:
             _meaningful_terms(criteria.related_issue_terms),
             (*statutes, *issues),
         ),
+        representative_proposer_names=criteria.representative_proposer_names,
+        co_proposer_names=criteria.co_proposer_names,
+        proposer_names=criteria.proposer_names,
     )
 
 
@@ -532,6 +653,168 @@ def _candidate_text(candidate: Mapping[str, object]) -> _CandidateText:
         agenda=_normalize_text(" ".join(part for part in agenda_parts if part)),
         body=_normalize_text(_field_text(candidate, _BODY_FIELDS)),
     )
+
+
+def _is_bill_candidate(candidate: Mapping[str, object]) -> bool:
+    return any(
+        _string(candidate.get(field)).strip()
+        for field in (
+            "BILL_NO",
+            "bill_no",
+            "BILL_ID",
+            "bill_id",
+            *_REPRESENTATIVE_PROPOSER_FIELDS,
+            *_CO_PROPOSER_FIELDS,
+            *_DISPLAY_PROPOSER_FIELDS,
+        )
+    )
+
+
+def _match_proposer_scope(
+    candidate: Mapping[str, object],
+    criteria: _PreparedCriteria,
+) -> tuple[tuple[str, ...], str | None]:
+    official = _official_proposers(candidate)
+    representatives = {
+        name: (field, code) for name, field, code in official.representatives
+    }
+    co_proposers = {
+        name: (field, code) for name, field, code in official.co_proposers
+    }
+    all_proposers = {
+        name: ("co_proposer", field, code)
+        for name, field, code in official.co_proposers
+    }
+    all_proposers.update(
+        {
+            name: ("representative", field, code)
+            for name, field, code in official.representatives
+        }
+    )
+    reasons: list[str] = []
+
+    matched_representatives = tuple(
+        (name, representatives[name])
+        for name in criteria.representative_proposer_names
+        if name in representatives
+    )
+    if criteria.representative_proposer_names and not matched_representatives:
+        requested = "|".join(criteria.representative_proposer_names)
+        return (), f"representative_proposer_mismatch:{requested}"
+    for name, representative_match in matched_representatives:
+        field, code = representative_match
+        reasons.append(_proposer_reason("representative", name, field, code))
+
+    matched_co_proposers = tuple(
+        (name, co_proposers[name])
+        for name in criteria.co_proposer_names
+        if name in co_proposers
+    )
+    if criteria.co_proposer_names and not matched_co_proposers:
+        requested = "|".join(criteria.co_proposer_names)
+        return (), f"co_proposer_mismatch:{requested}"
+    for name, co_proposer_match in matched_co_proposers:
+        field, code = co_proposer_match
+        reasons.append(_proposer_reason("co_proposer", name, field, code))
+
+    matched_proposers = tuple(
+        (name, all_proposers[name])
+        for name in criteria.proposer_names
+        if name in all_proposers
+    )
+    if criteria.proposer_names and not matched_proposers:
+        requested = "|".join(criteria.proposer_names)
+        return (), f"proposer_mismatch:{requested}"
+    for name, proposer_match in matched_proposers:
+        role, field, code = proposer_match
+        reasons.append(_proposer_reason(role, name, field, code))
+    return tuple(reasons), None
+
+
+def _official_proposers(candidate: Mapping[str, object]) -> _OfficialProposers:
+    representatives = _proposer_entries(
+        candidate,
+        _REPRESENTATIVE_PROPOSER_FIELDS,
+    )
+    if not representatives:
+        # ``PROPOSER`` is an official compact label such as "김성원의원 등
+        # 10인".  It can safely recover only the displayed representative;
+        # it cannot prove the identities behind "등 N인".
+        representatives = _display_representative_entries(candidate)
+    co_proposers = _proposer_entries(candidate, _CO_PROPOSER_FIELDS)
+    return _OfficialProposers(representatives, co_proposers)
+
+
+def _proposer_entries(
+    candidate: Mapping[str, object],
+    fields: Sequence[str],
+) -> tuple[tuple[str, str, str | None], ...]:
+    entries: list[tuple[str, str, str | None]] = []
+    for field in fields:
+        names = _proposer_names(candidate.get(field))
+        code_field = _PROPOSER_CODE_FIELD.get(field)
+        codes = _proposer_codes(candidate.get(code_field)) if code_field else ()
+        aligned_codes: tuple[str | None, ...] = (
+            tuple(codes) if len(codes) == len(names) else (None,) * len(names)
+        )
+        entries.extend(
+            (name, field, code)
+            for name, code in zip(names, aligned_codes, strict=True)
+        )
+    return tuple(dict.fromkeys(entries))
+
+
+def _display_representative_entries(
+    candidate: Mapping[str, object],
+) -> tuple[tuple[str, str, str | None], ...]:
+    for field in _DISPLAY_PROPOSER_FIELDS:
+        value = _string(candidate.get(field))
+        match = _DISPLAY_REPRESENTATIVE.fullmatch(value)
+        if match and valid_member_name(match.group("name")):
+            return ((match.group("name"), field, None),)
+    return ()
+
+
+def _proposer_names(value: object) -> tuple[str, ...]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return _distinct(
+            name for item in value for name in _proposer_names(item)
+        )
+    text = _string(value).strip()
+    if not text:
+        return ()
+    names: list[str] = []
+    for raw in _PROPOSER_SPLIT.split(text):
+        candidate = re.sub(r"^(?:국회)?의원\s*", "", raw.strip())
+        candidate = re.sub(r"\s*의원$", "", candidate).strip()
+        if valid_member_name(candidate):
+            names.append(candidate)
+    return _distinct(names)
+
+
+def _proposer_codes(value: object) -> tuple[str, ...]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        raw_values = (_string(item).strip() for item in value)
+    else:
+        raw_values = (item.strip() for item in _PROPOSER_SPLIT.split(_string(value)))
+    return tuple(
+        dict.fromkeys(
+            item for item in raw_values if re.fullmatch(r"[0-9A-Za-z]+", item)
+        )
+    )
+
+
+def _proposer_reason(
+    role: str,
+    name: str,
+    field: str,
+    member_code: str | None,
+) -> str:
+    reason = f"proposer_exact:{role}:{name}@{field}"
+    code_field = _PROPOSER_CODE_FIELD.get(field)
+    if member_code is not None and code_field is not None:
+        reason += f"[{code_field}={member_code}]"
+    return reason
 
 
 def _candidate_bill_numbers(candidate: Mapping[str, object]) -> set[str]:
@@ -654,6 +937,9 @@ def _literal_issue_terms(
     }
     tokens: list[str] = []
     for raw in _QUERY_WORD.findall(query):
+        raw_key = _match_key(raw.casefold())
+        if _is_generic_term(raw_key):
+            continue
         token = _strip_particle(raw.casefold())
         key = _match_key(token)
         if (
@@ -712,7 +998,11 @@ def _nonoverlapping_related(
 
 
 def _is_generic_term(term: str) -> bool:
-    if term in _GENERIC_TERMS or term.isdigit():
+    if (
+        term in _GENERIC_TERMS
+        or term.isdigit()
+        or _PROPOSER_INSTRUCTION_TERM.fullmatch(term)
+    ):
         return True
     for particle in _KOREAN_PARTICLES:
         if term.endswith(particle) and len(term) > len(particle):

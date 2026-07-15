@@ -7,7 +7,7 @@ query cache on the user's machine.
 
 ```bash
 export ASSEMBLY_OPEN_API_KEY='YOUR_KEY'
-uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.0.0 kbd mcp
+uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.0 kbd mcp
 ```
 
 ## Hosted user-keyed Streamable HTTP
@@ -80,6 +80,31 @@ Do not set `KBD_RESEARCH_CORPUS_REVISION` merely to make the health field true. 
 published, complete revision whose readiness marker and referenced objects have been verified. It
 is valid to leave it unset: the server then reports unproven broad scope as partial instead of
 claiming complete historical recall.
+
+### Historical-scope production checks
+
+The `v1.1.0` planner knows the official date bounds for terms 1–22. That catalog expands an explicit
+term/date range into deterministic source partitions; it is not a substitute for source readiness.
+No scope defaults to the configured current term, currently term 22. Before describing historical
+support in a deployment, verify all of the following:
+
+1. The immutable contract and fingerprint retain every requested Assembly term, exact bill number,
+   and representative/co/role-agnostic proposer name.
+2. Representative-only discovery may use the upstream `PROPOSER` acceleration, but every accepted
+   row is still checked against the official role field. Co-proposer and role-agnostic discovery
+   must not rely on unsupported upstream filters.
+3. Proposer-scoped meetings are admitted only through an exact seven-digit bill number on the
+   official agenda. Topic similarity alone must not create a bill–meeting link.
+4. Final overview artifacts retain `source_availability` per dataset and term. Only complete,
+   successful zero-row partitions may emit `no_records`; unfinished or failed work must remain
+   `incomplete`.
+5. A dedicated subcommittee zero includes its cross-source caveat, and review-report availability
+   is checked dynamically for each relevant bill.
+
+The current empirical source-depth matrix—plenary 1+, committee 2+, bill/status 10+, dedicated
+subcommittee 16+, and per-bill dynamic review reports—is documented in
+[Official data sources](data-sources.md). It must not be converted into a claim that the deployment
+contains a complete historical full-text corpus.
 
 After deployment, `/healthz` must report `durable_research: true` and `mcp_tool_count: 13`. Then run
 `scripts/smoke_remote_durable_oauth.py` once with `KBD_SMOKE_ORIGIN=https://claude.ai` and once with

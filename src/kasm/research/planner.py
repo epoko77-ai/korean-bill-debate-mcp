@@ -13,14 +13,19 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Final
+from typing import Any
 
+from kasm.research.assembly_terms import (
+    DEFAULT_ASSEMBLY_TERM_BOUNDS,
+    assembly_terms_intersecting,
+)
 from kasm.research.contracts import (
     DEFAULT_EVIDENCE_TYPES,
     EvidenceType,
     ResearchContract,
     ResearchIntent,
 )
+from kasm.research.proposers import extract_proposer_query_scope
 from kasm.search.bilingual import PreparedQuery, prepare_query
 from kasm.search.terminology import LEGAL_TERMINOLOGY, TermCategory
 
@@ -35,25 +40,27 @@ _CURRENT = re.compile(r"현재까지|지금까지")
 _RECENT = re.compile(r"최근")
 _BILL_NUMBER = re.compile(r"(?<!\d)\d{7}(?!\d)")
 _YEAR_MONTH = re.compile(
-    r"(?<!\d)(?P<year>20\d{2})\s*년\s*(?P<month>1[0-2]|0?[1-9])\s*월"
+    r"(?<!\d)(?P<year>(?:19|20)\d{2})\s*년\s*(?P<month>1[0-2]|0?[1-9])\s*월"
 )
-_YEAR_ONLY = re.compile(r"(?<!\d)(?P<year>20\d{2})\s*년(?!\s*\d{1,2}\s*월)")
+_YEAR_ONLY = re.compile(
+    r"(?<!\d)(?P<year>(?:19|20)\d{2})\s*년(?!\s*\d{1,2}\s*월)"
+)
 _KOREAN_INHERITED_DAY_RANGE = re.compile(
-    r"(?<!\d)(?P<start_year>20\d{2})\s*년\s*"
+    r"(?<!\d)(?P<start_year>(?:19|20)\d{2})\s*년\s*"
     r"(?P<start_month>\d{1,2})\s*월\s*(?P<start_day>\d{1,2})\s*일\s*"
     r"(?:부터|에서)\s*"
-    r"(?:(?P<end_year>20\d{2})\s*년\s*)?"
+    r"(?:(?P<end_year>(?:19|20)\d{2})\s*년\s*)?"
     r"(?P<end_month>\d{1,2})\s*월\s*(?P<end_day>\d{1,2})\s*일\s*까지"
 )
 _KOREAN_MONTH_RANGE = re.compile(
-    r"(?<!\d)(?P<start_year>20\d{2})\s*년\s*"
+    r"(?<!\d)(?P<start_year>(?:19|20)\d{2})\s*년\s*"
     r"(?P<start_month>1[0-2]|0?[1-9])\s*월\s*(?:부터|에서)\s*"
-    r"(?:(?P<end_year>20\d{2})\s*년\s*)?"
+    r"(?:(?P<end_year>(?:19|20)\d{2})\s*년\s*)?"
     r"(?P<end_month>1[0-2]|0?[1-9])\s*월\s*까지"
 )
 _KOREAN_YEAR_RANGE = re.compile(
-    r"(?<!\d)(?P<start_year>20\d{2})\s*년\s*(?:부터|에서)\s*"
-    r"(?P<end_year>20\d{2})\s*년\s*까지"
+    r"(?<!\d)(?P<start_year>(?:19|20)\d{2})\s*년\s*(?:부터|에서)\s*"
+    r"(?P<end_year>(?:19|20)\d{2})\s*년\s*까지"
 )
 _RELATIVE_MONTHS = re.compile(r"(?:최근|지난)\s*(?P<count>\d{1,3})\s*개월")
 _RELATIVE_YEARS = re.compile(r"(?:최근|지난)\s*(?P<count>\d{1,2})\s*년")
@@ -61,17 +68,16 @@ _THIS_YEAR = re.compile(r"올해|금년")
 _LAST_YEAR = re.compile(r"작년|지난해")
 _THIS_MONTH = re.compile(r"이번\s*달|이달")
 _LAST_MONTH = re.compile(r"지난\s*달|지난달")
-_ASSEMBLY_TERM = re.compile(r"(?<!\d)(?:제\s*)?(?P<term>1[9]|2[0-2])\s*대(?:\s*국회)?")
-
-# National Assembly terms are contiguous four-year intervals.  Scope planning
-# needs these bounds before partitioning so the immutable research contract and
-# its fingerprint record every term that will actually be searched.
-DEFAULT_ASSEMBLY_TERM_BOUNDS: Final = {
-    19: (date(2012, 5, 30), date(2016, 5, 29)),
-    20: (date(2016, 5, 30), date(2020, 5, 29)),
-    21: (date(2020, 5, 30), date(2024, 5, 29)),
-    22: (date(2024, 5, 30), date(2028, 5, 29)),
-}
+_ASSEMBLY_TERM = re.compile(
+    r"(?<!\d)(?:제\s*)?(?P<term>[1-9]|1\d|2[0-2])\s*대(?:\s*국회)?"
+)
+_CONSTITUENT_ASSEMBLY = re.compile(r"제헌(?:\s*국회)?")
+_ASSEMBLY_TERM_RANGE = re.compile(
+    r"(?<!\d)(?:제\s*)?(?P<start>[1-9]|1\d|2[0-2])\s*대?\s*"
+    r"(?:부터|에서|~|～|〜|\-|–|—)\s*"
+    r"(?:제\s*)?(?P<end>[1-9]|1\d|2[0-2])\s*대(?:\s*국회)?(?:\s*까지)?"
+)
+_ASSEMBLY_RANGE_CONNECTOR = re.compile(r"(?:부터|에서|~|～|〜|\-|–|—)")
 
 # Current 22nd Assembly names are first.  Former names are retained because a
 # query can explicitly request an earlier period.  Matching is literal: topic
@@ -196,6 +202,9 @@ class InterpretedScope:
     assembly_term_explicit: bool
     bill_numbers: tuple[str, ...]
     committees: tuple[str, ...]
+    representative_proposer_names: tuple[str, ...]
+    co_proposer_names: tuple[str, ...]
+    proposer_names: tuple[str, ...]
     evidence_types: tuple[EvidenceType, ...]
     intents: tuple[ResearchIntent, ...]
     intent_evidence: tuple[IntentEvidence, ...]
@@ -215,6 +224,11 @@ class InterpretedScope:
             "assembly_term_explicit": self.assembly_term_explicit,
             "bill_numbers": list(self.bill_numbers),
             "committees": list(self.committees),
+            "representative_proposer_names": list(
+                self.representative_proposer_names
+            ),
+            "co_proposer_names": list(self.co_proposer_names),
+            "proposer_names": list(self.proposer_names),
             "evidence_types": [item.value for item in self.evidence_types],
             "intents": [item.value for item in self.intents],
             "intent_evidence": [item.to_dict() for item in self.intent_evidence],
@@ -292,6 +306,7 @@ class ResearchContractPlanner:
         if interpreted_from and interpreted_to and interpreted_from > interpreted_to:
             raise ValueError("date_from must be on or before date_to")
         bill_numbers = _ordered_unique(_BILL_NUMBER.findall(prepared.original))
+        proposer_scope = extract_proposer_query_scope(prepared.original)
         interpreted_committees = _explicit_committees(
             prepared.original,
             prepared.search_query,
@@ -300,13 +315,14 @@ class ResearchContractPlanner:
             interpreted_committees = _ordered_unique(
                 tuple(value.strip() for value in committees if value.strip())
             )
-        query_term = _explicit_assembly_term(prepared.original)
-        term_is_explicit = assembly_term is not None or query_term is not None
-        interpreted_term = (
-            assembly_term
+        query_terms = _explicit_assembly_terms(prepared.original)
+        explicit_terms = (
+            (assembly_term,)
             if assembly_term is not None
-            else query_term or self.assembly_term
+            else query_terms
         )
+        term_is_explicit = bool(explicit_terms)
+        interpreted_term = explicit_terms[-1] if explicit_terms else self.assembly_term
         if interpreted_term < 1:
             raise ValueError("assembly_term must be positive")
         bill_terms = tuple(sorted({int(number[:2]) for number in bill_numbers}))
@@ -316,33 +332,46 @@ class ResearchContractPlanner:
         if unsupported_bill_terms:
             raise ValueError("bill number belongs to an unsupported Assembly term")
         if bill_terms:
-            if term_is_explicit and bill_terms != (interpreted_term,):
+            if explicit_terms and not set(bill_terms).issubset(explicit_terms):
                 raise ValueError("bill number conflicts with the explicit Assembly term")
+            if interpreted_from is not None or interpreted_to is not None:
+                effective_to = min(interpreted_to or observed_at.date(), observed_at.date())
+                if any(
+                    (interpreted_from or bounds[0]) > min(bounds[1], effective_to)
+                    or effective_to < bounds[0]
+                    for term in bill_terms
+                    for bounds in (DEFAULT_ASSEMBLY_TERM_BOUNDS[term],)
+                ):
+                    raise ValueError("bill number conflicts with the requested date range")
             # The first two digits of an official seven-digit bill number bind
             # its Assembly term. This exact identity outranks the configured
             # current-term default and prevents a valid historical bill from
             # being queried against the wrong AGE partition.
             if interpreted_from is None and interpreted_to is None:
-                interpreted_terms = _contiguous_supported_terms(bill_terms)
+                interpreted_terms = explicit_terms or _validated_supported_terms(
+                    bill_terms
+                )
                 term_is_explicit = True
             else:
-                scoped_terms = _assembly_terms_for_scope(
-                    configured_term=interpreted_term,
-                    explicit=term_is_explicit,
-                    date_from=interpreted_from,
-                    date_to=interpreted_to,
-                    as_of=observed_at.date(),
+                scoped_terms = (
+                    explicit_terms
+                    if explicit_terms
+                    else _assembly_terms_for_scope(
+                        configured_term=interpreted_term,
+                        explicit=False,
+                        date_from=interpreted_from,
+                        date_to=interpreted_to,
+                        as_of=observed_at.date(),
+                    )
                 )
-                interpreted_terms = (
-                    scoped_terms
-                    if term_is_explicit
-                    else _contiguous_supported_terms((*scoped_terms, *bill_terms))
+                interpreted_terms = _validated_supported_terms(
+                    (*scoped_terms, *bill_terms)
                 )
             interpreted_term = interpreted_terms[-1]
         else:
-            interpreted_terms = _assembly_terms_for_scope(
+            interpreted_terms = explicit_terms or _assembly_terms_for_scope(
                 configured_term=interpreted_term,
-                explicit=term_is_explicit,
+                explicit=False,
                 date_from=interpreted_from,
                 date_to=interpreted_to,
                 as_of=observed_at.date(),
@@ -370,6 +399,11 @@ class ResearchContractPlanner:
             assembly_terms=interpreted_terms,
             committees=interpreted_committees,
             bill_numbers=bill_numbers,
+            representative_proposer_names=(
+                proposer_scope.representative_proposer_names
+            ),
+            co_proposer_names=proposer_scope.co_proposer_names,
+            proposer_names=proposer_scope.proposer_names,
             evidence_types=requested_evidence,
             intents=intents,
             ordering=ordering,
@@ -389,6 +423,11 @@ class ResearchContractPlanner:
             assembly_term_explicit=term_is_explicit,
             bill_numbers=bill_numbers,
             committees=interpreted_committees,
+            representative_proposer_names=(
+                proposer_scope.representative_proposer_names
+            ),
+            co_proposer_names=proposer_scope.co_proposer_names,
+            proposer_names=proposer_scope.proposer_names,
             evidence_types=requested_evidence,
             intents=intents,
             intent_evidence=intent_evidence,
@@ -416,27 +455,23 @@ def _assembly_terms_for_scope(
         return (configured_term,)
     effective_to = min(date_to or as_of, as_of)
     overlapping = tuple(
-        term
-        for term, (term_start, term_end) in sorted(
-            DEFAULT_ASSEMBLY_TERM_BOUNDS.items()
-        )
-        if term_start <= effective_to and term_end >= date_from
+        item.number
+        for item in assembly_terms_intersecting(date_from, effective_to)
     )
     if overlapping:
         return overlapping
     raise ValueError("requested date range does not overlap a supported Assembly term")
 
 
-def _contiguous_supported_terms(values: Sequence[int]) -> tuple[int, ...]:
-    """Fill range gaps while exact partitions remain bound to bill prefixes."""
+def _validated_supported_terms(values: Sequence[int]) -> tuple[int, ...]:
+    """Return each requested official term once without inventing intervening scope."""
 
     selected = tuple(sorted(set(values)))
     if not selected:
         raise ValueError("Assembly term scope must not be empty")
-    result = tuple(range(selected[0], selected[-1] + 1))
-    if any(term not in DEFAULT_ASSEMBLY_TERM_BOUNDS for term in result):
+    if any(term not in DEFAULT_ASSEMBLY_TERM_BOUNDS for term in selected):
         raise ValueError("Assembly term scope contains an unsupported term")
-    return result
+    return selected
 
 
 def plan_research(
@@ -675,14 +710,43 @@ def _explicit_committees(original: str, search_query: str) -> tuple[str, ...]:
     return tuple(committee for _, committee in located)
 
 
-def _explicit_assembly_term(query: str) -> int | None:
-    matches = tuple(_ASSEMBLY_TERM.finditer(query))
-    if not matches:
-        return None
-    terms = {int(match.group("term")) for match in matches}
-    if len(terms) > 1:
-        raise ValueError("a research scope cannot mix multiple Assembly terms")
-    return terms.pop()
+def _explicit_assembly_terms(query: str) -> tuple[int, ...]:
+    """Return literal terms, expanding only an explicit written range.
+
+    ``제18대와 제22대`` is a two-term comparison and therefore does not
+    silently search the intervening terms.  ``18대부터 22대까지`` is an
+    explicit range and expands to every term from 18 through 22.
+    """
+
+    numeric_range = _ASSEMBLY_TERM_RANGE.search(query)
+    if numeric_range is not None:
+        start = int(numeric_range.group("start"))
+        end = int(numeric_range.group("end"))
+        if start > end:
+            raise ValueError("Assembly term range must be in chronological order")
+        return _validated_supported_terms(tuple(range(start, end + 1)))
+
+    located: list[tuple[int, int, int]] = [
+        (match.start(), match.end(), int(match.group("term")))
+        for match in _ASSEMBLY_TERM.finditer(query)
+    ]
+    located.extend(
+        (match.start(), match.end(), 1)
+        for match in _CONSTITUENT_ASSEMBLY.finditer(query)
+    )
+    located.sort()
+    terms = tuple(dict.fromkeys(term for _start, _end, term in located))
+    if len(terms) <= 1:
+        return terms
+
+    # This also supports ``제헌국회부터 제5대까지`` where the first endpoint
+    # has no numeric term to be consumed by the compact numeric-range regex.
+    scope_text = query[located[0][1] : located[-1][0]]
+    if _ASSEMBLY_RANGE_CONNECTOR.search(scope_text):
+        if terms[0] > terms[-1]:
+            raise ValueError("Assembly term range must be in chronological order")
+        return _validated_supported_terms(tuple(range(terms[0], terms[-1] + 1)))
+    return _validated_supported_terms(terms)
 
 
 def _ordered_unique(values: Sequence[str]) -> tuple[str, ...]:

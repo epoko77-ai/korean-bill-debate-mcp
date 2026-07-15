@@ -24,6 +24,10 @@ from .contracts import CoverageLedger, EvidenceType
 from .engine import DiscoveryStageState
 from .resolver import CandidateDecision, CandidateSetResolution, MetadataResolution
 from .results import EvidenceRecord, ResearchSnapshot
+from .source_availability import (
+    OfficialSourceAvailability,
+    summarize_source_availability,
+)
 
 _BILL_NUMBER = re.compile(r"\d{7}")
 _SPEECH_RECORD_PREFIX = "evidence:speech:"
@@ -369,6 +373,7 @@ class ProvisionalSourceAccounting:
     bills_after_strict_filter: int | None
     meetings_collected: int | None
     meetings_after_strict_filter: int | None
+    source_availability: tuple[OfficialSourceAvailability, ...] = ()
 
     def __post_init__(self) -> None:
         values = (
@@ -382,7 +387,7 @@ class ProvisionalSourceAccounting:
         if any(value is not None and value < 0 for value in values):
             raise ValueError("provisional source accounting must not be negative")
 
-    def to_dict(self) -> dict[str, int | bool | None]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "source_complete": self.source_complete,
             "source_rows_expected": self.source_rows_expected,
@@ -391,6 +396,7 @@ class ProvisionalSourceAccounting:
             "bills_after_strict_filter": self.bills_after_strict_filter,
             "meetings_collected": self.meetings_collected,
             "meetings_after_strict_filter": self.meetings_after_strict_filter,
+            "source_availability": [item.to_dict() for item in self.source_availability],
         }
 
 
@@ -553,6 +559,7 @@ def build_provisional_research_overview(
             bills_after_strict_filter=source.filter_report.bills.kept_count,
             meetings_collected=collection.coverage.meeting_unique_pdfs,
             meetings_after_strict_filter=source.filter_report.meetings.kept_count,
+            source_availability=summarize_source_availability(collection),
         )
     else:
         resolution = source

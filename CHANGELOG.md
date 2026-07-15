@@ -1,5 +1,59 @@
 # Changelog
 
+## [1.1.0] - 2026-07-15
+
+### Added
+
+- Add an immutable catalog of the National Assembly's official date boundaries for terms 1–22,
+  including the institutional gaps between elected Assemblies. Natural Korean term expressions,
+  term ranges, 19xx/20xx calendar ranges, and exact historical bill numbers now produce the exact
+  intersecting term partitions instead of being restricted to terms 19–22.
+- Add exact, role-aware proposer scope to research contracts, fingerprints, job persistence, and
+  final relevance decisions. Representative, co-proposer, and role-agnostic requests are preserved
+  separately and checked against `RST_PROPOSER`, `PUBL_PROPOSER`, or their union with full Korean
+  name boundaries.
+- Add per-dataset, per-term `source_availability` derived from raw immutable partition provenance.
+  Terminal states distinguish `records_found`, successful `no_records`, and `incomplete` collection
+  without using relevance-filtered candidate counts as a proxy for upstream availability.
+
+### Changed
+
+- Keep term 22 as the fast default only when a request contains no explicit term, date scope, or
+  exact bill number. Explicit term lists remain non-contiguous when requested; ranges expand in
+  chronological order; calendar ranges include every official term they actually intersect.
+- Treat proposer identity and an accompanying legislative topic as independent hard gates. The
+  representative-only path may use the official `PROPOSER` request parameter for acceleration, but
+  accepted rows are still independently verified. Co-proposer and role-agnostic searches collect
+  the required bill universe rather than relying on unsupported upstream filters.
+- Document the empirically observed source depths separately from supported planning scope:
+  plenary 1+, committee 2+, bill/status 10+, dedicated subcommittee 16+, and expert review reports
+  discovered dynamically per relevant bill. Committee metadata can itself carry subcommittee
+  proceedings.
+
+### Fixed
+
+- Link meetings in proposer-scoped research only after a bill passes the exact role/name gate and
+  the official meeting agenda contains that bill's exact seven-digit number. Similar topic text can
+  no longer attach an unrelated meeting or revive a rejected bill.
+- Return a terminal empty result only when collection coverage is complete. A successful raw zero
+  is described as “No records found in this Open Assembly dataset”; unfinished pages, API failures,
+  and unproven coverage remain `incomplete`/inconclusive instead of being presented as historical
+  absence.
+- Add an explicit cross-source caveat when the dedicated subcommittee dataset returns zero, because
+  committee minutes can still contain subcommittee discussion.
+
+### Known limitations
+
+- Planning support for terms 1–22 is not a claim that every official dataset starts at term 1 or
+  that the public service contains a complete historical full-text corpus. Official source families
+  have different empirical starting points, and historical PDFs have not all been built, deployed,
+  parsed, and operationally verified as one corpus.
+- Expert review-report availability is dynamic per bill detail page rather than a complete term-wide
+  inventory. A missing or unfinished per-bill lookup must not be generalized to all bills in a term.
+- The eight-tool local live-cache compatibility surface remains bounded and live-first. Durable
+  multi-term coverage accounting and `source_availability` are provided by the fully configured
+  13-tool hosted research surface.
+
 ## [1.0.0] - 2026-07-14
 
 ### Added

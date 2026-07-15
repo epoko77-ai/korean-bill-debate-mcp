@@ -10,6 +10,7 @@ from kasm.research.contracts import EvidenceType
 from kasm.research.partitioning import (
     OfficialSourceKind,
     SearchTermRole,
+    _effective_term_ranges,
     plan_partitions,
 )
 from kasm.research.planner import plan_research
@@ -209,6 +210,29 @@ def test_calendar_month_partitions_have_no_boundary_gap_or_overlap() -> None:
     ]
     for left, right in zip(plan.months, plan.months[1:], strict=False):
         assert left.date_to + timedelta(days=1) == right.date_from
+
+
+def test_historical_term_scope_preserves_official_institutional_hiatus() -> None:
+    ranges, policy, adjustments = _effective_term_ranges(
+        (5, 6),
+        date(1961, 5, 1),
+        date(1964, 1, 1),
+        as_of=date(2026, 7, 15),
+        assembly_term_bounds={
+            5: (date(1960, 7, 29), date(1961, 5, 16)),
+            6: (date(1963, 12, 17), date(1967, 6, 30)),
+        },
+        explicit_term=False,
+    )
+
+    assert tuple(
+        (item.assembly_term, item.date_from, item.date_to) for item in ranges
+    ) == (
+        (5, date(1961, 5, 1), date(1961, 5, 16)),
+        (6, date(1963, 12, 17), date(1964, 1, 1)),
+    )
+    assert policy == "explicit_range_intersected_with_assembly_terms_and_as_of"
+    assert adjustments == ()
 
 
 def test_unbounded_scope_is_the_full_configured_assembly_term_through_as_of() -> None:

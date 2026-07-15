@@ -25,13 +25,21 @@ from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
 from kasm.app import LocalServices, infer_bill_title_query, infer_issue_committee
 from kasm.core.models import BillDocument
 from kasm.mcp.tools import ServiceContext, extract_bill_numbers
+from kasm.research.assembly_terms import (
+    assembly_term as official_assembly_term,
+)
+from kasm.research.assembly_terms import (
+    assembly_terms_intersecting,
+)
 from kasm.search.lexical import query_terms
 from kasm.storage.database import Database
 from kasm.storage.repositories import BillDocumentRepository, MeetingRepository
 
-_DATE_MONTH = re.compile(r"(?P<year>20\d{2})[.\-/년 ]+\s*(?P<month>1[0-2]|0?[1-9])")
+_DATE_MONTH = re.compile(
+    r"(?P<year>(?:19|20)\d{2})[.\-/년 ]+\s*(?P<month>1[0-2]|0?[1-9])"
+)
+_DATE_YEAR = re.compile(r"(?<!\d)(?P<year>(?:19|20)\d{2})(?!\d)")
 _HISTORY_TERMS = ("과거부터", "처음부터", "현재까지", "지금까지", "전체 경과", "시계열")
-_ASSEMBLY_START_MONTH = {22: "2024-05"}
 _STOPWORDS = {
     "대한",
     "관련",
@@ -81,8 +89,9 @@ class LiveAssemblyServices:
         self._latest_meeting_inventory: list[dict[str, Any]] = []
 
     def search_bills(self, query: str, **filters: Any) -> list[dict[str, Any]]:
-        term = int(filters.get("assembly_term") or self.assembly_term)
+        term = self._selected_assembly_term(query, filters)
         include_documents = bool(filters.pop("include_documents", True))
+        filters["assembly_term"] = term
         self._refresh_bills(
             query=query,
             assembly_term=term,
@@ -105,14 +114,15 @@ class LiveAssemblyServices:
                 if results:
                     break
         if include_documents:
-            results = self._hydrate_selected_bills(results)
+            results = self._hydrate_selected_bills(results, assembly_term=term)
         return results
 
     def get_bill_status(self, bill_id_or_no: str) -> dict[str, Any] | None:
         bill_no = bill_id_or_no.removeprefix("kna:bill:")
-        status_row = self._refresh_bill_status(bill_no)
+        term = _bill_assembly_term(bill_no) or self.assembly_term
+        status_row = self._refresh_bill_status(bill_no, assembly_term=term)
         if status_row is None:
-            status_row = self._refresh_bill_by_number(bill_no)
+            status_row = self._refresh_bill_by_number(bill_no, assembly_term=term)
         result = self.local.get_bill_status(bill_id_or_no)
         if result is None and bill_no != bill_id_or_no:
             result = self.local.get_bill_status(bill_no)
@@ -128,12 +138,16 @@ class LiveAssemblyServices:
     def list_meetings(self, **filters: Any) -> list[dict[str, Any]]:
         date_from = filters.get("date_from")
         date_to = filters.get("date_to")
-        months = self._months_for_query("", date_from, date_to)
+        term = self._selected_assembly_term("", filters)
+        months = self._months_for_query(
+            "", date_from, date_to, assembly_term=term
+        )
         requested_months = _requested_months("", date_from, date_to)
         self._refresh_meetings(
             query="",
             committee=filters.get("committee"),
             months=months,
+            assembly_term=term,
             ingest_minutes=False,
             temporal_scope=_temporal_scope(
                 mode="explicit" if requested_months else "implicit_recent_two_month_window",
@@ -144,18 +158,27 @@ class LiveAssemblyServices:
                 date_to=date_to,
             ),
         )
-        return self.local.list_meetings(**filters)
+        return [
+            row
+            for row in self.local.list_meetings(**filters)
+            if int(row.get("assembly_term") or term) == term
+        ]
 
     def list_committees(
         self, assembly_term: int | None = None, query: str | None = None
     ) -> list[dict[str, Any]]:
         search_query = query or ""
-        months = self._months_for_query(search_query)
+        term = self._selected_assembly_term(
+            search_query,
+            {"assembly_term": assembly_term} if assembly_term is not None else {},
+        )
+        months = self._months_for_query(search_query, assembly_term=term)
         requested_months = _requested_months(search_query)
         self._refresh_meetings(
             query=search_query,
             committee=query,
             months=months,
+            assembly_term=term,
             ingest_minutes=False,
             temporal_scope=_temporal_scope(
                 mode="explicit" if requested_months else "implicit_recent_two_month_window",
@@ -164,11 +187,11 @@ class LiveAssemblyServices:
                 queried_months=months,
             ),
         )
-        return self.local.list_committees(assembly_term, query)
+        return self.local.list_committees(term, query)
 
     def search(self, query: str, **filters: Any) -> list[dict[str, Any]]:
-        self._hydrate_issue(query, filters)
-        return self.local.search(query, **filters)
+        term = self._hydrate_issue(query, filters)
+        return self.local.search(query, **{**filters, "assembly_term": term})
 
     def get(self, speech_id: str) -> dict[str, Any] | None:
         return self.local.get(speech_id)
@@ -184,14 +207,16 @@ class LiveAssemblyServices:
         date_from: str | None = None,
         date_to: str | None = None,
         minutes_offset: int = 0,
+        assembly_term: int | None = None,
     ) -> dict[str, Any]:
-        self._hydrate_issue(
+        term = self._hydrate_issue(
             query,
             {
                 "limit": limit,
                 "date_from": date_from,
                 "date_to": date_to,
                 "minutes_offset": minutes_offset,
+                "assembly_term": assembly_term,
             },
         )
         result = self.local.explore_issue(
@@ -199,9 +224,11 @@ class LiveAssemblyServices:
             limit,
             date_from=date_from,
             date_to=date_to,
+            assembly_term=term,
         )
         result["bills"] = self._hydrate_selected_bills(
-            [bill for bill in result.get("bills", []) if isinstance(bill, dict)]
+            [bill for bill in result.get("bills", []) if isinstance(bill, dict)],
+            assembly_term=term,
         )
         self._merge_selected_bill_inventory(result["bills"])
         result["data_mode"] = "live_open_assembly_with_local_cache"
@@ -255,8 +282,8 @@ class LiveAssemblyServices:
         }
         return result
 
-    def _hydrate_issue(self, query: str, filters: dict[str, Any]) -> None:
-        term = int(filters.get("assembly_term") or self.assembly_term)
+    def _hydrate_issue(self, query: str, filters: dict[str, Any]) -> int:
+        term = self._selected_assembly_term(query, filters)
         committee = filters.get("committee") or infer_issue_committee(query)
         date_from = filters.get("date_from")
         date_to = filters.get("date_to")
@@ -265,7 +292,9 @@ class LiveAssemblyServices:
             assembly_term=term,
             include_documents=False,
         )
-        months = self._months_for_query(query, date_from, date_to)
+        months = self._months_for_query(
+            query, date_from, date_to, assembly_term=term
+        )
         initial_months = set(months)
         requested_months = _requested_months(query, date_from, date_to)
         explicit_temporal_scope = bool(requested_months)
@@ -296,10 +325,14 @@ class LiveAssemblyServices:
             start_month = min(
                 history_start_months
                 or proposal_months
-                or [_ASSEMBLY_START_MONTH.get(self.assembly_term, f"{self._now().year}-01")]
+                or [official_assembly_term(term).date_from.strftime("%Y-%m")]
             )
             end_month = _month_value(date_to)
-            end_date = _month_end_date(end_month) if end_month else self._now().date()
+            term_end = official_assembly_term(term).date_to
+            end_date = min(
+                _month_end_date(end_month) if end_month else self._now().date(),
+                term_end,
+            )
             months.update(_month_span(start_month, end_date))
         if explicit_temporal_scope:
             scope_mode = "explicit"
@@ -313,6 +346,7 @@ class LiveAssemblyServices:
             query=query,
             committee=committee,
             months=sorted(months),
+            assembly_term=term,
             ingest_minutes=True,
             candidate_offset=max(0, int(filters.get("minutes_offset") or 0)),
             temporal_scope=_temporal_scope(
@@ -323,6 +357,19 @@ class LiveAssemblyServices:
                 date_from=date_from,
                 date_to=date_to,
             ),
+        )
+        return term
+
+    def _selected_assembly_term(
+        self, query: str, filters: dict[str, Any]
+    ) -> int:
+        return _selected_assembly_term(
+            default_term=self.assembly_term,
+            query=query,
+            explicit_term=filters.get("assembly_term"),
+            date_from=filters.get("date_from"),
+            date_to=filters.get("date_to"),
+            as_of=self._now().date(),
         )
 
     def _refresh_bills(
@@ -362,7 +409,9 @@ class LiveAssemblyServices:
             for row in status_targets:
                 refreshed_bill_no = _value(row, "BILL_NO")
                 status_row = (
-                    self._refresh_bill_status(refreshed_bill_no)
+                    self._refresh_bill_status(
+                        refreshed_bill_no, assembly_term=assembly_term
+                    )
                     if refreshed_bill_no
                     else None
                 )
@@ -406,7 +455,10 @@ class LiveAssemblyServices:
         return list(page.rows), [page.source_hash]
 
     def _hydrate_selected_bills(
-        self, bills: list[dict[str, Any]]
+        self,
+        bills: list[dict[str, Any]],
+        *,
+        assembly_term: int | None = None,
     ) -> list[dict[str, Any]]:
         """Load status and every review report for every explicitly selected bill."""
 
@@ -415,9 +467,12 @@ class LiveAssemblyServices:
             bill_no = str(bill.get("bill_no") or "").strip()
             if not bill_no:
                 continue
-            status_row = self._refresh_bill_status(bill_no)
+            term = _bill_assembly_term(bill_no) or assembly_term or self.assembly_term
+            status_row = self._refresh_bill_status(bill_no, assembly_term=term)
             if status_row is None:
-                status_row = self._refresh_bill_by_number(bill_no)
+                status_row = self._refresh_bill_by_number(
+                    bill_no, assembly_term=term
+                )
             self._refresh_bill_documents({**bill, **(status_row or {})})
             refreshed = self.local.get_bill_status(bill_no)
             if refreshed is None:
@@ -549,11 +604,14 @@ class LiveAssemblyServices:
                 if key in cached:
                     item[key] = cached[key]
 
-    def _refresh_bill_status(self, bill_no: str) -> dict[str, Any] | None:
+    def _refresh_bill_status(
+        self, bill_no: str, *, assembly_term: int | None = None
+    ) -> dict[str, Any] | None:
+        term = _bill_assembly_term(bill_no) or assembly_term or self.assembly_term
         page = self.client.fetch_page(
             BILL_STATUS_DATASET,
             page_size=100,
-            parameters={"AGE": self.assembly_term, "BILL_NO": bill_no},
+            parameters={"AGE": term, "BILL_NO": bill_no},
             refresh=True,
         )
         exact_rows = [row for row in page.rows if _value(row, "BILL_NO") == bill_no]
@@ -562,11 +620,14 @@ class LiveAssemblyServices:
             return exact_rows[0]
         return None
 
-    def _refresh_bill_by_number(self, bill_no: str) -> dict[str, Any] | None:
+    def _refresh_bill_by_number(
+        self, bill_no: str, *, assembly_term: int | None = None
+    ) -> dict[str, Any] | None:
+        term = _bill_assembly_term(bill_no) or assembly_term or self.assembly_term
         page = self.client.fetch_page(
             BILL_DATASET,
             page_size=10,
-            parameters={"AGE": self.assembly_term, "BILL_NO": bill_no},
+            parameters={"AGE": term, "BILL_NO": bill_no},
             refresh=True,
         )
         exact_rows = [row for row in page.rows if _value(row, "BILL_NO") == bill_no]
@@ -646,9 +707,12 @@ class LiveAssemblyServices:
         committee: str | None,
         months: Iterable[str],
         ingest_minutes: bool,
+        assembly_term: int | None = None,
         candidate_offset: int = 0,
         temporal_scope: dict[str, Any] | None = None,
     ) -> None:
+        term = assembly_term or self.assembly_term
+        official_assembly_term(term)
         rows: list[dict[str, Any]] = []
         api_calls = 0
         queried_months = sorted(months)
@@ -665,7 +729,7 @@ class LiveAssemblyServices:
         for month in queried_months:
             for source in (MeetingSource.COMMITTEE, MeetingSource.PLENARY):
                 parameters: dict[str, str | int] = {
-                    "DAE_NUM": self.assembly_term,
+                    "DAE_NUM": term,
                     "CONF_DATE": month,
                 }
                 if committee and source is MeetingSource.COMMITTEE:
@@ -675,7 +739,7 @@ class LiveAssemblyServices:
                 )
                 api_calls += 1
                 rows.extend(fetched_rows)
-        subcommittee_parameters: dict[str, str | int] = {"ERACO": f"제{self.assembly_term}대"}
+        subcommittee_parameters: dict[str, str | int] = {"ERACO": f"제{term}대"}
         if committee:
             subcommittee_parameters["CMIT_NM"] = committee
         subcommittee_rows, _subcommittee_hashes = self._fetch_complete(
@@ -760,8 +824,14 @@ class LiveAssemblyServices:
         }
 
     def _months_for_query(
-        self, query: str, date_from: str | None = None, date_to: str | None = None
+        self,
+        query: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        *,
+        assembly_term: int | None = None,
     ) -> set[str]:
+        term = official_assembly_term(assembly_term or self.assembly_term)
         months = set(_requested_months(query, date_from, date_to))
         start_month = _month_value(date_from)
         end_month = _month_value(date_to)
@@ -773,10 +843,16 @@ class LiveAssemblyServices:
         if start_month and end_month:
             months.update(_month_span(start_month, _month_end_date(end_month)))
         if not months:
-            today = self._now().date()
-            months.add(today.strftime("%Y-%m"))
-            months.add((today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m"))
-        return months
+            scope_end = min(self._now().date(), term.date_to)
+            months.add(scope_end.strftime("%Y-%m"))
+            previous_month = scope_end.replace(day=1) - timedelta(days=1)
+            if previous_month >= term.date_from:
+                months.add(previous_month.strftime("%Y-%m"))
+        return {
+            month
+            for month in months
+            if _month_intersects_term(month, term.date_from, term.date_to)
+        }
 
 
 def create_live_services(
@@ -844,19 +920,151 @@ def _month_span(start_month: str, end_date: date) -> set[str]:
 def _month_value(value: str | None) -> str | None:
     if not value:
         return None
-    match = re.match(r"^(20\d{2})[-./년 ]+\s*(1[0-2]|0?[1-9])", value.strip())
+    match = re.match(
+        r"^((?:19|20)\d{2})[-./년 ]+\s*(1[0-2]|0?[1-9])",
+        value.strip(),
+    )
     if not match:
         return None
     return f"{match.group(1)}-{int(match.group(2)):02d}"
 
 
 def _requested_months(query: str, *values: str | None) -> list[str]:
+    month_matches = tuple(_DATE_MONTH.finditer(query))
     months = [
         f"{match.group('year')}-{int(match.group('month')):02d}"
-        for match in _DATE_MONTH.finditer(query)
+        for match in month_matches
     ]
+    for match in _DATE_YEAR.finditer(query):
+        if any(
+            match.start() >= month_match.start()
+            and match.end() <= month_match.end()
+            for month_match in month_matches
+        ):
+            continue
+        year = int(match.group("year"))
+        months.extend(f"{year:04d}-{month:02d}" for month in range(1, 13))
     months.extend(month for value in values if (month := _month_value(value)))
     return list(dict.fromkeys(months))
+
+
+def _bill_assembly_term(bill_no: str) -> int | None:
+    """Infer an Assembly term from one exact seven-digit official bill number."""
+
+    if re.fullmatch(r"\d{7}", bill_no) is None:
+        return None
+    term = int(bill_no[:2])
+    try:
+        official_assembly_term(term)
+    except ValueError:
+        return None
+    return term
+
+
+def _selected_assembly_term(
+    *,
+    default_term: int,
+    query: str,
+    explicit_term: Any = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    as_of: date,
+) -> int:
+    """Choose one term for the legacy live path without pretending to search many."""
+
+    default = official_assembly_term(int(default_term)).number
+    explicit = (
+        official_assembly_term(int(explicit_term)).number
+        if explicit_term is not None
+        else None
+    )
+    bill_terms = {
+        term
+        for bill_no in extract_bill_numbers(query)
+        if (term := _bill_assembly_term(bill_no)) is not None
+    }
+    if len(bill_terms) > 1:
+        raise ValueError(
+            "legacy live search supports one Assembly term; use start_research for multiple terms"
+        )
+    bill_term = next(iter(bill_terms), None)
+    if explicit is not None and bill_term is not None and explicit != bill_term:
+        raise ValueError("assembly_term conflicts with the exact bill number")
+    if explicit is not None:
+        _validate_date_scope_intersects_term(explicit, date_from, date_to)
+        return explicit
+    if bill_term is not None:
+        return bill_term
+
+    scoped_term = _single_assembly_term_for_dates(
+        query=query,
+        date_from=date_from,
+        date_to=date_to,
+        as_of=as_of,
+    )
+    return scoped_term or default
+
+
+def _single_assembly_term_for_dates(
+    *,
+    query: str,
+    date_from: str | None,
+    date_to: str | None,
+    as_of: date,
+) -> int | None:
+    months = _requested_months(query, date_from, date_to)
+    if not months:
+        return None
+    start = date.fromisoformat(f"{min(months)}-01")
+    end = _month_end_date(max(months))
+    if date_from and (value := _date_value(date_from)) is not None:
+        start = value
+    if date_to and (value := _date_value(date_to)) is not None:
+        end = value
+    elif any(term in query for term in ("현재까지", "지금까지")):
+        end = as_of
+    terms = assembly_terms_intersecting(start, end)
+    if len(terms) == 1:
+        return terms[0].number
+    if not terms:
+        raise ValueError("the requested dates do not fall within an elected Assembly term")
+    raise ValueError(
+        "legacy live search supports one Assembly term; use start_research for a multi-term range"
+    )
+
+
+def _validate_date_scope_intersects_term(
+    term: int, date_from: str | None, date_to: str | None
+) -> None:
+    metadata = official_assembly_term(term)
+    start = _date_value(date_from) if date_from else None
+    end = _date_value(date_to) if date_to else None
+    if start is not None and end is not None and start > end:
+        raise ValueError("date_from must be on or before date_to")
+    if end is not None and end < metadata.date_from:
+        raise ValueError("the requested dates do not intersect assembly_term")
+    if start is not None and start > metadata.date_to:
+        raise ValueError("the requested dates do not intersect assembly_term")
+
+
+def _date_value(value: str) -> date | None:
+    match = re.match(
+        r"^\s*((?:19|20)\d{2})[-./년 ]+\s*(1[0-2]|0?[1-9])"
+        r"(?:[-./월 ]+\s*(3[01]|[12]\d|0?[1-9]))?",
+        value,
+    )
+    if match is None:
+        return None
+    try:
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3) or 1))
+    except ValueError:
+        return None
+
+
+def _month_intersects_term(month: str, date_from: date, date_to: date) -> bool:
+    start = date.fromisoformat(f"{month}-01")
+    end = _month_end_date(month)
+    return start <= date_to and end >= date_from
 
 
 def _temporal_window(months: Iterable[str]) -> dict[str, Any]:

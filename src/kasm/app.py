@@ -371,6 +371,7 @@ class LocalServices:
         *,
         date_from: str | None = None,
         date_to: str | None = None,
+        assembly_term: int | None = None,
     ) -> dict[str, Any]:
         limit = max(1, int(limit))
         inferred_committee = infer_issue_committee(query)
@@ -382,6 +383,7 @@ class LocalServices:
             committee=inferred_committee,
             **({"date_from": date_from} if date_from else {}),
             **({"date_to": date_to} if date_to else {}),
+            **({"assembly_term": assembly_term} if assembly_term is not None else {}),
         )
         ranked_speeches = list(all_speeches)
         if self.hybrid is None:
@@ -425,6 +427,7 @@ class LocalServices:
             limit=max(1, bill_cache_total),
             committee=inferred_committee,
             include_documents=False,
+            **({"assembly_term": assembly_term} if assembly_term is not None else {}),
         )
         inferred_bill_query = infer_bill_title_query(query)
         if inferred_bill_query:
@@ -433,6 +436,7 @@ class LocalServices:
                 limit=max(1, bill_cache_total),
                 committee=inferred_committee,
                 include_documents=False,
+                **({"assembly_term": assembly_term} if assembly_term is not None else {}),
             )
             seen = {str(bill["id"]) for bill in all_bills}
             all_bills.extend(

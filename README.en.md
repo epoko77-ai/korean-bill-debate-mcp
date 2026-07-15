@@ -1,6 +1,6 @@
 # Korean Bill & Debate MCP
 
-Current version: `v1.0.0`
+Current version: `v1.1.0`
 
 [한국어](README.md) · [MCP setup guide](docs/mcp-clients.md) ·
 [Data sources](docs/data-sources.md) · [Architecture](docs/architecture.md)
@@ -24,7 +24,7 @@ subcommittee negotiation records and committee expert review reports.
 ![One bill connected to its text, status, subcommittee minutes, expert review, and lawmakers' Q&A](assets/english-thumbnail-v1.png)
 
 The no-account web workspace is still a Korean-language, single-request alpha. The durable
-background workflow in `v1.0.0` is available through the MCP surface first. English users should
+background workflow in `v1.1.0` is available through the MCP surface first. English users should
 use the MCP connection below while the workspace workflow and credential boundary are validated.
 
 ## Ask in English, verify the Korean official record
@@ -48,6 +48,41 @@ the English explanation remains distinguishable from the Korean source record.
 
 The official bill titles, minutes, and review reports remain in Korean. English quotations in the
 AI's answer are translations; open the cited official URL when exact Korean wording matters.
+
+## Search Assembly terms 1–22, exact proposers, and historical ranges
+
+`v1.1.0` plans research against the National Assembly's official term boundaries from the 1st
+(Constituent) through the current 22nd Assembly. An explicit term, term range, calendar date, or
+date range is a hard scope. If the question contains none of those—and no exact bill number—the
+planner defaults to the current 22nd Assembly for a fast current-affairs search. A seven-digit bill
+number selects the Assembly term encoded by that exact identifier.
+
+The deterministic scope parser recognizes natural Korean forms such as `제18대`,
+`제18대부터 제22대까지`, and `1961년 5월부터 1964년 1월까지`, as well as explicit ISO dates.
+English users can keep the analytical question in English and include one of those Korean scope
+phrases when an exact historical boundary matters:
+
+```text
+For 제18대, find bills where 강명순 의원이 대표발의, then connect each bill
+to the meetings whose official agenda contains that exact bill number.
+
+Compare economic legislation and plenary debate from
+1961년 5월부터 1964년 1월까지. Separate each Assembly term.
+```
+
+Proposer searches are role-aware and exact. `대표발의` is checked against the official
+`RST_PROPOSER` field, `공동발의` against `PUBL_PROPOSER`, and an unqualified `발의` against their
+union. A Korean full name must match in full; a bare mention of a lawmaker is not guessed to be a
+proposer filter. When a name and topic are both present, both must pass. Related meetings are then
+admitted only when the official agenda carries the selected bill's exact seven-digit number—not
+because another meeting happens to discuss a similar topic.
+
+Historical scope does not mean that every official dataset begins with the 1st Assembly or that a
+complete historical full-text corpus is bundled. The service reports source availability for each
+dataset and term as `records_found`, `no_records`, or `incomplete`; `no_records` means only **“No
+records found in this Open Assembly dataset”** after every planned page completed successfully.
+See the [empirically observed source boundaries](docs/data-sources.md) before interpreting an early
+term with zero results.
 
 ### See the research flow
 
@@ -116,7 +151,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #### 2. Install the pinned GitHub release
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.0.0
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.0
 ```
 
 #### 3. Run one command for the client you use
@@ -168,7 +203,7 @@ natural-language question
   → answer-ready evidence with official URLs and source locators
 ```
 
-For broad research, `v1.0.0` returns a `research_id` immediately. It first exposes candidates
+For broad research, `v1.1.0` returns a `research_id` immediately. It first exposes candidates
 validated on the first official page of every planned source family, explicitly marked
 `metadata_inventory_complete=false`, while the same job continues through every source page. It
 then guides the client through the complete paginated bill/meeting/document map, prioritized core
@@ -189,7 +224,7 @@ In local mode, SQLite is a private cache rather than a bundled source database. 
 ephemeral cache storage. Current bill status is refreshed from the official status API. See the
 [Korean README](README.md) and [client guide](docs/mcp-clients.md).
 
-### Current `v1.0.0` limits
+### Current `v1.1.0` limits
 
 The optional revision-bound corpus path exists in code, but a complete official-record corpus has
 not yet been built, deployed, and operationally verified for the public service. If the configured

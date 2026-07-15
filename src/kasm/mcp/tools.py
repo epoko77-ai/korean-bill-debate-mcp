@@ -356,11 +356,20 @@ class KasmTools:
         빠짐없이 확인합니다. 반환된 ``next_action``에 따라 ``get_research_status``를
         호출하고, 완료 후 ``get_research_page``의 안정적인 커서를 끝까지 따라가세요.
 
+        제1대(제헌국회)부터 제22대까지 대수·날짜 범위를 해석합니다. 범위가 없으면 제22대를
+        기본값으로 사용합니다. ``김OO 대표발의``, ``김OO 공동발의``, ``김OO 발의``는 공식
+        역할 필드에서 이름 전체를 정확히 확인하고, 선택된 법안의 의안번호가 있는 회의만
+        연결합니다. 성공한 0건은 ``source_availability``에 데이터셋별로 표시하며, 실패나
+        미완료를 자료 없음으로 표현하지 마세요.
+
         Use this once for broad Korean or English research. It queues durable work and returns a
         receipt; it never arbitrarily reduces candidates to a top-N sample. Do not make a
         comprehensive claim from the receipt or before both coverage and evidence pagination are
         complete. ``korean_query`` is only an optional Korean search hint for an English request;
-        the original natural-language query and its intent remain authoritative.
+        the original natural-language query and its intent remain authoritative. Explicit Korean
+        Assembly-term/date scopes can cover terms 1 through 22; an omitted scope defaults to the
+        current 22nd Assembly. Korean proposer-role phrases are exact identity filters, not fuzzy
+        topic terms.
         """
         backend = self._research_backend()
         if not query.strip():
@@ -563,6 +572,33 @@ class KasmTools:
             )
             return payload
 
+        if payload.get("phase") == "final" and payload.get("result_state") == "no_matching_records":
+            coverage_value = payload.get("coverage")
+            coverage = coverage_value if isinstance(coverage_value, Mapping) else {}
+            verified_empty = bool(payload.get("complete")) and bool(coverage.get("complete"))
+            if verified_empty:
+                payload["comprehensive_answer_allowed"] = True
+                payload["next_action"] = _next_action(
+                    None,
+                    {},
+                    ko=(
+                        "공식 출처 조회가 완결됐고 이번에 조회한 열린국회 데이터셋에서는 "
+                        "요청 조건에 일치하는 자료가 확인되지 않았습니다. "
+                        "source_availability의 출처·국회 대수별 상태와 함께 사용자에게 "
+                        "데이터셋 범위 내 자료 없음으로 답하세요. 역사적으로 관련 기록이 전혀 "
+                        "없었다고 확대 해석하지 마세요. 추가 근거 호출은 필요하지 않습니다."
+                    ),
+                    en=(
+                        "Official-source coverage is complete and no matching records were found "
+                        "in the Open Assembly datasets checked. Report that dataset-scoped result "
+                        "with the per-source and Assembly-term states in source_availability; do "
+                        "not generalize it to the nonexistence of historical records. No evidence "
+                        "call is needed."
+                    ),
+                )
+                return payload
+            payload["result_state"] = "inconclusive"
+
         if bool(payload.get("provisional")) and not bool(
             payload.get("substantive_conclusion_available")
         ):
@@ -659,6 +695,40 @@ class KasmTools:
         payload["comprehensive_answer_allowed"] = (
             exhaustive and page_complete and coverage_complete and full_text_required_total == 0
         )
+        matched_total = page.get("matched_total")
+        if (
+            type(matched_total) is int
+            and matched_total == 0
+            and page_complete
+            and coverage_complete
+        ):
+            payload.update(
+                {
+                    "result_state": "no_matching_records",
+                    "result_message_ko": (
+                        "이번 조사에서 조회한 열린국회 공식 데이터셋에서는 요청 조건에 "
+                        "일치하는 자료를 확인하지 못했습니다."
+                    ),
+                    "result_message_en": (
+                        "No matching records were found in the Open Assembly datasets checked "
+                        "for this research scope."
+                    ),
+                    "comprehensive_answer_allowed": True,
+                    "next_action": _next_action(
+                        None,
+                        {},
+                        ko=(
+                            "조회한 열린국회 데이터셋에서 확인된 자료 0건임을 사용자에게 "
+                            "알리되, 역사적 기록 전체의 부재로 확대 해석하지 마세요."
+                        ),
+                        en=(
+                            "Report zero records in the checked Open Assembly datasets without "
+                            "generalizing to all historical records."
+                        ),
+                    ),
+                }
+            )
+            return payload
         if next_cursor:
             payload["next_action"] = _next_action(
                 "get_research_page",

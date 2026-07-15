@@ -251,7 +251,46 @@ class DurableResearchBackend:
                     "warning_codes": warning_codes,
                 }
             )
-            return {
+            evidence_count_value = final.get("evidence_count")
+            evidence_count = (
+                evidence_count_value
+                if type(evidence_count_value) is int and evidence_count_value >= 0
+                else None
+            )
+            if not coverage_complete:
+                result_state = "inconclusive"
+                result_message_ko = (
+                    "공식 자료 확인 범위가 완전하지 않아 자료 유무를 단정할 수 없습니다."
+                )
+                result_message_en = (
+                    "Official-source coverage is incomplete, so the presence or absence of "
+                    "matching records is inconclusive."
+                )
+            elif evidence_count == 0:
+                result_state = "no_matching_records"
+                result_message_ko = (
+                    "이번 조사에서 조회한 열린국회 공식 데이터셋에서는 요청 조건에 "
+                    "일치하는 자료를 확인하지 못했습니다."
+                )
+                result_message_en = (
+                    "No matching records were found in the Open Assembly datasets checked for "
+                    "this research scope."
+                )
+            else:
+                result_state = "records_found"
+                result_message_ko = "요청 범위에서 조건에 일치하는 공식 자료를 확인했습니다."
+                result_message_en = "Matching official records were found in the requested scope."
+
+            metadata_source_overview = metadata_overview()
+            source: dict[str, Any] | None = None
+            if metadata_source_overview is not None:
+                source_complete = metadata_source_overview.source.source_complete is True
+                source = {
+                    **metadata_source_overview.source.to_dict(),
+                    "scope": "metadata_discovery_partitions",
+                    "scope_complete": source_complete,
+                }
+            payload = {
                 **final,
                 "research_id": research_id,
                 "phase": "final",
@@ -264,7 +303,14 @@ class DurableResearchBackend:
                 "coverage": coverage,
                 "substantive_conclusion_available": True,
                 "full_evidence_inventory_delivery": "get_research_page",
+                "result_state": result_state,
+                "result_message_ko": result_message_ko,
+                "result_message_en": result_message_en,
             }
+            if source is not None:
+                payload["source"] = source
+                payload["source_availability"] = source["source_availability"]
+            return payload
 
         if overview is None:
             overview = metadata_overview()

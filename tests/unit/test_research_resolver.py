@@ -316,3 +316,122 @@ def test_recent_meeting_uses_official_conf_date_without_mutating_metadata() -> N
         "issue:인공지능@agenda",
     )
     assert "date" not in resolved.meetings.accepted[0].candidate
+
+
+def test_proposer_scope_links_meetings_only_through_selected_exact_bill_numbers() -> None:
+    plan = plan_research(
+        "김남근 의원이 대표발의한 인공지능 법안과 회의록",
+        as_of=AS_OF,
+    )
+    metadata = collection(
+        bills=[
+            {
+                "BILL_NO": "2219951",
+                "BILL_NAME": "인공지능 안전법안",
+                "RST_PROPOSER": "김남근",
+                "PUBL_PROPOSER": "김윤,박정",
+            },
+            {
+                "BILL_NO": "2219952",
+                "BILL_NAME": "인공지능 산업법안",
+                "RST_PROPOSER": "김준환",
+                "PUBL_PROPOSER": "김원이,김남근",
+            },
+        ],
+        meetings=[
+            {
+                "PDF_LINK_URL": "https://record.assembly.go.kr/selected.pdf",
+                "agenda_items": [
+                    {"bill_no": "2219951", "title": "인공지능 안전법안"}
+                ],
+                "agenda_text": "2219951 인공지능 안전법안",
+            },
+            {
+                "PDF_LINK_URL": "https://record.assembly.go.kr/unrelated.pdf",
+                "agenda_items": [
+                    {"bill_no": "2219952", "title": "인공지능 산업법안"}
+                ],
+                "agenda_text": "2219952 인공지능 산업법안",
+            },
+        ],
+    )
+
+    resolved = resolve_metadata_candidates(plan, metadata)
+
+    assert [item.candidate_id for item in resolved.bills.accepted] == [
+        "bill:2219951"
+    ]
+    assert [item.candidate_id for item in resolved.meetings.accepted] == [
+        "meeting:https://record.assembly.go.kr/selected.pdf"
+    ]
+    unrelated = next(
+        item
+        for item in resolved.meetings.decisions
+        if item.candidate_id.endswith("unrelated.pdf")
+    )
+    assert unrelated.rejection_reasons == ("bill_no_mismatch",)
+    assert resolved.criteria.representative_proposer_names == ("김남근",)
+
+
+def test_proposer_only_scope_discovers_bills_and_their_exact_agendas() -> None:
+    plan = plan_research("김윤 의원이 공동발의한 법안", as_of=AS_OF)
+    metadata = collection(
+        bills=[
+            {
+                "BILL_NO": "2219951",
+                "BILL_NAME": "지역산업 지원법안",
+                "RST_PROPOSER": "김남근",
+                "PUBL_PROPOSER": "김윤,박정",
+            }
+        ],
+        meetings=[
+            {
+                "PDF_LINK_URL": "https://record.assembly.go.kr/co.pdf",
+                "agenda_items": [
+                    {"bill_no": "2219951", "title": "지역산업 지원법안"}
+                ],
+                "agenda_text": "2219951 지역산업 지원법안",
+            }
+        ],
+    )
+
+    resolved = resolve_metadata_candidates(plan, metadata)
+
+    assert resolved.bills.accepted_count == 1
+    assert resolved.meetings.accepted_count == 1
+    assert resolved.meetings.accepted[0].match_reasons == (
+        "bill_no_exact:2219951",
+    )
+
+
+def test_no_matching_proposer_bill_rejects_all_topic_similar_meetings() -> None:
+    plan = plan_research(
+        "김남근 의원이 대표발의한 인공지능 법안과 회의록",
+        as_of=AS_OF,
+    )
+    metadata = collection(
+        bills=[
+            {
+                "BILL_NO": "2219952",
+                "BILL_NAME": "인공지능 산업법안",
+                "RST_PROPOSER": "김준환",
+            }
+        ],
+        meetings=[
+            {
+                "PDF_LINK_URL": "https://record.assembly.go.kr/topic.pdf",
+                "agenda_items": [
+                    {"bill_no": "2219952", "title": "인공지능 산업법안"}
+                ],
+                "agenda_text": "2219952 인공지능 산업법안",
+            }
+        ],
+    )
+
+    resolved = resolve_metadata_candidates(plan, metadata)
+
+    assert resolved.bills.accepted_count == 0
+    assert resolved.meetings.accepted_count == 0
+    assert resolved.meetings.decisions[0].rejection_reasons == (
+        "no_selected_proposer_bill",
+    )

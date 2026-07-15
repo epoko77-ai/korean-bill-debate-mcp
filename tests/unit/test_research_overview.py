@@ -5,7 +5,14 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from kasm.research.collector import CollectionCoverage, MetadataCollection, MetadataKind
+from kasm.adapters.korea.bills import BILL_DATASET
+from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
+from kasm.research.collector import (
+    CollectionCoverage,
+    MetadataCollection,
+    MetadataKind,
+    PartitionProvenance,
+)
 from kasm.research.contracts import (
     CoverageLedger,
     EvidenceCoverage,
@@ -461,13 +468,35 @@ def test_provisional_candidate_inventory_is_complete_paginatable_and_not_a_concl
 
 def test_discovery_state_adds_source_accounting_and_identity_mismatch_fails_closed() -> None:
     resolution = _metadata_resolution()
+    partitions = (
+        PartitionProvenance(
+            "bills-22",
+            MetadataKind.BILL,
+            BILL_DATASET,
+            (("AGE", 22),),
+            2,
+            2,
+            "b" * 64,
+            (),
+        ),
+        PartitionProvenance(
+            "meetings-22",
+            MetadataKind.MEETING,
+            DATASET_BY_SOURCE[MeetingSource.COMMITTEE],
+            (("CONF_DATE", "2026-07"), ("DAE_NUM", 22)),
+            1,
+            1,
+            "c" * 64,
+            (),
+        ),
+    )
     rows = MetadataCollection(
         bills=tuple(dict(item.candidate) for item in resolution.bills.decisions),
         meetings=tuple(dict(item.candidate) for item in resolution.meetings.decisions),
-        partitions=(),
+        partitions=partitions,
         coverage=CollectionCoverage(
-            partitions_expected=0,
-            partitions_complete=0,
+            partitions_expected=2,
+            partitions_complete=2,
             source_rows_expected=3,
             source_rows_fetched=3,
             bill_source_rows=2,
@@ -496,6 +525,14 @@ def test_discovery_state_adds_source_accounting_and_identity_mismatch_fails_clos
     assert overview.source.source_complete is True
     assert overview.source.source_rows_fetched == 3
     assert overview.source.bills_after_strict_filter == 2
+    assert [item.state.value for item in overview.source.source_availability] == [
+        "records_found",
+        "records_found",
+    ]
+    assert [item["source"] for item in overview.source.to_dict()["source_availability"]] == [
+        "bill_metadata",
+        "committee_minutes",
+    ]
 
     broken = CandidateDecision(
         MetadataKind.BILL,

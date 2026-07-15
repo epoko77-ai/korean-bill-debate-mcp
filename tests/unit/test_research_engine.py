@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+import kasm.research.engine as engine_module
 from kasm.adapters.korea.bills import BILL_DATASET, BILL_STATUS_DATASET
 from kasm.adapters.korea.client import ApiPage
 from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
@@ -56,6 +57,30 @@ REVIEW_URL = "https://likms.assembly.go.kr/filegate/review.pdf?id=2219564"
 MINUTES_URL = "https://record.assembly.go.kr/minutes/ai.pdf"
 
 Responder = Callable[[str, int, int, dict[str, str | int]], ApiPage]
+
+
+def test_criteria_hash_binds_exact_proposer_role_and_name() -> None:
+    representative = plan_research(
+        "김남근 의원이 대표발의한 인공지능 법안",
+        as_of=AS_OF,
+    )
+    co_proposer = plan_research(
+        "김남근 의원이 공동발의한 인공지능 법안",
+        as_of=AS_OF,
+    )
+    resolver = MetadataCandidateResolver()
+    empty = MetadataCollection(
+        bills=(),
+        meetings=(),
+        partitions=(),
+        coverage=CollectionCoverage(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    )
+    representative_criteria = resolver.resolve(representative, empty).criteria
+    co_proposer_criteria = resolver.resolve(co_proposer, empty).criteria
+
+    assert engine_module._criteria_hash(  # type: ignore[attr-defined]
+        representative_criteria
+    ) != engine_module._criteria_hash(co_proposer_criteria)  # type: ignore[attr-defined]
 
 
 class Queue:

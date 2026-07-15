@@ -2,7 +2,14 @@
 
 The workspace is a no-account, bring-your-own-key alpha for people who want an answer without first
 mounting an MCP server in another AI product. It remains a bounded single-request path; the durable
-background research tools added in `v1.0.0` are currently an MCP-only surface.
+background research tools extended in `v1.1.0` are currently an MCP-only surface.
+
+In particular, the MCP's durable term-1-through-22 plan, immutable role-aware proposer scope,
+per-dataset `source_availability`, background retries, and lossless evidence traversal do not turn
+the workspace into a complete historical search product. The workspace may surface official
+historical records reached by its bounded live path, but it makes no complete historical full-text
+corpus claim. Use the 13-tool hosted MCP workflow when those coverage guarantees and explicit
+`records_found`/`no_records`/`incomplete` states matter.
 
 ## User flow
 
@@ -70,6 +77,8 @@ download therefore preserves the complete source metadata alongside the official
 ## Current alpha limits
 
 - A run stays inside one HTTP request and may approach the deployment timeout on a cold PDF fetch.
+- Historical depth follows whichever official sources the bounded live request reaches; the
+  workspace does not expose the durable MCP's complete term-by-term source-availability map.
 - The provider/model context and output limits above can require a broad question to be split into
   multiple workspace requests; the workspace never presents a limit-stopped partial answer as
   complete.

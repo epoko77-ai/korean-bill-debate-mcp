@@ -18,6 +18,12 @@ def test_translates_high_signal_english_legislative_concepts() -> None:
     )
 
 
+def test_preserves_a_historical_nineteen_nineties_year_and_month() -> None:
+    prepared = prepare_query("In March 1999, show climate crisis bills")
+
+    assert prepared.search_query == "1999년 3월 기후위기 법안"
+
+
 def test_explicit_korean_query_handles_unmapped_english_proper_nouns() -> None:
     prepared = prepare_query(
         "What did lawmakers say about the Acme framework?",

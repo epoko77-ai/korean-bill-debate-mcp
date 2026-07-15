@@ -1,6 +1,6 @@
 # Architecture
 
-`v1.0.0` has three user-keyed surfaces with deliberately different execution boundaries.
+`v1.1.0` has three user-keyed surfaces with deliberately different execution boundaries.
 
 ```text
 Hosted durable MCP
@@ -18,6 +18,45 @@ Web workspace alpha
   → Open Assembly key + LLM key in one HTTPS request
   → synchronous live research → provider synthesis → source cards
 ```
+
+## Durable scope, identity, and source accounting
+
+The 13-tool hosted path separates interpretation, official-source collection, relevance, and final
+evidence linkage. Its `v1.1.0` flow is:
+
+```text
+original natural-language question
+  → immutable scope: term/date range + exact bill numbers + exact proposer roles
+  → official term intersections and dataset partitions
+  → raw per-dataset/per-term source availability
+  → independent bill relevance and exact proposer-role gates
+  → exact bill-number agenda linkage for meetings
+  → status, overview, evidence index, and lossless source text
+```
+
+The term catalog covers official Assembly boundaries 1–22, including institutional gaps. Explicit
+Korean term/range expressions and explicit calendar ranges select every intersecting term; no
+scope defaults to the configured current term, currently 22. An exact seven-digit bill number binds
+its own term and cannot be silently searched in a conflicting one.
+
+Proposer identity is a hard filter rather than a relevance boost. Representative proposers are
+checked against `RST_PROPOSER`, co-proposers against `PUBL_PROPOSER`, and a role-agnostic proposer
+against their union, always with full Korean-name boundaries. A subject supplied with the name is
+an independent hard gate. Meeting rows do not carry proposer identity, so they can enter a
+proposer-scoped result only after a bill passes those checks and the meeting's official agenda
+contains that bill's exact number.
+
+`source_availability` is calculated from raw partition provenance before candidate filtering.
+`records_found` and `no_records` require every planned partition and expected raw row to be present;
+otherwise the state is `incomplete`. Consequently, a relevance-filtered empty result cannot be
+misreported as an empty official dataset, and an API failure cannot become “No records found.” The
+zero message is deliberately dataset-scoped. A dedicated subcommittee zero also warns that the
+committee dataset can carry subcommittee proceedings.
+
+The planner's historical range is broader than the historical depth of any one API family. Current
+empirical probes begin at plenary 1+, committee 2+, bill/status 10+, and dedicated subcommittee 16+;
+expert review reports are discovered dynamically per bill. See [Official data sources](data-sources.md).
+None of these boundaries claims a complete historical full-text corpus.
 
 The local compatibility runtime remains live-first and user-keyed.
 

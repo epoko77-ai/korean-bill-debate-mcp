@@ -544,7 +544,17 @@ def _initial_from_payload(
         raise ArtifactIntegrityError("research job initial state contains mutable results")
     if job.error_code is not None or job.error_message is not None:
         raise ArtifactIntegrityError("research job initial state contains an error")
-    if contract.fingerprint(index_revision) != fingerprint:
+    # A schema upgrade adds empty scope fields to the current canonical
+    # payload.  Existing immutable jobs remain bound to the exact older
+    # contract object they stored, so accept that object's canonical hash as a
+    # legacy fingerprint without weakening any field or index binding.
+    stored_contract_fingerprint = canonical_hash(
+        {"contract": dict(contract_value), "index_revision": index_revision}
+    )
+    if fingerprint not in {
+        contract.fingerprint(index_revision),
+        stored_contract_fingerprint,
+    }:
         raise ArtifactIntegrityError("research job query fingerprint does not match")
     stored_state_hash = _required_hash(
         payload.get("initial_state_hash"), "initial_state_hash"
@@ -740,17 +750,33 @@ def _contract_from_payload(payload: Mapping[str, Any]) -> ResearchContract:
         "completeness",
     }
     expected = legacy_expected | {"assembly_terms"}
-    if set(payload) not in (legacy_expected, expected):
+    proposer_fields = {
+        "representative_proposer_names",
+        "co_proposer_names",
+        "proposer_names",
+    }
+    if set(payload) not in (
+        legacy_expected,
+        expected,
+        legacy_expected | proposer_fields,
+        expected | proposer_fields,
+    ):
         raise ValueError("research contract schema is invalid")
     committees = payload["committees"]
     assembly_terms = payload.get("assembly_terms", [payload["assembly_term"]])
     bill_numbers = payload["bill_numbers"]
+    representative_proposers = payload.get("representative_proposer_names", [])
+    co_proposers = payload.get("co_proposer_names", [])
+    proposers = payload.get("proposer_names", [])
     evidence_types = payload["evidence_types"]
     intents = payload["intents"]
     for value, label in (
         (assembly_terms, "assembly_terms"),
         (committees, "committees"),
         (bill_numbers, "bill_numbers"),
+        (representative_proposers, "representative_proposer_names"),
+        (co_proposers, "co_proposer_names"),
+        (proposers, "proposer_names"),
         (evidence_types, "evidence_types"),
         (intents, "intents"),
     ):
@@ -767,6 +793,11 @@ def _contract_from_payload(payload: Mapping[str, Any]) -> ResearchContract:
         assembly_terms=tuple(int(item) for item in assembly_terms),
         committees=tuple(str(item) for item in committees),
         bill_numbers=tuple(str(item) for item in bill_numbers),
+        representative_proposer_names=tuple(
+            str(item) for item in representative_proposers
+        ),
+        co_proposer_names=tuple(str(item) for item in co_proposers),
+        proposer_names=tuple(str(item) for item in proposers),
         evidence_types=tuple(EvidenceType(str(item)) for item in evidence_types),
         intents=tuple(ResearchIntent(str(item)) for item in intents),
         ordering=_required_string(payload["ordering"], "ordering"),

@@ -29,9 +29,10 @@ from kasm.adapters.korea.bills import BILL_DATASET, BILL_STATUS_DATASET
 from kasm.adapters.korea.client import OPEN_ASSEMBLY_BASE_URL
 from kasm.adapters.korea.documents import BILL_INFO_URL
 from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
+from kasm.research.assembly_terms import DEFAULT_ASSEMBLY_TERM_BOUNDS
 from kasm.research.collector import MetadataKind, MetadataPartition
 from kasm.research.contracts import EvidenceType
-from kasm.research.planner import DEFAULT_ASSEMBLY_TERM_BOUNDS, ResearchPlan
+from kasm.research.planner import ResearchPlan
 from kasm.search.lexical import query_terms
 from kasm.search.terminology import LEGAL_TERMINOLOGY, TermRelation
 
@@ -250,7 +251,7 @@ class MonthBucket:
     date_to: date
 
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"20\d{2}-(?:0[1-9]|1[0-2])", self.value):
+        if not re.fullmatch(r"(?:19|20)\d{2}-(?:0[1-9]|1[0-2])", self.value):
             raise ValueError("month bucket value must use YYYY-MM")
         if self.date_from > self.date_to:
             raise ValueError("month bucket date_from must not follow date_to")
@@ -510,6 +511,12 @@ class ResearchPartitionPlanner:
                         assembly_term,
                         exact_numbers,
                         search_terms,
+                        representative_proposer_names=(
+                            contract.representative_proposer_names
+                            if not contract.co_proposer_names
+                            and not contract.proposer_names
+                            else ()
+                        ),
                         include_status=needs_status,
                     )
                 )
@@ -622,6 +629,7 @@ class ResearchPartitionPlanner:
         exact_numbers: tuple[str, ...],
         search_terms: tuple[PartitionSearchTerm, ...],
         *,
+        representative_proposer_names: tuple[str, ...],
         include_status: bool,
     ) -> list[PlannedMetadataPartition]:
         result: list[PlannedMetadataPartition] = []
@@ -652,22 +660,37 @@ class ResearchPartitionPlanner:
                     )
             return result
 
-        # Topic searches collect the complete bill universe for the Assembly
-        # term once, then evaluate every row locally.  Relying on one
-        # BILL_NAME request per expansion silently loses bills whose official
-        # title uses an unforeseen synonym and makes completeness depend on a
-        # small curated vocabulary.  Search terms remain in the plan as the
-        # auditable relevance scope, not as lossy upstream filters.
+        # The official PROPOSER parameter is a supported representative-name
+        # lookup and is independently checked against RST_PROPOSER after fetch.
+        # It makes the common representative-only search fast without weakening
+        # identity.  PUBL_PROPOSER/RST_PROPOSER request parameters are ignored by
+        # the upstream service, so co-proposer and role-agnostic searches must
+        # continue to collect the complete Assembly-term bill universe.
         if search_terms:
-            result.append(
-                _planned_partition(
-                    OfficialSourceKind.BILL_METADATA,
-                    MetadataKind.BILL,
-                    BILL_DATASET,
-                    {"AGE": assembly_term},
-                    self.page_size,
+            if representative_proposer_names:
+                for name in representative_proposer_names:
+                    result.append(
+                        _planned_partition(
+                            OfficialSourceKind.BILL_METADATA,
+                            MetadataKind.BILL,
+                            BILL_DATASET,
+                            {"AGE": assembly_term, "PROPOSER": name},
+                            self.page_size,
+                        )
+                    )
+            else:
+                # Topic searches collect the complete bill universe for the
+                # Assembly term once, then evaluate every row locally. Relying
+                # on BILL_NAME expansions would silently lose unforeseen terms.
+                result.append(
+                    _planned_partition(
+                        OfficialSourceKind.BILL_METADATA,
+                        MetadataKind.BILL,
+                        BILL_DATASET,
+                        {"AGE": assembly_term},
+                        self.page_size,
+                    )
                 )
-            )
         # BILL_STATUS intentionally has no BILL_NAME partitions.  That endpoint
         # ignores topic-name filtering; exact candidate numbers are materialized
         # from the deferred requirement after bill discovery and relevance gates.
@@ -846,8 +869,8 @@ def _effective_term_ranges(
             raise ValueError("assembly term bounds are invalid")
         bounds.append((assembly_term, term_start, term_end))
     for bound_left, bound_right in zip(bounds, bounds[1:], strict=False):
-        if bound_left[2] + timedelta(days=1) != bound_right[1]:
-            raise ValueError("assembly term scope contains a gap or overlap")
+        if bound_left[2] >= bound_right[1]:
+            raise ValueError("assembly term scope contains an overlap")
 
     scope_start = bounds[0][1]
     scope_end = min(as_of, bounds[-1][2])
@@ -893,8 +916,8 @@ def _effective_term_ranges(
     if not term_ranges:
         raise ValueError("requested date range has no fetchable Assembly term slice")
     for range_left, range_right in zip(term_ranges, term_ranges[1:], strict=False):
-        if range_left.date_to + timedelta(days=1) != range_right.date_from:
-            raise ValueError("effective Assembly term ranges contain a gap or overlap")
+        if range_left.date_to >= range_right.date_from:
+            raise ValueError("effective Assembly term ranges contain an overlap")
 
     if requested_from is None and requested_to is None:
         policy = (

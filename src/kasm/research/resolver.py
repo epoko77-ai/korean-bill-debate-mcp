@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .collector import MetadataCollection, MetadataKind
@@ -149,6 +149,11 @@ class MetadataResolution:
                 "related_statute_terms": list(self.criteria.related_statute_terms),
                 "related_issue_terms": list(self.criteria.related_issue_terms),
                 "committees": list(self.criteria.committees),
+                "representative_proposer_names": list(
+                    self.criteria.representative_proposer_names
+                ),
+                "co_proposer_names": list(self.criteria.co_proposer_names),
+                "proposer_names": list(self.criteria.proposer_names),
                 "date_from": (
                     self.criteria.date_from.isoformat() if self.criteria.date_from else None
                 ),
@@ -179,13 +184,32 @@ class MetadataCandidateResolver:
             plan.contract.query,
             bill_numbers=plan.contract.bill_numbers,
             committees=plan.contract.committees,
+            representative_proposer_names=(
+                plan.contract.representative_proposer_names
+            ),
+            co_proposer_names=plan.contract.co_proposer_names,
+            proposer_names=plan.contract.proposer_names,
             date_from=plan.contract.date_from,
             date_to=plan.contract.date_to,
             minimum_score=self.minimum_score,
         )
         self._require_exact_bills(criteria.bill_numbers, collection.bills)
         bills = _resolve_set(MetadataKind.BILL, collection.bills, criteria)
-        meetings = _resolve_set(MetadataKind.MEETING, collection.meetings, criteria)
+        if _has_proposer_scope(criteria):
+            # Meeting feeds do not publish proposer identities.  Resolve bills
+            # first against RST_PROPOSER/PUBL_PROPOSER, then admit only agendas
+            # carrying an exact BILL_NO from that accepted set.  This prevents
+            # an unrelated same-topic meeting from bypassing the name filter.
+            accepted_bill_numbers = tuple(
+                sorted(_decision_bill_number(item) for item in bills.accepted)
+            )
+            meetings = _resolve_proposer_meetings(
+                collection.meetings,
+                criteria,
+                accepted_bill_numbers,
+            )
+        else:
+            meetings = _resolve_set(MetadataKind.MEETING, collection.meetings, criteria)
         return MetadataResolution(
             query=plan.contract.query,
             source_hash=collection.source_hash,
@@ -328,6 +352,61 @@ def _resolve_set(
     decisions = tuple(decision_by_id[key] for key in sorted(decision_by_id))
     accepted = tuple(decision_by_id[result.candidate_id] for result in ranked)
     return CandidateSetResolution(kind=kind, decisions=decisions, accepted=accepted)
+
+
+def _has_proposer_scope(criteria: RelevanceCriteria) -> bool:
+    return bool(
+        criteria.representative_proposer_names
+        or criteria.co_proposer_names
+        or criteria.proposer_names
+    )
+
+
+def _decision_bill_number(decision: CandidateDecision) -> str:
+    value = decision.candidate.get("BILL_NO", decision.candidate.get("bill_no"))
+    number = str(value).strip() if value is not None else ""
+    if len(number) != 7 or not number.isdigit():
+        raise ValueError("accepted proposer bill lacks an exact seven-digit number")
+    return number
+
+
+def _resolve_proposer_meetings(
+    candidates: Sequence[Mapping[str, Any]],
+    criteria: RelevanceCriteria,
+    accepted_bill_numbers: tuple[str, ...],
+) -> CandidateSetResolution:
+    if accepted_bill_numbers:
+        meeting_criteria = replace(
+            criteria,
+            bill_numbers=accepted_bill_numbers,
+            representative_proposer_names=(),
+            co_proposer_names=(),
+            proposer_names=(),
+        )
+        return _resolve_set(MetadataKind.MEETING, candidates, meeting_criteria)
+
+    # Preserve complete negative accounting even when no bill survived the
+    # exact role/name gate.  Topic similarity alone is not authorization to
+    # attach a meeting to a proposer-scoped request.
+    prepared = tuple(
+        _prepare_candidate(MetadataKind.MEETING, candidate) for candidate in candidates
+    )
+    decisions = tuple(
+        CandidateDecision(
+            kind=MetadataKind.MEETING,
+            candidate_id=candidate_id,
+            accepted=False,
+            score=0,
+            match_reasons=(),
+            rejection_reasons=("no_selected_proposer_bill",),
+            candidate=original,
+        )
+        for candidate_id, original, _scored in sorted(
+            prepared,
+            key=lambda item: item[0],
+        )
+    )
+    return CandidateSetResolution(MetadataKind.MEETING, decisions, ())
 
 
 def _prepare_candidate(

@@ -43,7 +43,9 @@ def create_server(
         name,
         instructions=(
             "한국 국회의 공식 기록을 조사하는 MCP입니다. 한국어 요청을 우선 정확히 "
-            "해석하되 영어 요청도 지원합니다. 광범위한 질문은 start_research 또는 "
+            "해석하되 영어 요청도 지원합니다. 제1대부터 제22대까지 명시한 대수·날짜 범위와 "
+            "대표발의자·공동발의자·전체 발의자 이름을 공식 필드로 구분합니다. "
+            "광범위한 질문은 start_research 또는 "
             "explore_issue를 한 번만 호출하고, 모든 응답의 next_action을 그대로 따르세요. "
             "같은 조사가 running이라고 새 research를 만들지 마세요. complete/partial 뒤에는 "
             "get_research_overview로 핵심과 전체 자료 지도를 먼저 확인하세요. 빠른 결과는 "

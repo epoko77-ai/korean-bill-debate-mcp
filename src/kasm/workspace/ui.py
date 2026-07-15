@@ -79,7 +79,7 @@ _PAGE = """<!doctype html>
 </head>
 <body>
   <header class="hero">
-    <nav><a class="brand" href="/">Korean Bill &amp; Debate <small>v1.0.0 · workspace alpha</small></a>
+    <nav><a class="brand" href="/">Korean Bill &amp; Debate <small>v1.1.0 · workspace alpha</small></a>
       <div class="navlinks"><a href="/">MCP 연결</a><a href="https://github.com/epoko77-ai/korean-bill-debate-mcp">GitHub</a></div></nav>
     <div class="hero-inner"><div><div class="eyebrow">국회 입법조사 워크스페이스</div>
       <h1>법안 하나를 물으면,<br>심사 기록이 한 흐름으로.</h1>

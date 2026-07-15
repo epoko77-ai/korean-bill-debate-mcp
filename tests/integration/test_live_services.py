@@ -120,6 +120,60 @@ def test_bill_status_is_refreshed_from_official_status_api(tmp_path) -> None:
     assert any(dataset == BILL_STATUS_DATASET for dataset, _ in client.calls)
 
 
+def test_exact_historical_bill_number_selects_its_own_assembly_term(tmp_path) -> None:
+    class HistoricalBillClient(FakeClient):
+        def fetch_page(self, dataset: str, **kwargs):
+            parameters = kwargs.get("parameters") or {}
+            self.calls.append((dataset, parameters))
+            rows = (
+                (
+                    {
+                        "BILL_NO": "1800001",
+                        "BILL_NAME": "역사자료 확인법률안",
+                        "AGE": "18",
+                        "PROPOSE_DT": "20080601",
+                        "PROC_RESULT": "대안반영폐기",
+                    },
+                )
+                if dataset == BILL_DATASET
+                and parameters.get("AGE") == 18
+                and parameters.get("BILL_NO") == "1800001"
+                else ()
+            )
+            return ApiPage(
+                dataset,
+                1,
+                int(kwargs.get("page_size") or 100),
+                len(rows),
+                rows,
+                "https://official.test",
+                dataset,
+            )
+
+    client = HistoricalBillClient({})
+    database = Database(tmp_path / "historical-bill.sqlite3")
+    database.initialize()
+    service = LiveAssemblyServices(
+        database,
+        client,  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+    )
+
+    status = service.get_bill_status("1800001")
+
+    assert status is not None
+    assert status["bill_no"] == "1800001"
+    assert {dataset for dataset, _parameters in client.calls} >= {
+        BILL_DATASET,
+        BILL_STATUS_DATASET,
+    }
+    assert all(
+        parameters["AGE"] == 18
+        for dataset, parameters in client.calls
+        if dataset in {BILL_DATASET, BILL_STATUS_DATASET}
+    )
+
+
 def test_pending_bill_status_falls_back_to_main_bill_api(tmp_path) -> None:
     class PendingClient(FakeClient):
         def fetch_page(self, dataset: str, **kwargs):
@@ -373,6 +427,83 @@ def test_explicit_start_to_present_uses_only_requested_month_range(tmp_path) -> 
         "2026-06",
         "2026-07",
     }
+
+
+def test_historical_year_selects_term_and_every_requested_month(tmp_path) -> None:
+    service = LiveAssemblyServices(
+        Database(tmp_path / "historical-year.sqlite3"),
+        FakeClient({}),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+        now=lambda: datetime(2026, 7, 13, tzinfo=UTC),
+    )
+    service._refresh_bills = lambda **_kwargs: []  # type: ignore[method-assign]
+    captured: dict[str, Any] = {}
+    service._refresh_meetings = (  # type: ignore[method-assign]
+        lambda **kwargs: captured.update(kwargs)
+    )
+
+    selected_term = service._hydrate_issue("1999년 인공지능 입법", {})
+
+    assert selected_term == 15
+    assert captured["assembly_term"] == 15
+    assert captured["months"] == [f"1999-{month:02d}" for month in range(1, 13)]
+
+
+def test_explicit_historical_term_uses_official_term_bounds_for_history(tmp_path) -> None:
+    service = LiveAssemblyServices(
+        Database(tmp_path / "historical-term.sqlite3"),
+        FakeClient({}),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+        now=lambda: datetime(2026, 7, 13, tzinfo=UTC),
+    )
+    service._refresh_bills = lambda **_kwargs: []  # type: ignore[method-assign]
+    captured: dict[str, Any] = {}
+    service._refresh_meetings = (  # type: ignore[method-assign]
+        lambda **kwargs: captured.update(kwargs)
+    )
+
+    service._hydrate_issue("과거부터 전체 경과", {"assembly_term": 18})
+
+    months = captured["months"]
+    assert captured["assembly_term"] == 18
+    assert months[0] == "2008-05"
+    assert months[-1] == "2012-05"
+    assert "2026-07" not in months
+
+
+def test_meeting_list_derives_historical_term_from_structured_dates(tmp_path) -> None:
+    database = Database(tmp_path / "historical-meetings.sqlite3")
+    database.initialize()
+    service = LiveAssemblyServices(
+        database,
+        FakeClient({}),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+    )
+    captured: dict[str, Any] = {}
+    service._refresh_meetings = (  # type: ignore[method-assign]
+        lambda **kwargs: captured.update(kwargs)
+    )
+
+    assert service.list_meetings(
+        date_from="2010-01-15", date_to="2010-02-03"
+    ) == []
+
+    assert captured["assembly_term"] == 18
+    assert captured["months"] == {"2010-01", "2010-02"}
+
+
+def test_legacy_live_rejects_a_multi_term_date_range(tmp_path) -> None:
+    service = LiveAssemblyServices(
+        Database(tmp_path / "multi-term.sqlite3"),
+        FakeClient({}),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValueError, match="start_research"):
+        service._selected_assembly_term(
+            "인공지능 입법",
+            {"date_from": "2010-01-01", "date_to": "2014-01-01"},
+        )
 
 
 def test_explicit_month_is_not_broadened_by_candidate_bill_dates(tmp_path) -> None:

@@ -325,3 +325,170 @@ def test_literal_query_concepts_are_never_silently_cut_after_thirty_two() -> Non
 
     assert set(terms).issubset(set(criteria.issue_terms))
     assert len(criteria.issue_terms) > 32
+
+
+def _proposer_bill(
+    *,
+    bill_no: str = "2219951",
+    title: str = "인공지능 안전법안",
+    representative: str = "김남근",
+    co_proposers: str = "송재봉,민병덕,박정,김윤",
+) -> dict[str, str]:
+    return {
+        "id": f"bill:{bill_no}",
+        "BILL_NO": bill_no,
+        "BILL_NAME": title,
+        "RST_PROPOSER": representative,
+        "PUBL_PROPOSER": co_proposers,
+        "PROPOSER": f"{representative}의원 등 4인",
+        "MEMBER_LIST": "https://likms.assembly.go.kr/bill/coactorListPopup.do?billId=test",
+    }
+
+
+def test_representative_and_co_proposer_roles_use_distinct_official_fields() -> None:
+    representative = evaluate_candidate(
+        _proposer_bill(),
+        RelevanceCriteria.from_query("김남근 의원이 대표발의한 법안"),
+    )
+    wrong_role = evaluate_candidate(
+        _proposer_bill(),
+        RelevanceCriteria.from_query("김윤 의원이 대표발의한 법안"),
+    )
+    co_proposer = evaluate_candidate(
+        _proposer_bill(),
+        RelevanceCriteria.from_query("김윤 의원이 공동발의한 법안"),
+    )
+
+    assert representative.relevant is True
+    assert representative.match_reasons == (
+        "proposer_exact:representative:김남근@RST_PROPOSER",
+    )
+    assert wrong_role.relevant is False
+    assert wrong_role.rejection_reasons == (
+        "representative_proposer_mismatch:김윤",
+    )
+    assert co_proposer.relevant is True
+    assert co_proposer.match_reasons == (
+        "proposer_exact:co_proposer:김윤@PUBL_PROPOSER",
+    )
+
+
+@pytest.mark.parametrize("name", ("김남근", "김윤"))
+def test_generic_proposer_scope_matches_either_official_role(name: str) -> None:
+    result = evaluate_candidate(
+        _proposer_bill(),
+        RelevanceCriteria.from_query(f"{name} 의원이 발의한 법안"),
+    )
+
+    assert result.relevant is True
+    assert any(reason.startswith("proposer_exact:") for reason in result.match_reasons)
+
+
+@pytest.mark.parametrize(
+    ("criteria", "expected_reason"),
+    (
+        (
+            RelevanceCriteria.from_query(
+                "김남근 대표발의 법안과 박정 대표발의 법안"
+            ),
+            "proposer_exact:representative:김남근@RST_PROPOSER",
+        ),
+        (
+            RelevanceCriteria.from_query(
+                "김윤 공동발의 법안과 이정민 공동발의 법안"
+            ),
+            "proposer_exact:co_proposer:김윤@PUBL_PROPOSER",
+        ),
+        (
+            RelevanceCriteria.from_query("김남근 발의 법안과 박정 발의 법안"),
+            "proposer_exact:representative:김남근@RST_PROPOSER",
+        ),
+    ),
+)
+def test_multiple_names_within_one_proposer_role_are_union_scopes(
+    criteria: RelevanceCriteria,
+    expected_reason: str,
+) -> None:
+    result = evaluate_candidate(_proposer_bill(), criteria)
+
+    assert result.relevant is True
+    assert expected_reason in result.match_reasons
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "김남근 대표발의 법안",
+        "김남근이 대표 발의한 법안",
+        "김윤 공동발의 법안",
+        "박정이 발의한 법안",
+    ),
+)
+def test_explicit_proposer_role_without_member_title_is_not_mistaken_for_topic(
+    query: str,
+) -> None:
+    criteria = RelevanceCriteria.from_query(query)
+    result = evaluate_candidate(_proposer_bill(), criteria)
+
+    assert criteria.issue_terms == ()
+    assert result.relevant is True
+
+
+def test_proposer_name_and_topic_are_independent_hard_gates() -> None:
+    criteria = RelevanceCriteria.from_query(
+        "김남근 의원이 대표발의한 인공지능 법안"
+    )
+
+    exact = evaluate_candidate(_proposer_bill(), criteria)
+    wrong_topic = evaluate_candidate(
+        _proposer_bill(title="해양사고 조사법 일부개정법률안"),
+        criteria,
+    )
+    wrong_person = evaluate_candidate(
+        _proposer_bill(representative="김민석"),
+        criteria,
+    )
+
+    assert exact.relevant is True
+    assert "인공지능" in criteria.issue_terms
+    assert not {"김남근", "대표발의한", "의원"}.intersection(criteria.issue_terms)
+    assert wrong_topic.relevant is False
+    assert wrong_topic.rejection_reasons == ("proposer_topic_mismatch",)
+    assert wrong_person.relevant is False
+    assert wrong_person.rejection_reasons == (
+        "representative_proposer_mismatch:김남근",
+    )
+
+
+def test_proposer_matching_uses_full_name_boundaries_and_ignores_member_list_url() -> None:
+    criteria = RelevanceCriteria.from_query("김민 의원이 공동발의한 법안")
+    candidate = _proposer_bill(
+        representative="김민석",
+        co_proposers="박김민수,이정민",
+    )
+    candidate["MEMBER_LIST"] = "https://official.example/member/김민"
+
+    result = evaluate_candidate(candidate, criteria)
+
+    assert result.relevant is False
+    assert result.rejection_reasons == ("co_proposer_mismatch:김민",)
+
+
+def test_compact_proposer_label_is_only_a_representative_fallback() -> None:
+    candidate = _proposer_bill()
+    candidate.pop("RST_PROPOSER")
+    candidate.pop("PUBL_PROPOSER")
+
+    representative = evaluate_candidate(
+        candidate,
+        RelevanceCriteria.from_query("김남근 의원이 대표발의한 법안"),
+    )
+    unproven_co_proposer = evaluate_candidate(
+        candidate,
+        RelevanceCriteria.from_query("김윤 의원이 공동발의한 법안"),
+    )
+
+    assert representative.match_reasons == (
+        "proposer_exact:representative:김남근@PROPOSER",
+    )
+    assert unproven_co_proposer.relevant is False

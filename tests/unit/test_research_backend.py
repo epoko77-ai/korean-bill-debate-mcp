@@ -32,6 +32,10 @@ from kasm.research.results import (
     ResearchSnapshot,
     ResearchSnapshotSummary,
 )
+from kasm.research.source_availability import (
+    OfficialSourceAvailability,
+    SourceAvailabilityState,
+)
 from kasm.research.status_storage import BoundedResearchStatusView
 
 NOW = datetime(2026, 7, 13, tzinfo=UTC)
@@ -516,6 +520,105 @@ def test_final_overview_and_status_share_complete_partial_truth_table(tmp_path) 
             assert payload["pending_total_known"] is True
             assert payload["coverage"]["complete"] is expected_complete
             assert payload["coverage"]["state"] == ("complete" if expected_complete else "partial")
+
+
+def test_final_empty_overview_is_explicit_and_preserves_source_zero_accounting(
+    tmp_path,
+) -> None:
+    contract = ResearchContract(
+        "제1대 국회 인공지능 법안",
+        NOW,
+        assembly_term=1,
+        assembly_terms=(1,),
+        evidence_types=(EvidenceType.BILLS,),
+    )
+    coverage = CoverageLedger(
+        contract.evidence_types,
+        (EvidenceCoverage(EvidenceType.BILLS, 0, 0, 0),),
+    )
+    empty = ResearchSnapshot(
+        "research_1",
+        contract,
+        "index-v1",
+        "build",
+        coverage,
+        (),
+    )
+    availability = OfficialSourceAvailability(
+        source="bill_metadata",
+        dataset="nzmimeepazxkubdpn",
+        kind=MetadataKind.BILL,
+        assembly_term=1,
+        partitions_expected=1,
+        partitions_complete=1,
+        source_rows_expected=0,
+        source_rows_fetched=0,
+        state=SourceAvailabilityState.NO_RECORDS,
+    )
+    provisional = ProvisionalResearchOverview(
+        contract.query,
+        "a" * 64,
+        (),
+        (
+            ProvisionalFamilyAccounting(MetadataKind.BILL, 0, 0, 0, ()),
+            ProvisionalFamilyAccounting(MetadataKind.MEETING, 0, 0, 0, ()),
+        ),
+        ProvisionalSourceAccounting(True, 0, 0, 0, 0, 0, 0, (availability,)),
+    )
+
+    class SourceRuns(Runs):
+        def get_provisional_overview(self, research_id: str):
+            assert research_id == "research_1"
+            return provisional
+
+    class SourceEngine(Engine):
+        def __init__(self) -> None:
+            super().__init__(empty)
+            self.runs = SourceRuns(empty)
+
+    result = backend(tmp_path, SourceEngine()).get_research_overview("research_1")
+
+    assert result["result_state"] == "no_matching_records"
+    assert result["evidence_count"] == 0
+    assert "확인하지 못했습니다" in result["result_message_ko"]
+    assert result["source"]["scope_complete"] is True
+    assert result["source_availability"] == [availability.to_dict()]
+    assert result["source_availability"][0]["state"] == "no_records"
+
+
+def test_final_empty_partial_overview_is_inconclusive_not_no_records(tmp_path) -> None:
+    contract = ResearchContract(
+        "제1대 국회 인공지능 법안",
+        NOW,
+        assembly_term=1,
+        assembly_terms=(1,),
+        evidence_types=(EvidenceType.BILLS,),
+    )
+    coverage = CoverageLedger(
+        contract.evidence_types,
+        (
+            EvidenceCoverage(
+                EvidenceType.BILLS,
+                None,
+                0,
+                0,
+                gap_reasons=("metadata_source_incomplete",),
+            ),
+        ),
+    )
+    empty = ResearchSnapshot(
+        "research_1",
+        contract,
+        "index-v1",
+        "build",
+        coverage,
+        (),
+    )
+
+    result = backend(tmp_path, Engine(empty)).get_research_overview("research_1")
+
+    assert result["result_state"] == "inconclusive"
+    assert "단정할 수 없습니다" in result["result_message_ko"]
 
 
 def test_compact_overview_readiness_none_never_falls_back_to_discovery(

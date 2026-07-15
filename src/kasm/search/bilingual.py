@@ -9,7 +9,7 @@ from .terminology import LEGAL_TERMINOLOGY, TERMINOLOGY_VERSION
 
 _HANGUL = re.compile(r"[가-힣]")
 _LATIN = re.compile(r"[A-Za-z]")
-_YEAR = re.compile(r"\b(20\d{2})\b")
+_YEAR = re.compile(r"\b((?:19|20)\d{2})\b")
 _BILL_NO = re.compile(r"\b\d{7,}\b")
 _MAX_QUERY_CHARS = 500
 _MAX_SEARCH_QUERY_CHARS = 1000

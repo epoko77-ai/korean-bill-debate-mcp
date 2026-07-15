@@ -391,6 +391,156 @@ def test_research_overview_routes_core_before_optional_full_inventory() -> None:
     assert overview["comprehensive_answer_allowed"] is False
 
 
+def test_complete_zero_result_overview_reports_no_records_without_evidence_call() -> None:
+    class EmptyBackend(FakeResearchBackend):
+        def get_research_overview(
+            self,
+            research_id: str,
+            *,
+            offset: int = 0,
+            page_size: int = 20,
+            view_source_hash: str | None = None,
+        ) -> dict[str, Any]:
+            del view_source_hash
+            assert research_id == "research_1"
+            return {
+                "research_id": research_id,
+                "phase": "final",
+                "complete": True,
+                "provisional": False,
+                "substantive_conclusion_available": True,
+                "result_state": "no_matching_records",
+                "result_message_ko": "요청 범위에 일치하는 자료가 없습니다.",
+                "coverage": {"complete": True},
+                "source_availability": [
+                    {
+                        "source": "bill_metadata",
+                        "assembly_term": 1,
+                        "state": "no_records",
+                    }
+                ],
+                "core_full_text_required_ids": [],
+                "catalog": {
+                    "page": {
+                        "total": 0,
+                        "returned_count": 0,
+                        "returned_through": 0,
+                        "next_offset": None,
+                        "complete": True,
+                    },
+                    "groups": [],
+                },
+            }
+
+    tools = KasmTools(
+        ServiceContext(
+            search=FakeSearch(),
+            repository=FakeRepository(),
+            research=EmptyBackend(),
+        )
+    )
+
+    overview = tools.get_research_overview("research_1")
+
+    assert overview["result_state"] == "no_matching_records"
+    assert overview["comprehensive_answer_allowed"] is True
+    assert overview["next_action"]["tool"] is None
+    assert "자료 없음" in overview["next_action"]["instruction_ko"]
+
+
+def test_partial_empty_overview_remains_inconclusive_and_does_not_claim_no_data() -> None:
+    class PartialEmptyBackend(FakeResearchBackend):
+        def get_research_overview(
+            self,
+            research_id: str,
+            *,
+            offset: int = 0,
+            page_size: int = 20,
+            view_source_hash: str | None = None,
+        ) -> dict[str, Any]:
+            del offset, page_size, view_source_hash
+            return {
+                "research_id": research_id,
+                "phase": "final",
+                "complete": False,
+                "provisional": True,
+                "substantive_conclusion_available": True,
+                "result_state": "inconclusive",
+                "coverage": {"complete": False},
+                "core_full_text_required_ids": [],
+                "catalog": {
+                    "page": {
+                        "total": 0,
+                        "returned_count": 0,
+                        "returned_through": 0,
+                        "next_offset": None,
+                        "complete": True,
+                    },
+                    "groups": [],
+                },
+            }
+
+    tools = KasmTools(
+        ServiceContext(
+            search=FakeSearch(),
+            repository=FakeRepository(),
+            research=PartialEmptyBackend(),
+        )
+    )
+
+    overview = tools.get_research_overview("research_1")
+
+    assert overview["result_state"] == "inconclusive"
+    assert overview["comprehensive_answer_allowed"] is False
+    assert overview["next_action"]["tool"] == "get_research_page"
+    assert "자료 없음" not in overview["next_action"]["instruction_ko"]
+
+
+def test_direct_empty_result_page_is_terminal_without_placeholder_evidence() -> None:
+    class EmptyPageBackend(FakeResearchBackend):
+        def get_research_page(
+            self,
+            research_id: str,
+            *,
+            cursor: str | None = None,
+            page_size: int = 20,
+        ) -> dict[str, Any]:
+            assert research_id == "research_1"
+            assert cursor is None
+            assert page_size == 20
+            return {
+                "research_id": research_id,
+                "coverage": {"complete": True},
+                "page": {
+                    "matched_total": 0,
+                    "returned_count": 0,
+                    "returned_through": 0,
+                    "next_cursor": None,
+                    "complete": True,
+                },
+                "evidence": [],
+                "full_text_required_ids": [],
+                "full_text_required_count": 0,
+                "full_text_required_total": 0,
+                "first_full_text_required_id": None,
+            }
+
+    tools = KasmTools(
+        ServiceContext(
+            search=FakeSearch(),
+            repository=FakeRepository(),
+            research=EmptyPageBackend(),
+        )
+    )
+
+    result = tools.get_research_page("research_1", exhaustive=True)
+
+    assert result["result_state"] == "no_matching_records"
+    assert result["comprehensive_answer_allowed"] is True
+    assert result["next_action"]["tool"] is None
+    assert "열린국회 데이터셋" in result["next_action"]["instruction_ko"]
+
+
 def test_metadata_overview_routes_every_accepted_catalog_page_before_polling() -> None:
     class PagedMetadataBackend(FakeResearchBackend):
         def get_research_overview(

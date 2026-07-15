@@ -336,6 +336,11 @@ def _contract_to_payload(contract: ResearchContract) -> dict[str, object]:
         "assembly_terms": list(contract.assembly_terms),
         "committees": list(contract.committees),
         "bill_numbers": list(contract.bill_numbers),
+        "representative_proposer_names": list(
+            contract.representative_proposer_names
+        ),
+        "co_proposer_names": list(contract.co_proposer_names),
+        "proposer_names": list(contract.proposer_names),
         "evidence_types": [item.value for item in contract.evidence_types],
         "intents": [item.value for item in contract.intents],
         "ordering": contract.ordering,
@@ -361,6 +366,15 @@ def _contract_from_payload(payload: dict[str, Any]) -> ResearchContract:
         ),
         committees=tuple(str(item) for item in payload["committees"]),
         bill_numbers=tuple(str(item) for item in payload["bill_numbers"]),
+        representative_proposer_names=tuple(
+            str(item) for item in payload.get("representative_proposer_names", ())
+        ),
+        co_proposer_names=tuple(
+            str(item) for item in payload.get("co_proposer_names", ())
+        ),
+        proposer_names=tuple(
+            str(item) for item in payload.get("proposer_names", ())
+        ),
         evidence_types=tuple(EvidenceType(str(item)) for item in payload["evidence_types"]),
         intents=tuple(ResearchIntent(str(item)) for item in payload["intents"]),
         ordering=str(payload["ordering"]),

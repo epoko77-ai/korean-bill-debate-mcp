@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from kasm.adapters.korea.client import ApiPage, ApiResult
+from kasm.adapters.korea.client import ApiPage, ApiResult, AssemblyApiError
 from kasm.research.collector import (
     MetadataCollector,
     MetadataKind,
@@ -185,6 +185,35 @@ def test_collects_every_partition_and_preserves_page_provenance() -> None:
         "complete": True,
     }
     assert len(collection.source_hash) == 64
+
+
+def test_successful_zero_row_partition_is_complete_empty_coverage() -> None:
+    empty = result("BILLS", [[]], hash_prefix="empty")
+    client = FakeClient({("BILLS", (("AGE", 1),)): empty})
+
+    collection = MetadataCollector(client).collect(  # type: ignore[arg-type]
+        [partition("bill:term:1", MetadataKind.BILL, "BILLS", AGE=1)]
+    )
+
+    assert collection.bills == ()
+    assert collection.meetings == ()
+    assert collection.coverage.partitions_expected == 1
+    assert collection.coverage.partitions_complete == 1
+    assert collection.coverage.source_rows_expected == 0
+    assert collection.coverage.source_rows_fetched == 0
+    assert collection.coverage.source_complete is True
+    assert collection.coverage.complete is True
+
+
+def test_api_failure_is_not_converted_into_false_empty_coverage() -> None:
+    class FailingClient:
+        def fetch_all(self, *args: Any, **kwargs: Any) -> ApiResult:
+            raise AssemblyApiError("official source unavailable")
+
+    with pytest.raises(AssemblyApiError, match="official source unavailable"):
+        MetadataCollector(FailingClient()).collect(  # type: ignore[arg-type]
+            [partition("bill:term:1", MetadataKind.BILL, "BILLS", AGE=1)]
+        )
 
 
 def test_bill_deduplication_requires_an_exact_seven_digit_bill_number() -> None:

@@ -2787,6 +2787,15 @@ class ResearchEngine:
     ) -> CorpusRecallState:
         if plan.contract.completeness != "comprehensive" or plan.contract.bill_numbers:
             return CorpusRecallState(CorpusRecallStatus.NOT_REQUIRED)
+        if (
+            criteria.representative_proposer_names
+            or criteria.co_proposer_names
+            or criteria.proposer_names
+        ):
+            # The corpus is topic-indexed and cannot prove an official proposer
+            # role. Full bill metadata plus exact agenda BILL_NO linking is the
+            # authoritative path for proposer-scoped research.
+            return CorpusRecallState(CorpusRecallStatus.NOT_REQUIRED)
         if not (
             criteria.statute_terms
             or criteria.issue_terms
@@ -3518,6 +3527,11 @@ def _criteria_hash(criteria: RelevanceCriteria) -> str:
         "related_statute_terms": list(criteria.related_statute_terms),
         "related_issue_terms": list(criteria.related_issue_terms),
         "committees": list(criteria.committees),
+        "representative_proposer_names": list(
+            criteria.representative_proposer_names
+        ),
+        "co_proposer_names": list(criteria.co_proposer_names),
+        "proposer_names": list(criteria.proposer_names),
         "date_from": criteria.date_from.isoformat() if criteria.date_from else None,
         "date_to": criteria.date_to.isoformat() if criteria.date_to else None,
         "minimum_score": criteria.minimum_score,

@@ -122,6 +122,7 @@ _ALLOWED_TYPE_MODULES: Final = (
     "kasm.research.relevance",
     "kasm.research.resolver",
     "kasm.research.results",
+    "kasm.research.source_availability",
     "kasm.research.transcript_evidence",
     "kasm.search.bilingual",
     "kasm.search.terminology",

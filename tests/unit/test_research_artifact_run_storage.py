@@ -62,6 +62,7 @@ from kasm.research.engine import (
 from kasm.research.jobs import InMemoryResearchJobStore
 from kasm.research.overview import (
     ProvisionalResearchOverview,
+    ProvisionalSourceAccounting,
     build_provisional_research_overview,
 )
 from kasm.research.partitioning import ResearchPartitionPlanner
@@ -77,6 +78,10 @@ from kasm.research.results import (
     EvidenceRecord,
     ResearchSnapshot,
     ResearchSnapshotSummary,
+)
+from kasm.research.source_availability import (
+    OfficialSourceAvailability,
+    SourceAvailabilityState,
 )
 from kasm.research.status_storage import StatusSnapshotResearchRunStore
 
@@ -633,6 +638,41 @@ def test_legacy_discovery_artifact_uses_new_optional_field_default() -> None:
 
     assert restored == state.discovery
     assert restored.corpus_recall is None
+
+
+def test_source_availability_round_trip_and_legacy_default() -> None:
+    availability = OfficialSourceAvailability(
+        "bill_status",
+        BILL_STATUS_DATASET,
+        MetadataKind.BILL,
+        1,
+        1,
+        1,
+        0,
+        0,
+        SourceAvailabilityState.NO_RECORDS,
+    )
+    accounting = ProvisionalSourceAccounting(
+        True,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        (availability,),
+    )
+    encoded = run_storage_codec._encode(accounting)
+
+    assert run_storage_codec._decode(encoded) == accounting
+    assert isinstance(encoded, dict)
+    raw_fields = encoded["fields"]
+    assert isinstance(raw_fields, dict)
+    raw_fields.pop("source_availability")
+
+    restored = run_storage_codec._decode(encoded)
+
+    assert restored == replace(accounting, source_availability=())
 
 
 def test_legacy_decoder_still_rejects_missing_required_or_unknown_fields() -> None:

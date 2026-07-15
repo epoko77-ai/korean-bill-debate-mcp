@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "korean-bill-debate-mcp"
-version = "1.0.0"
+version = "1.1.0"
 description = "Evidence-linked research across Korean bills, status, debates, and context"
 readme = "README.md"
 requires-python = ">=3.12"

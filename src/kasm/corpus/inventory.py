@@ -35,11 +35,11 @@ from kasm.adapters.korea.documents import (
 )
 from kasm.adapters.korea.pipeline import OpenAssemblyPipeline
 from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
+from kasm.research.assembly_terms import DEFAULT_ASSEMBLY_TERM_BOUNDS
 from kasm.research.collector import MetadataCollector, MetadataKind, MetadataPartition
 from kasm.research.contracts import EvidenceType
 from kasm.research.documents import OfficialDocumentKind
 from kasm.research.engine import DocumentWorkItem
-from kasm.research.planner import DEFAULT_ASSEMBLY_TERM_BOUNDS
 
 from .models import (
     CORPUS_SCHEMA_VERSION,
