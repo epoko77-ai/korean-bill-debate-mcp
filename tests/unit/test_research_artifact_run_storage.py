@@ -1183,9 +1183,13 @@ def test_phase_finalization_claim_is_atomic_and_recovers_after_hard_limit(
     assert claim(stores[0]) is False
     assert claim(stores[1]) is False
 
-    # The lease is twice Vercel's 300-second hard limit. A crashed worker can
-    # therefore be replaced without ever overlapping a still-running function.
-    state.now[0] += timedelta(seconds=601)
+    # The 30-second grace period prevents overlap with Vercel's 300-second hard
+    # limit, but does not leave a crashed finalizer stranded for ten minutes.
+    state.now[0] += timedelta(seconds=329)
+    assert claim(stores[0]) is False
+    assert claim(stores[1]) is False
+
+    state.now[0] += timedelta(seconds=1)
     with ThreadPoolExecutor(max_workers=2) as executor:
         recovered = tuple(executor.map(claim, stores))
     assert sorted(recovered) == [False, True]

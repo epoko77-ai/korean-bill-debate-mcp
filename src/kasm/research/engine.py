@@ -1885,13 +1885,13 @@ class ResearchEngine:
                         capability,
                     )
             else:
-                # Seed one durable coordinator. Each delivery publishes one
-                # bounded window and chains the remainder, preventing a broad
-                # request from turning into hundreds of simultaneous workers.
-                self._publish_fanout(
+                # Publish independent bounded coordinators up front.  No shard
+                # depends on an earlier coordinator surviving long enough to
+                # publish the next one, while each delivery still creates at
+                # most ``fanout_chunk_size`` official-source workers.
+                self._publish_fanout_shards(
                     job,
                     _DISCOVERY_FANOUT,
-                    0,
                     len(discovery),
                     credential_capability=capability,
                 )
@@ -2042,6 +2042,16 @@ class ResearchEngine:
         if task.credential_capability is None:
             raise ValueError("discovery fan-out lacks a credential capability")
         window_stop = self._fanout_window_stop(start, stop)
+        # Compatibility for wide coordinators published by an older deployment:
+        # make the next bounded window runnable before publishing this window's
+        # children.  New deployments publish fixed shards and do not chain here.
+        self._chain_fanout(
+            gateway.job,
+            _DISCOVERY_FANOUT,
+            window_stop,
+            stop,
+            credential_capability=task.credential_capability,
+        )
         for partition in gateway.discovery_partitions[start:window_stop]:
             self._publish_page(
                 gateway.job,
@@ -2050,26 +2060,28 @@ class ResearchEngine:
                 MetadataPageWork(partition.partition_id, 1),
                 task.credential_capability,
             )
-        self._chain_fanout(
-            gateway.job,
-            _DISCOVERY_FANOUT,
-            window_stop,
-            stop,
-            credential_capability=task.credential_capability,
-        )
 
     def _process_deferred_fanout(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
         start, stop = self._validate_fanout_identity(task, payload, _DEFERRED_FANOUT)
+        expected_total = self._fanout_expected_total(payload, stop)
         job = self._required_job(task.research_id)
         window_stop = self._fanout_window_stop(start, stop)
         routes = self.runs.deferred_routes_for(
             task.research_id,
             start,
             window_stop,
-            expected_total=stop,
+            expected_total=expected_total,
         )
         if len(routes) != window_stop - start:
             raise LookupError("deferred fan-out routing window is unavailable")
+        self._chain_fanout(
+            job,
+            _DEFERRED_FANOUT,
+            window_stop,
+            stop,
+            expected_total=expected_total,
+            credential_capability=task.credential_capability,
+        )
         for route in routes:
             if route.kind is DeferredRouteKind.BILL_STATUS:
                 if task.credential_capability is None:
@@ -2085,34 +2097,29 @@ class ResearchEngine:
                 continue
             assert route.bill_number is not None
             self._publish_bill_document(job, route.bill_number)
-        self._chain_fanout(
-            job,
-            _DEFERRED_FANOUT,
-            window_stop,
-            stop,
-            credential_capability=task.credential_capability,
-        )
 
     def _process_document_fanout(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
         start, stop = self._validate_fanout_identity(task, payload, _DOCUMENT_FANOUT)
+        expected_total = self._fanout_expected_total(payload, stop)
         window_stop = self._fanout_window_stop(start, stop)
         items = self.runs.document_routes_for(
             task.research_id,
             start,
             window_stop,
-            expected_total=stop,
+            expected_total=expected_total,
         )
         if len(items) != window_stop - start:
             raise LookupError("document fan-out routing window is unavailable")
-        self._publish_document_items(
-            task.research_id,
-            items,
-        )
         self._chain_fanout(
             self._required_job(task.research_id),
             _DOCUMENT_FANOUT,
             window_stop,
             stop,
+            expected_total=expected_total,
+        )
+        self._publish_document_items(
+            task.research_id,
+            items,
         )
 
     def _process_page_fanout(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
@@ -2155,14 +2162,6 @@ class ResearchEngine:
             raise ValueError("page fan-out lacks a credential capability")
         window_stop = self._fanout_window_stop(start, stop)
         job = self._required_job(task.research_id)
-        for follow_up in follow_ups[start:window_stop]:
-            self._publish_page(
-                job,
-                phase,
-                partition,
-                follow_up,
-                task.credential_capability,
-            )
         if window_stop < stop:
             self._publish_page_fanout(
                 job,
@@ -2173,6 +2172,14 @@ class ResearchEngine:
                 stop,
                 task.credential_capability,
                 delay_seconds=self.fanout_delay_seconds,
+            )
+        for follow_up in follow_ups[start:window_stop]:
+            self._publish_page(
+                job,
+                phase,
+                partition,
+                follow_up,
+                task.credential_capability,
             )
 
     def _process_phase_barrier(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
@@ -2486,12 +2493,11 @@ class ResearchEngine:
             job = self._required_job(task.research_id)
             if len(expansion.pages) > self.direct_fanout_limit:
                 assert existing.total_count is not None
-                self._publish_page_fanout(
+                self._publish_page_fanout_shards(
                     job,
                     phase,
                     partition,
                     existing.total_count,
-                    0,
                     len(expansion.pages),
                     task.credential_capability,
                 )
@@ -2741,10 +2747,9 @@ class ResearchEngine:
         if deferred_count > self.direct_fanout_limit:
             if deferred.status_partitions and credential_capability is None:
                 raise ValueError("status fan-out requires a credential capability")
-            self._publish_fanout(
+            self._publish_fanout_shards(
                 job,
                 _DEFERRED_FANOUT,
-                0,
                 deferred_count,
                 credential_capability=credential_capability,
             )
@@ -2961,7 +2966,7 @@ class ResearchEngine:
     def _publish_document_manifest(self, research_id: str, manifest: DocumentWorkManifest) -> None:
         job = self._required_job(research_id)
         if len(manifest.items) > self.direct_fanout_limit:
-            self._publish_fanout(job, _DOCUMENT_FANOUT, 0, len(manifest.items))
+            self._publish_fanout_shards(job, _DOCUMENT_FANOUT, len(manifest.items))
         else:
             self._publish_document_items(research_id, manifest.items)
         self._publish_document_finalize_barrier(
@@ -3056,7 +3061,27 @@ class ResearchEngine:
         if attempt < 1:
             raise ValueError("research barrier attempt must be positive")
         base = max(1, self.fanout_delay_seconds)
-        return min(60, base * min(attempt, 60))
+        return min(10, base * attempt)
+
+    def _publish_fanout_shards(
+        self,
+        job: ResearchJob,
+        work_kind: str,
+        total: int,
+        *,
+        credential_capability: str | None = None,
+    ) -> None:
+        if total < 1:
+            raise ValueError("research fan-out total must be positive")
+        for start in range(0, total, self.fanout_chunk_size):
+            self._publish_fanout(
+                job,
+                work_kind,
+                start,
+                min(total, start + self.fanout_chunk_size),
+                expected_total=total,
+                credential_capability=credential_capability,
+            )
 
     def _publish_fanout(
         self,
@@ -3065,16 +3090,24 @@ class ResearchEngine:
         start: int,
         stop: int,
         *,
+        expected_total: int | None = None,
         credential_capability: str | None = None,
         delay_seconds: int = 0,
     ) -> None:
+        payload: tuple[tuple[str, str | int], ...] = (
+            (_WORK_KIND, work_kind),
+            (_START, start),
+            (_STOP, stop),
+        )
+        if expected_total is not None:
+            payload = (*payload, (_EXPECTED_TOTAL, expected_total))
         task = ResearchTask(
             research_id=job.id,
             stage=ResearchTaskStage.COLLECT_METADATA,
             work_id=f"{work_kind}:{start}:{stop}",
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=((_WORK_KIND, work_kind), (_START, start), (_STOP, stop)),
+            payload=payload,
             credential_capability=credential_capability,
         )
         self.queue.publish(
@@ -3090,6 +3123,7 @@ class ResearchEngine:
         start: int,
         stop: int,
         *,
+        expected_total: int | None = None,
         credential_capability: str | None = None,
     ) -> None:
         if start >= stop:
@@ -3099,6 +3133,7 @@ class ResearchEngine:
             work_kind,
             start,
             stop,
+            expected_total=expected_total,
             credential_capability=credential_capability,
             delay_seconds=self.fanout_delay_seconds,
         )
@@ -3107,6 +3142,36 @@ class ResearchEngine:
         if not 0 <= start < stop:
             raise ValueError("research fan-out window is invalid")
         return min(stop, start + self.fanout_chunk_size)
+
+    @staticmethod
+    def _fanout_expected_total(payload: Mapping[str, Any], stop: int) -> int:
+        raw = payload.get(_EXPECTED_TOTAL)
+        expected_total = stop if raw is None else int(raw)
+        if expected_total < stop:
+            raise ValueError("research fan-out total is smaller than its shard")
+        return expected_total
+
+    def _publish_page_fanout_shards(
+        self,
+        job: ResearchJob,
+        phase: MetadataPhase,
+        partition: MetadataPartition,
+        expected_total: int,
+        follow_up_count: int,
+        capability: str,
+    ) -> None:
+        if follow_up_count < 1:
+            raise ValueError("page fan-out total must be positive")
+        for start in range(0, follow_up_count, self.fanout_chunk_size):
+            self._publish_page_fanout(
+                job,
+                phase,
+                partition,
+                expected_total,
+                start,
+                min(follow_up_count, start + self.fanout_chunk_size),
+                capability,
+            )
 
     def _publish_page_fanout(
         self,
@@ -3527,9 +3592,7 @@ def _criteria_hash(criteria: RelevanceCriteria) -> str:
         "related_statute_terms": list(criteria.related_statute_terms),
         "related_issue_terms": list(criteria.related_issue_terms),
         "committees": list(criteria.committees),
-        "representative_proposer_names": list(
-            criteria.representative_proposer_names
-        ),
+        "representative_proposer_names": list(criteria.representative_proposer_names),
         "co_proposer_names": list(criteria.co_proposer_names),
         "proposer_names": list(criteria.proposer_names),
         "date_from": criteria.date_from.isoformat() if criteria.date_from else None,

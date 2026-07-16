@@ -66,6 +66,20 @@ _CREDENTIAL_PATTERNS = (
     re.compile(r"(?i)(?:code|access_token|refresh_token)=([^&\s]{8,})"),
 )
 _RESEARCH_ID_PATTERN = re.compile(r"research_[0-9a-f]{32}")
+_STATUS_VALUES = frozenset({"queued", "running", "complete", "partial", "failed", "expired"})
+_STAGE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_WORK_COUNT_FIELDS = (
+    "metadata_partitions_expected",
+    "metadata_partitions_complete",
+    "metadata_pages_expected",
+    "metadata_pages_complete",
+    "bill_document_checks_expected",
+    "bill_document_checks_complete",
+    "documents_expected",
+    "documents_complete",
+    "documents_failed",
+)
+_WORK_FLAG_FIELDS = ("snapshot_ready", "overview_available", "complete")
 _FIRST_OVERVIEW_FIELDS = (
     "research_receipt_seconds",
     "first_overview_seconds",
@@ -80,6 +94,51 @@ _FIRST_OVERVIEW_FIELDS = (
     "first_overview_verified",
     "first_overview_duplicate_count",
 )
+
+
+def _safe_research_id(value: Any) -> str | None:
+    return value if isinstance(value, str) and _RESEARCH_ID_PATTERN.fullmatch(value) else None
+
+
+def _safe_last_status(value: Any) -> dict[str, Any] | None:
+    """Return only bounded, credential-free progress fields from a failed child."""
+
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    stage = value.get("stage")
+    progress = value.get("progress")
+    work = value.get("work")
+    if (
+        not isinstance(status, str)
+        or status not in _STATUS_VALUES
+        or not isinstance(stage, str)
+        or _STAGE_PATTERN.fullmatch(stage) is None
+        or isinstance(progress, bool)
+        or not isinstance(progress, int | float)
+        or not math.isfinite(progress)
+        or not 0.0 <= progress <= 1.0
+        or not isinstance(work, dict)
+    ):
+        return None
+
+    safe_work: dict[str, int | bool] = {}
+    for name in _WORK_COUNT_FIELDS:
+        item = work.get(name)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            return None
+        safe_work[name] = item
+    for name in _WORK_FLAG_FIELDS:
+        item = work.get(name)
+        if not isinstance(item, bool):
+            return None
+        safe_work[name] = item
+    return {
+        "status": status,
+        "stage": stage,
+        "progress": float(progress),
+        "work": safe_work,
+    }
 
 
 @dataclass(frozen=True)
@@ -123,6 +182,10 @@ class ChildResult:
             "role": self.scenario.role,
             "platform": self.scenario.platform,
             "passed": self.passed,
+            "research_id": _safe_research_id(payload.get("research_id")),
+            "last_status": (
+                _safe_last_status(payload.get("last_status")) if not self.passed else None
+            ),
             "wall_seconds": round(self.wall_seconds, 3),
             "failures": list(self.failures),
             "error": self.error,

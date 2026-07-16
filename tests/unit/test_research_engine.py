@@ -252,7 +252,7 @@ class ManyBillDocuments(BillDocuments):
                     evidence_types=(EvidenceType.REVIEW_REPORTS,),
                     related_bill_numbers=(number,),
                 )
-                for part in range(5)
+                for part in range(10)
             ),
         )
 
@@ -559,6 +559,30 @@ def task_with(queue: Queue, **payload: object) -> ResearchTask:
         for task in queue.tasks
         if all(dict(task.payload).get(name) == value for name, value in payload.items())
     )
+
+
+def record_queue_publications(
+    monkeypatch: pytest.MonkeyPatch,
+    queue: Queue,
+) -> list[ResearchTask]:
+    attempts: list[ResearchTask] = []
+    original = queue.publish
+
+    def recording_publish(
+        task: ResearchTask,
+        *,
+        retention_seconds: int = 86_400,
+        delay_seconds: int = 0,
+    ) -> str:
+        attempts.append(task)
+        return original(
+            task,
+            retention_seconds=retention_seconds,
+            delay_seconds=delay_seconds,
+        )
+
+    monkeypatch.setattr(queue, "publish", recording_publish)
+    return attempts
 
 
 def process_phase_barrier(
@@ -888,7 +912,7 @@ def test_concurrent_duplicate_barriers_allow_only_one_full_assembly(
     )
 
 
-def test_broad_gateway_uses_bounded_coordinators_instead_of_serial_queue_fanout() -> None:
+def test_broad_gateway_publishes_independent_bounded_coordinator_shards() -> None:
     value, queue, client, _jobs, _runs, _finalizer = engine(exact_responder)
 
     receipt = value.gateway(
@@ -902,23 +926,71 @@ def test_broad_gateway_uses_bounded_coordinators_instead_of_serial_queue_fanout(
     coordinators = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
     ]
-    assert len(coordinators) == 1
-    assert dict(coordinators[0].payload)["start"] == 0
-    assert dict(coordinators[0].payload)["stop"] == receipt.metadata_task_count
-    value.process_metadata_task(coordinators[0])
+    expected_coordinators = (
+        receipt.metadata_task_count + value.fanout_chunk_size - 1
+    ) // value.fanout_chunk_size
+    assert len(coordinators) == expected_coordinators
+    assert [(dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators] == [
+        (start, min(receipt.metadata_task_count, start + value.fanout_chunk_size))
+        for start in range(0, receipt.metadata_task_count, value.fanout_chunk_size)
+    ]
+    assert all(
+        dict(task.payload)["expected_total"] == receipt.metadata_task_count for task in coordinators
+    )
+    for coordinator in coordinators:
+        value.process_metadata_task(coordinator)
     children = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "metadata_page"
     ]
-    assert len(children) == value.fanout_chunk_size
-    continuation = next(
-        task
-        for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "discovery_fanout" and task is not coordinators[0]
-    )
-    assert dict(continuation.payload)["start"] == value.fanout_chunk_size
-    assert dict(continuation.payload)["stop"] == receipt.metadata_task_count
-    assert queue.delays[continuation.idempotency_key] == value.fanout_delay_seconds
+    assert len(children) == receipt.metadata_task_count
+    assert [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
+    ] == coordinators
     assert client.calls == []
+
+
+def test_legacy_wide_discovery_coordinator_chains_before_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value, queue, _client, _jobs, _runs, _finalizer = engine(exact_responder)
+    receipt = value.gateway(
+        "2025년부터 현재까지 AI 입법",
+        assembly_api_key="private-user-key",
+        as_of=AS_OF,
+    )
+    seed = task_with(queue, work_kind="discovery_fanout", start=0)
+    legacy = ResearchTask(
+        research_id=seed.research_id,
+        stage=seed.stage,
+        work_id=f"discovery_fanout:0:{receipt.metadata_task_count}",
+        query_fingerprint=seed.query_fingerprint,
+        index_revision=seed.index_revision,
+        payload=(
+            ("work_kind", "discovery_fanout"),
+            ("start", 0),
+            ("stop", receipt.metadata_task_count),
+        ),
+        credential_capability=seed.credential_capability,
+    )
+    attempts = record_queue_publications(monkeypatch, queue)
+
+    value.process_metadata_task(legacy)
+
+    assert dict(attempts[0].payload) == {
+        "work_kind": "discovery_fanout",
+        "start": value.fanout_chunk_size,
+        "stop": receipt.metadata_task_count,
+    }
+    assert all(dict(task.payload).get("work_kind") == "metadata_page" for task in attempts[1:])
+
+
+def test_barrier_recheck_delay_is_capped_at_ten_seconds() -> None:
+    value, _queue, _client, _jobs, _runs, _finalizer = engine(exact_responder)
+
+    assert value._barrier_delay_seconds(1) == 1
+    assert value._barrier_delay_seconds(9) == 9
+    assert value._barrier_delay_seconds(10) == 10
+    assert value._barrier_delay_seconds(10_000) == 10
 
 
 def test_gateway_rejects_credential_ttl_shorter_than_queued_task_retention() -> None:
@@ -1105,7 +1177,7 @@ def test_one_worker_fetches_only_one_page_then_fans_out_every_remaining_page() -
     assert all(dict(task.payload)["expected_total"] == 237 for task in follow_ups)
 
 
-def test_large_page_expansion_is_chained_without_prior_page_rescans(
+def test_large_page_expansion_uses_independent_shards_without_prior_page_rescans(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def responder(
@@ -1163,6 +1235,12 @@ def test_large_page_expansion_is_chained_without_prior_page_rescans(
         if dict(task.payload).get("work_kind") == "metadata_page"
         and dict(task.payload).get("page") != 1
     ]
+    initial_coordinators = [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "page_fanout"
+    ]
+    assert [
+        (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in initial_coordinators
+    ] == [(0, 8), (8, 14)]
     processed: set[str] = set()
     while True:
         coordinator = next(
@@ -1210,10 +1288,40 @@ def test_large_page_expansion_is_chained_without_prior_page_rescans(
         len(coordinators)
         == (len(follow_ups) + value.fanout_chunk_size - 1) // value.fanout_chunk_size
     )
+    assert coordinators == initial_coordinators
     assert all(
-        queue.delays[task.idempotency_key] == value.fanout_delay_seconds
-        for task in coordinators[1:]
+        queue.delays[task.idempotency_key] == value.fanout_delay_seconds for task in coordinators
     )
+
+    seed = coordinators[0]
+    seed_payload = dict(seed.payload)
+    seed_expected_total = seed_payload["expected_total"]
+    assert isinstance(seed_expected_total, int)
+    legacy = ResearchTask(
+        research_id=seed.research_id,
+        stage=seed.stage,
+        work_id=(f"page_fanout:discovery:{seed_payload['partition_id']}:0:{len(follow_ups)}"),
+        query_fingerprint=seed.query_fingerprint,
+        index_revision=seed.index_revision,
+        payload=(
+            ("work_kind", "page_fanout"),
+            ("phase", "discovery"),
+            ("partition_id", str(seed_payload["partition_id"])),
+            ("expected_total", seed_expected_total),
+            ("start", 0),
+            ("stop", len(follow_ups)),
+        ),
+        credential_capability=seed.credential_capability,
+    )
+    attempts = record_queue_publications(monkeypatch, queue)
+
+    value.process_metadata_task(legacy)
+
+    first_attempt = dict(attempts[0].payload)
+    assert first_attempt["work_kind"] == "page_fanout"
+    assert first_attempt["start"] == value.fanout_chunk_size
+    assert first_attempt["stop"] == len(follow_ups)
+    assert [dict(task.payload)["page"] for task in attempts[1:]] == list(range(2, 10))
 
 
 def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
@@ -1313,7 +1421,9 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     initial_fanout_tasks = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
-    assert len(initial_fanout_tasks) == 1
+    expected_fanouts = (206 + value.fanout_chunk_size - 1) // value.fanout_chunk_size
+    assert len(initial_fanout_tasks) == expected_fanouts
+    assert all(dict(task.payload)["expected_total"] == 206 for task in initial_fanout_tasks)
     assert not [
         task
         for task in queue.tasks
@@ -1359,11 +1469,10 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     fanout_tasks = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
-    expected_fanouts = (206 + value.fanout_chunk_size - 1) // value.fanout_chunk_size
     assert len(fanout_tasks) == expected_fanouts
+    assert fanout_tasks == initial_fanout_tasks
     assert all(
-        queue.delays[task.idempotency_key] == value.fanout_delay_seconds
-        for task in fanout_tasks[1:]
+        queue.delays[task.idempotency_key] == value.fanout_delay_seconds for task in fanout_tasks
     )
     status_tasks = [
         task
@@ -1378,6 +1487,35 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     assert len(client.calls) == 2
     assert guarded_runs.deferred_manifest_reads == 0
     assert guarded_runs.document_manifest_reads == 0
+
+    seed = initial_fanout_tasks[0]
+    legacy = ResearchTask(
+        research_id=seed.research_id,
+        stage=seed.stage,
+        work_id="deferred_fanout:0:206",
+        query_fingerprint=seed.query_fingerprint,
+        index_revision=seed.index_revision,
+        payload=(
+            ("work_kind", "deferred_fanout"),
+            ("start", 0),
+            ("stop", 206),
+        ),
+        credential_capability=seed.credential_capability,
+    )
+    attempts = record_queue_publications(monkeypatch, queue)
+
+    value.process_metadata_task(legacy)
+
+    assert dict(attempts[0].payload) == {
+        "work_kind": "deferred_fanout",
+        "expected_total": 206,
+        "start": value.fanout_chunk_size,
+        "stop": 206,
+    }
+    assert all(
+        dict(task.payload).get("work_kind") in {"metadata_page", "bill_documents"}
+        for task in attempts[1:]
+    )
 
 
 def test_exact_status_document_pipeline_completes_and_is_idempotent(
@@ -1445,7 +1583,9 @@ def test_exact_status_document_pipeline_completes_and_is_idempotent(
     assert derived.documents_complete == 1
 
 
-def test_hot_workers_and_document_fanout_never_read_global_manifests() -> None:
+def test_hot_workers_and_document_fanout_never_read_global_manifests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     guarded_runs = ManifestReadGuardRunStore()
     worker = Worker()
     value, queue, _client, _jobs, _runs, _finalizer = engine(
@@ -1483,6 +1623,14 @@ def test_hot_workers_and_document_fanout_never_read_global_manifests() -> None:
     guarded_runs.document_manifest_reads = 0
     guarded_runs.forbid_global_manifest_reads = True
 
+    initial_fanouts = [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "document_fanout"
+    ]
+    assert [
+        (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in initial_fanouts
+    ] == [(0, 8), (8, 10)]
+    assert all(dict(task.payload)["expected_total"] == 10 for task in initial_fanouts)
+
     processed_fanouts: set[str] = set()
     while True:
         pending = next(
@@ -1502,12 +1650,37 @@ def test_hot_workers_and_document_fanout_never_read_global_manifests() -> None:
     document_tasks = [
         task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
     ]
-    assert len(document_tasks) == 5
+    assert len(document_tasks) == 10
     for task in document_tasks:
         assert value.process_document_task(task).status is DocumentOutcomeStatus.SUCCEEDED
-    assert len(worker.calls) == 5
+    assert len(worker.calls) == 10
     assert guarded_runs.deferred_manifest_reads == 0
     assert guarded_runs.document_manifest_reads == 0
+
+    seed = initial_fanouts[0]
+    legacy = ResearchTask(
+        research_id=seed.research_id,
+        stage=seed.stage,
+        work_id="document_fanout:0:10",
+        query_fingerprint=seed.query_fingerprint,
+        index_revision=seed.index_revision,
+        payload=(
+            ("work_kind", "document_fanout"),
+            ("start", 0),
+            ("stop", 10),
+        ),
+    )
+    attempts = record_queue_publications(monkeypatch, queue)
+
+    value.process_metadata_task(legacy)
+
+    assert dict(attempts[0].payload) == {
+        "work_kind": "document_fanout",
+        "expected_total": 10,
+        "start": value.fanout_chunk_size,
+        "stop": 10,
+    }
+    assert all(task.stage is ResearchTaskStage.HYDRATE_DOCUMENT for task in attempts[1:])
 
 
 def test_bill_document_task_uses_single_identity_lookup_not_sibling_scan(

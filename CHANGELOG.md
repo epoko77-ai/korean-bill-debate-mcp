@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.1.0] - 2026-07-15
+## [1.1.0] - 2026-07-16
 
 ### Added
 
@@ -46,9 +46,16 @@
   lease/ticket conflicts remain retryable instead of being acknowledged and stranded until their
   visibility timeout. Genuine authentication and Queue infrastructure failures still fail closed.
 - Match the Queue lease to the bounded 270-second worker (300 seconds with SDK renewal) and reduce
-  ambiguous early-delivery backoff from ten minutes to 30 seconds. Redeliveries check the durable
-  task-completion receipt before repeating work; the final retry boundary retains its longer safety
-  window.
+  ambiguous delivery backoff from ten minutes to 30 seconds. Redeliveries check the durable
+  task-completion receipt before repeating work; normal and terminal retries are now capped at 60
+  seconds instead of creating multi-minute blind spots.
+- Replace serial broad-search fan-out chains with independent bounded coordinator shards for
+  discovery, follow-up pages, bill status, document discovery, and document hydration. Coordinators
+  from an older deployment publish their continuation before their children, phase barriers recheck
+  within ten seconds, and a crashed 300-second finalizer becomes reclaimable after a 30-second grace
+  period rather than remaining locked for ten minutes.
+- Include a validated research ID and a bounded, credential-free last-progress snapshot in failed
+  production-matrix results so a stalled live job can be traced without exposing its user API key.
 
 ### Known limitations
 

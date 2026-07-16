@@ -71,8 +71,9 @@ bundle, while placing the shared module under `api/` incorrectly creates a fifth
 The hosted defaults publish at most seven page tasks directly from the request; together with the
 delayed phase barrier, an exact investigation seeds no more than eight initial Queue messages. This
 removes a coordinator round trip for the complete seven-part exact-bill plan while preserving the
-Queue trigger's concurrency ceiling. Larger plans use durable eight-item coordinator windows with
-no artificial inter-window delay and no unbounded fan-out. Override
+Queue trigger's concurrency ceiling. Larger plans seed independent durable eight-item coordinator
+shards up front; no shard depends on a preceding coordinator to publish it, and each coordinator
+still opens only a bounded worker window. Override
 `KBD_RESEARCH_DIRECT_FANOUT_LIMIT`, `KBD_RESEARCH_FANOUT_CHUNK_SIZE`, and
 `KBD_RESEARCH_FANOUT_DELAY_SECONDS` only together with a measured Queue concurrency change.
 

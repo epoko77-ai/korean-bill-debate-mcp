@@ -103,7 +103,11 @@ _DISCOVERY_ROUTING_READY_KEY: Final = "run/discovery-routing-ready"
 _DOCUMENT_ROUTING_READY_KEY: Final = "run/document-routing-ready"
 _FIRST_PAGE_PREVIEW_KEY: Final = "run/first-page-preview"
 _FIRST_PAGE_PREVIEW_READY_KEY: Final = "run/first-page-preview-ready-v1"
-_FINALIZATION_CLAIM_LEASE_SECONDS: Final = 600
+# Keep a narrow grace period beyond Vercel's 300-second hard limit.  A timed-out
+# finalizer cannot still be running when the next generation becomes eligible,
+# while a crashed finalizer is recovered promptly instead of stalling for ten
+# minutes.
+_FINALIZATION_CLAIM_LEASE_SECONDS: Final = 330
 _FINALIZATION_CLAIM_GENERATIONS: Final = 64
 
 _ALLOWED_TYPE_MODULES: Final = (
@@ -1209,7 +1213,8 @@ class ArtifactResearchRunStore:
     ) -> bool:
         """Acquire one crash-recoverable assembly claim for this phase.
 
-        A generation remains active for twice the hosted function hard limit.
+        A generation remains active through the hosted function hard limit plus
+        a 30-second completion grace period.
         Concurrent invocations race on one write-once key, so only one may read
         and decode all raw pages. After a crashed invocation's lease expires,
         the next fixed generation restores liveness without overwriting audit

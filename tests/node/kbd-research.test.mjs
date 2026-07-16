@@ -415,6 +415,7 @@ test("reschedules a transient worker outage before the final delivery", async ()
       ).length,
       1,
     );
+    assertVisibilityChange(fake.calls, 60);
     assert.ok(
       fake.calls.some(
         (call) =>
@@ -502,7 +503,7 @@ for (const [name, transientFailure] of [
       );
       assert.equal(internal.length, 1);
       assert.equal(internal[0].headers.get("x-kbd-terminal-failure"), null);
-      assertVisibilityChange(fake.calls, 600);
+      assertVisibilityChange(fake.calls, 30);
       assert.ok(
         fake.calls.some(
           (call) =>
@@ -613,7 +614,7 @@ for (const markerFailure of [
         "task_retry_budget_exhausted",
       );
       assert.equal(internal[0].headers.get("x-kbd-delivery-count"), "12");
-      assertVisibilityChange(fake.calls, 300);
+      assertVisibilityChange(fake.calls, 60);
       assert.ok(
         fake.calls.some(
           (call) =>

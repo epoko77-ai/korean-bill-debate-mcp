@@ -17,6 +17,8 @@ const DISPATCH_TIMEOUT_MS = 270_000;
 const TERMINAL_FAILURE_TIMEOUT_MS = 25_000;
 const MAX_NORMAL_DELIVERY_ATTEMPTS = 10;
 const MAX_PERMANENT_DELIVERY_ATTEMPTS = 3;
+const RECEIPT_SAFE_RETRY_SECONDS = 30;
+const MAX_RETRY_SECONDS = 60;
 
 class PermanentDispatchError extends Error {}
 class AmbiguousDispatchError extends Error {}
@@ -203,23 +205,22 @@ export function retryDirective(error, metadata) {
     return { acknowledge: true };
   }
   if (error instanceof TerminalFailureDispatchError) {
-    return { afterSeconds: 300 };
+    return { afterSeconds: MAX_RETRY_SECONDS };
   }
   if (error instanceof AmbiguousDispatchError) {
     // The target may have completed after the socket outcome became unknown.
     // Redelivery checks the durable completion receipt before repeating work,
-    // so a short retry preserves safety without stalling a fan-out for ten minutes.
-    return {
-      afterSeconds:
-        metadata.deliveryCount === MAX_NORMAL_DELIVERY_ATTEMPTS ? 600 : 30,
-    };
+    // so a prompt retry preserves safety without stalling the whole fan-out.
+    return { afterSeconds: RECEIPT_SAFE_RETRY_SECONDS };
   }
   if (metadata.deliveryCount === MAX_NORMAL_DELIVERY_ATTEMPTS) {
-    return { afterSeconds: 600 };
+    // The dispatcher checks the immutable task receipt before doing any work,
+    // which also makes the last normal retry safe at this short interval.
+    return { afterSeconds: RECEIPT_SAFE_RETRY_SECONDS };
   }
   return {
     afterSeconds: Math.min(
-      300,
+      MAX_RETRY_SECONDS,
       2 ** Math.min(metadata.deliveryCount, 6) * 5,
     ),
   };

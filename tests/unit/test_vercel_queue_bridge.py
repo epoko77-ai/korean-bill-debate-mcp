@@ -85,6 +85,11 @@ def test_queue_bridge_never_reads_failure_body_or_logs_task() -> None:
     assert '"x-kbd-delivery-count"' in source
     assert "MAX_PERMANENT_DELIVERY_ATTEMPTS = 3" in source
     assert "MAX_NORMAL_DELIVERY_ATTEMPTS = 10" in source
+    assert "RECEIPT_SAFE_RETRY_SECONDS = 30" in source
+    assert "MAX_RETRY_SECONDS = 60" in source
+    assert "Math.min(\n      MAX_RETRY_SECONDS," in source
+    assert "return { afterSeconds: RECEIPT_SAFE_RETRY_SECONDS }" in source
+    assert "return { afterSeconds: MAX_RETRY_SECONDS }" in source
     assert '"x-kbd-terminal-failure"' in source
     assert '"task_retry_budget_exhausted"' in source
     assert '"x-kbd-dispatch-error-class"' in source

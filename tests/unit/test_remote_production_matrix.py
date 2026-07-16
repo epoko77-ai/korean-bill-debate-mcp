@@ -67,6 +67,28 @@ def _successful_research_payload() -> dict[str, Any]:
     }
 
 
+def _running_last_status() -> dict[str, Any]:
+    return {
+        "status": "running",
+        "stage": "documents",
+        "progress": 0.625,
+        "work": {
+            "metadata_partitions_expected": 5,
+            "metadata_partitions_complete": 5,
+            "metadata_pages_expected": 12,
+            "metadata_pages_complete": 12,
+            "bill_document_checks_expected": 7,
+            "bill_document_checks_complete": 7,
+            "documents_expected": 40,
+            "documents_complete": 25,
+            "documents_failed": 0,
+            "snapshot_ready": False,
+            "overview_available": True,
+            "complete": False,
+        },
+    }
+
+
 def test_matrix_labels_live_protocol_checks_without_claiming_ui_mount(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -361,11 +383,12 @@ def test_final_orientation_requires_known_terminal_accounting() -> None:
     )
 
 
-def test_public_report_is_an_allow_list_and_omits_raw_child_payload() -> None:
+def test_public_report_is_an_allow_list_and_exposes_only_a_valid_research_identity() -> None:
     scenario = _exact_scenario()
     payload = _successful_research_payload()
     payload["unexpected_secret"] = "must-not-appear"
     payload["research_id"] = _RESEARCH_ID
+    payload["last_status"] = _running_last_status()
     result = ChildResult(
         scenario=scenario,
         passed=True,
@@ -375,5 +398,61 @@ def test_public_report_is_an_allow_list_and_omits_raw_child_payload() -> None:
     ).report()
     assert "must-not-appear" not in str(result)
     assert "unexpected_secret" not in str(result)
-    assert _RESEARCH_ID not in str(result)
+    assert result["research_id"] == _RESEARCH_ID
+    assert result["last_status"] is None
     assert result["metrics"]["long_text_characters"] == 75_000
+
+
+def test_failed_public_report_exposes_only_allow_listed_last_status_fields() -> None:
+    scenario = _exact_scenario()
+    payload = _successful_research_payload()
+    payload["research_id"] = _RESEARCH_ID
+    last_status = _running_last_status()
+    last_status["overview_phase"] = "must-not-appear"
+    last_status["access_token"] = "sk-ant-api03-secretsecretsecret"
+    cast(dict[str, Any], last_status["work"])["private_detail"] = "must-not-appear"
+    payload["last_status"] = last_status
+
+    result = ChildResult(
+        scenario=scenario,
+        passed=False,
+        wall_seconds=181.0,
+        payload=payload,
+        failures=("child exited with status 1",),
+    ).report()
+
+    assert result["research_id"] == _RESEARCH_ID
+    assert result["last_status"] == _running_last_status()
+    assert set(result["last_status"]) == {"status", "stage", "progress", "work"}
+    assert "must-not-appear" not in str(result)
+    assert "sk-ant" not in str(result)
+
+
+@pytest.mark.parametrize(
+    ("research_id", "last_status"),
+    (
+        ("research_short", _running_last_status()),
+        (_RESEARCH_ID, {**_running_last_status(), "status": "Bearer credentialvalue"}),
+        (_RESEARCH_ID, {**_running_last_status(), "stage": "documents/secret"}),
+        (_RESEARCH_ID, {**_running_last_status(), "progress": 1.5}),
+        (_RESEARCH_ID, {**_running_last_status(), "work": {}}),
+    ),
+)
+def test_public_diagnostics_fail_closed_on_invalid_identity_or_status(
+    research_id: str,
+    last_status: dict[str, Any],
+) -> None:
+    payload = _successful_research_payload()
+    payload.update({"research_id": research_id, "last_status": last_status})
+
+    result = ChildResult(
+        scenario=_exact_scenario(),
+        passed=False,
+        wall_seconds=181.0,
+        payload=payload,
+        failures=("timeout",),
+    ).report()
+
+    assert result["research_id"] == (_RESEARCH_ID if research_id == _RESEARCH_ID else None)
+    if last_status != _running_last_status():
+        assert result["last_status"] is None
