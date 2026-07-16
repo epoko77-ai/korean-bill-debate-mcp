@@ -11,6 +11,7 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
 
     assert (root / "serverless/kbd-research-shared.mjs").is_file()
     assert (root / "serverless/kbd-research-queue-callback.ts").is_file()
+    assert (root / "serverless/kbd-research-queue-callback.js").is_file()
     assert not (root / "api/queues/kbd-research-shared.mjs").exists()
 
     # The project was once detected as the monolithic `python` framework,
@@ -94,8 +95,10 @@ def test_queue_bridge_never_reads_failure_body_or_logs_task() -> None:
     assert "export default nodeQueueRoute" in callback
     assert 'currentDeploymentOrigin(request)' in callback
     assert './kbd-research-shared.mjs' in callback
-    assert '../../serverless/kbd-research-queue-callback.ts' in entry
-    assert '../../serverless/kbd-research-queue-callback.ts' in control_entry
+    assert '../../serverless/kbd-research-queue-callback.js' in entry
+    assert '../../serverless/kbd-research-queue-callback.js' in control_entry
+    assert '../../serverless/kbd-research-queue-callback.ts' not in entry
+    assert '../../serverless/kbd-research-queue-callback.ts' not in control_entry
     assert 'new URL(INTERNAL_PATH, deploymentOrigin)' in source
     assert 'response.body?.cancel()' in source
     assert 'const error = `research dispatch failed (${response.status})`' in source

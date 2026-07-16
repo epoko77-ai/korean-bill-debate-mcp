@@ -67,11 +67,19 @@ invocation and never collapses a research job into one synchronous operation. Pu
 races therefore converge through the same immutable artifacts, queue idempotency keys, and write-once
 task receipts without adding a receipt lookup to the normal first push delivery.
 
-Both queue-trigger entry points import `serverless/kbd-research-queue-callback.ts`; that shared
-callback and the recovery function import `serverless/kbd-research-shared.mjs`. Keep these deployable
-shared modules and the `kbd-research-shared.d.mts` type contract together outside `api/`: importing
-one generated TypeScript function entry from the other leaves no sibling module in Vercel's isolated
-bundle, while placing a shared module under `api/` incorrectly creates another public function.
+Both queue-trigger entry points import the deployable
+`serverless/kbd-research-queue-callback.js` module. Its strictly typed source is the adjacent
+`kbd-research-queue-callback.ts` file; regenerate the JavaScript mirror with
+`npm run build:queue-callback` after changing that source. The Node test suite compiles the source
+independently and rejects any mismatch, because a TypeScript extension preserved in Vercel's emitted
+entry point fails at runtime even when the local typecheck passes. After every production candidate
+build, run `npm run verify:vercel-queue-bundle`; it imports both emitted Queue handlers from the
+fresh `.vercel/output` tree and rejects missing shared modules or runtime `.ts` specifiers. The
+shared callback and the
+recovery function import `serverless/kbd-research-shared.mjs`. Keep these deployable shared modules
+and the `kbd-research-shared.d.mts` type contract together outside `api/`: importing one generated
+TypeScript function entry from the other leaves no sibling module in Vercel's isolated bundle, while
+placing a shared module under `api/` incorrectly creates another public function.
 
 The hosted defaults publish at most seven page tasks directly from the request; together with the
 delayed phase barrier, an exact investigation seeds no more than eight initial Queue messages. This

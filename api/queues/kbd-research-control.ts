@@ -5,4 +5,4 @@
 export {
   default,
   POST,
-} from "../../serverless/kbd-research-queue-callback.ts";
+} from "../../serverless/kbd-research-queue-callback.js";

@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   MessageAlreadyProcessedError,
@@ -32,6 +37,53 @@ const {
   runRoutingOnlyQueueCallback,
 } = queueModule;
 const FETCH = POST;
+
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+
+test("deployable queue callback stays synchronized with its TypeScript source", () => {
+  const outputDirectory = mkdtempSync(join(tmpdir(), "kbd-queue-callback-"));
+  try {
+    execFileSync(
+      resolve(PROJECT_ROOT, "node_modules/.bin/tsc"),
+      [
+        resolve(
+          PROJECT_ROOT,
+          "serverless/kbd-research-queue-callback.ts",
+        ),
+        "--target",
+        "ES2022",
+        "--module",
+        "NodeNext",
+        "--moduleResolution",
+        "NodeNext",
+        "--outDir",
+        outputDirectory,
+        "--skipLibCheck",
+        "--sourceMap",
+        "false",
+        "--declaration",
+        "false",
+        "--strict",
+      ],
+      { cwd: PROJECT_ROOT, stdio: "pipe" },
+    );
+    assert.equal(
+      readFileSync(
+        join(outputDirectory, "kbd-research-queue-callback.js"),
+        "utf8",
+      ),
+      readFileSync(
+        resolve(
+          PROJECT_ROOT,
+          "serverless/kbd-research-queue-callback.js",
+        ),
+        "utf8",
+      ),
+    );
+  } finally {
+    rmSync(outputDirectory, { recursive: true, force: true });
+  }
+});
 
 test("leaf and control triggers share the exact callback implementation", () => {
   assert.equal(controlQueueModule.POST, queueModule.POST);

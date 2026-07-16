@@ -71,6 +71,10 @@
   `kbd-research`. Each topic has its own push consumer and the recovery cron checks both matching
   consumer groups, so a large leaf backlog no longer places the message that opens its next bounded
   window behind that same backlog.
+- Ship the shared Queue callback as an explicit deployable JavaScript module instead of leaving a
+  TypeScript extension in Vercel's emitted runtime import. CI keeps that module byte-for-byte aligned
+  with its strict TypeScript source, and the pre-deployment bundle smoke imports both generated Queue
+  handlers to catch missing shared modules before production traffic reaches them.
 - Update the Claude.ai and ChatGPT web-connection guides to the current official plan availability,
   menu paths, OAuth approval flow, per-chat activation step, and public `/mcp` endpoint.
 

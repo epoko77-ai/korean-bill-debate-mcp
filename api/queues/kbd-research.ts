@@ -8,7 +8,7 @@ import nodeQueueRoute, {
   runNodeQueueCallback,
   runRoutingOnlyQueueCallback,
   validatedOidcToken,
-} from "../../serverless/kbd-research-queue-callback.ts";
+} from "../../serverless/kbd-research-queue-callback.js";
 
 export {
   POST,

@@ -3,9 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:queue-callback": "tsc serverless/kbd-research-queue-callback.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir serverless --skipLibCheck --sourceMap false --declaration false --strict",
     "typecheck:queue": "tsc --noEmit",
     "test:queue": "node --test tests/node/*.test.mjs",
-    "check:queue": "npm run typecheck:queue && npm run test:queue"
+    "check:queue": "npm run typecheck:queue && npm run test:queue",
+    "verify:vercel-queue-bundle": "node scripts/verify_vercel_queue_bundle.mjs"
   },
   "engines": {
     "node": ">=22"
