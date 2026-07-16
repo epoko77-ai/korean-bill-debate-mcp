@@ -415,6 +415,8 @@ def test_engine_failure_log_contains_only_bounded_structured_diagnostics(
     ("stage", "work_kind"),
     (
         (ResearchTaskStage.COLLECT_METADATA, "phase_barrier"),
+        (ResearchTaskStage.COLLECT_METADATA, "metadata_window_barrier"),
+        (ResearchTaskStage.COLLECT_METADATA, "page_window_barrier"),
         (ResearchTaskStage.COLLECT_METADATA, "document_window_barrier"),
         (ResearchTaskStage.FINALIZE, "document_finalize_barrier"),
     ),

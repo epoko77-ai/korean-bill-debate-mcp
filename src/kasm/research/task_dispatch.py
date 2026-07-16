@@ -42,7 +42,9 @@ _SAFE_WORK_KINDS = frozenset(
         "document_fanout",
         "document_window_barrier",
         "metadata_page",
+        "metadata_window_barrier",
         "page_fanout",
+        "page_window_barrier",
         "phase_barrier",
     }
 )

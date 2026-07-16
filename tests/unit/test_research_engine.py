@@ -1656,6 +1656,129 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     )
 
 
+def test_discovery_recovery_enqueues_deferred_work_before_status_checkpoint_healing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bills = [
+        {
+            "BILL_NO": f"{2210000 + index:07d}",
+            "BILL_NAME": f"인공지능 산업 진흥 제{index}호 법안",
+            "PROPOSE_DT": "2026-06-01",
+        }
+        for index in range(20)
+    ]
+
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        _parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        return page(dataset, number, page_size, len(bills), bills)
+
+    value, queue, _client, _jobs, runs, _finalizer = engine(
+        responder,
+        partition_planner=ReducedPartitionPlanner(),
+        fanout_chunk_size=16,
+    )
+    receipt = value.gateway(
+        "최근 AI 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="discovery", page=1)
+    )
+    discovery_barrier = task_with(
+        queue,
+        work_kind="phase_barrier",
+        phase="discovery",
+        attempt=1,
+    )
+    original_publish = queue.publish
+
+    def fail_first_deferred_publish(
+        task: ResearchTask,
+        *,
+        retention_seconds: int = 86_400,
+        delay_seconds: int = 0,
+    ) -> str:
+        if dict(task.payload).get("work_kind") == "deferred_fanout":
+            raise RuntimeError("worker enqueue interrupted")
+        return original_publish(
+            task,
+            retention_seconds=retention_seconds,
+            delay_seconds=delay_seconds,
+        )
+
+    monkeypatch.setattr(queue, "publish", fail_first_deferred_publish)
+    with pytest.raises(RuntimeError, match="worker enqueue interrupted"):
+        value.process_metadata_task(discovery_barrier)
+
+    deferred = runs.get_deferred_manifest(receipt.research_id)
+    assert deferred is not None
+    assert len(deferred.status_partitions) == 20
+    assert len(deferred.document_bill_numbers) == 20
+    assert not [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "deferred_fanout"
+    ]
+
+    monkeypatch.setattr(queue, "publish", original_publish)
+    original_get_discovery = runs.get_discovery
+
+    def fail_status_checkpoint_healing(_research_id: str) -> DiscoveryStageState | None:
+        raise RuntimeError("checkpoint healing failed")
+
+    monkeypatch.setattr(runs, "get_discovery", fail_status_checkpoint_healing)
+    with pytest.raises(RuntimeError, match="checkpoint healing failed"):
+        value.process_metadata_task(discovery_barrier)
+
+    coordinator = task_with(
+        queue,
+        work_kind="deferred_fanout",
+        start=0,
+        stop=16,
+        expected_total=40,
+    )
+    barrier = task_with(
+        queue,
+        work_kind="metadata_window_barrier",
+        phase="bill_status",
+        start=0,
+        stop=16,
+        expected_total=40,
+        attempt=1,
+    )
+    assert coordinator.credential_capability == discovery_barrier.credential_capability
+    assert barrier.credential_capability == discovery_barrier.credential_capability
+
+    monkeypatch.setattr(runs, "get_discovery", original_get_discovery)
+    value.process_metadata_task(discovery_barrier)
+
+    assert (
+        sum(
+            dict(task.payload).get("work_kind") == "deferred_fanout"
+            for task in queue.tasks
+        )
+        == 1
+    )
+    assert (
+        sum(
+            dict(task.payload).get("work_kind") == "metadata_window_barrier"
+            for task in queue.tasks
+        )
+        == 1
+    )
+
+
 def test_deferred_wave_waits_across_status_and_bill_document_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

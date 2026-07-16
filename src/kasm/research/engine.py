@@ -2912,13 +2912,19 @@ class ResearchEngine:
         if deferred is not None:
             # A prior invocation may have written the compact readiness marker
             # and then failed while the hosted status subclass wrote its small
-            # checkpoint. Re-put the compact audit state idempotently so the
-            # checkpoint heals before any child fan-out is repeated.
+            # checkpoint. The final marker proves every hot routing artifact is
+            # durable, so restart child work before the potentially expensive
+            # compact audit read used only to heal the bounded status view.
+            self._publish_deferred_stage(
+                research_id,
+                deferred,
+                credential_capability,
+            )
             persisted = self.runs.get_discovery(research_id)
             if persisted is None:
                 raise LookupError("ready discovery audit state is missing")
             self.runs.put_discovery(research_id, persisted)
-            deferred = self._required_deferred_manifest(research_id)
+            return
         else:
             collection = preassembled or self._assemble_collection(
                 research_id,
@@ -3031,6 +3037,18 @@ class ResearchEngine:
             )
             deferred = self._required_deferred_manifest(research_id)
 
+        self._publish_deferred_stage(
+            research_id,
+            deferred,
+            credential_capability,
+        )
+
+    def _publish_deferred_stage(
+        self,
+        research_id: str,
+        deferred: DeferredWorkManifest,
+        credential_capability: str | None,
+    ) -> None:
         job = self._required_job(research_id)
         deferred_count = len(deferred.status_partitions) + len(deferred.document_bill_numbers)
         if deferred_count > self.direct_fanout_limit:
