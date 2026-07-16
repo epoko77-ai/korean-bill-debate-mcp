@@ -221,12 +221,14 @@ https://korean-bill-debate-mcp.vercel.app/mcp
 
 #### Claude.ai
 
-Claude Pro·Max·Team·Enterprise의 원격 커스텀 커넥터 기능을 사용합니다. 자세한 최신 화면은
-[Anthropic 공식 안내](https://support.anthropic.com/en/articles/11175166-about-custom-integrations-using-remote-mcp)를
+Claude Free·Pro·Max·Team·Enterprise의 원격 커스텀 커넥터 기능을 사용합니다. Free는 커스텀
+커넥터 1개까지 사용할 수 있습니다. 자세한 최신 화면은
+[Anthropic 공식 안내](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)를
 확인하세요.
 
-1. **설정 → 커넥터 → 커스텀 커넥터 추가**로 이동합니다. Team·Enterprise에서는 소유자가
-   조직 커넥터를 먼저 허용해야 할 수 있습니다.
+1. 개인 계정은 **Customize → Connectors → + → Add custom connector**로 이동합니다.
+   Team·Enterprise에서는 소유자가 **Organization settings → Connectors**에서 조직 커넥터를
+   먼저 추가하고, 사용자는 **Customize → Connectors**에서 연결합니다.
 2. 이름은 `Korean Bill & Debate`, URL은 위 공용 주소를 정확히 입력합니다.
 3. Claude가 연결 승인을 요청하면 열린 화면에 **본인의 열린국회 API 키**를 입력합니다.
 4. 연결 후 새 채팅을 열고 **검색 및 도구(Search and tools)**에서 커넥터와 필요한 도구를
@@ -245,12 +247,15 @@ Claude에는 `/mcp/t/...` 개인 링크를 넣지 마세요. Claude가 표준 OA
 [OpenAI 공식 개발자 모드 안내](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta)를
 먼저 확인하세요.
 
-1. 관리자는 **워크스페이스 설정 → Apps → Create**에서 개발자 모드를 허용합니다.
-   권한을 받은 사용자는 **설정 → Apps → Advanced settings**에서 개발자 모드를 켭니다.
+1. Pro 사용자와 Business 관리자·소유자는 **Settings → Apps → Advanced settings**에서 개발자
+   모드를 켜거나 **Workspace settings → Apps → Create**에서 시작합니다. Enterprise·Edu는
+   관리자가 **Workspace Settings → Permissions & Roles → Connected Data**에서 권한을
+   부여한 뒤, 사용자가 **Settings → Apps → Advanced Settings**에서 개발자 모드를 켭니다.
    한국어 개인 UI가 **설정 → 보안 및 로그인 → 개발자 모드**, **플러그인 → +**로 보이면
    같은 기능이므로 그 경로를 사용합니다.
-2. **Apps → Create** 또는 **플러그인 → +**에서 이름은 `Korean Bill & Debate`, MCP 서버
-   URL은 위 공용 주소를 입력합니다.
+2. **Settings → Apps → Create**, **Workspace settings → Apps → Create** 또는
+   **플러그인 → +**에서 이름은 `Korean Bill & Debate`, MCP 서버 URL은 위 공용 주소를
+   입력합니다.
 3. **Scan Tools**를 누르고, 열린 연결 승인 화면에 **본인의 열린국회 API 키**를 입력합니다.
    OAuth 완료 뒤 13개 도구 스캔이 끝날 때까지 기다린 다음 **Create**를 누릅니다.
 4. 새 채팅에서 `+ → More`로 앱을 선택하거나 `@`로 호출합니다.

@@ -102,9 +102,11 @@ first. Claude.ai and ChatGPT both connect to the same public MCP endpoint:
 https://korean-bill-debate-mcp.vercel.app/mcp
 ```
 
-For Claude Pro, Max, Team, or Enterprise, open **Settings → Connectors → Add custom connector**,
-name it `Korean Bill & Debate`, and enter the public endpoint above. Team and Enterprise owners may
-need to enable an organization connector first. See [Anthropic's current custom-connector guide](https://support.anthropic.com/en/articles/11175166-about-custom-integrations-using-remote-mcp).
+Claude remote custom connectors are available on Free, Pro, Max, Team, and Enterprise; Free is
+limited to one custom connector. For an individual account, open **Customize → Connectors → + → Add
+custom connector**, name it `Korean Bill & Debate`, and enter the public endpoint above. For Team
+and Enterprise, an owner first adds it under **Organization settings → Connectors**, then members
+connect under **Customize → Connectors**. See [Anthropic's current custom-connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
 
 Complete the OAuth approval screen with your own Open Assembly key. Then open a new chat and enable
 the connector and its tools under **Search and tools**. Do not give Claude a `/mcp/t/...` personal
@@ -113,11 +115,12 @@ database or file.
 
 OpenAI currently documents full MCP apps for ChatGPT Business, Enterprise, and Edu on the web;
 Pro users can also connect read/fetch MCPs in developer mode. Every tool on this server advertises
-the MCP read-only annotation. An admin enables developer mode where required; authorized users can
-turn it on under **Settings → Apps → Advanced settings**, then use **Settings → Apps → Create** to
-add the public endpoint. Click **Scan Tools**, complete OAuth with your Open Assembly key, wait for
-the 13-tool scan, create the app, and select it from `+ → More` or an `@` mention in a new chat.
-Availability depends on workspace policy. See [OpenAI's current
+the MCP read-only annotation. Pro users and Business admins/owners can start under **Settings → Apps
+→ Advanced settings** or **Workspace settings → Apps → Create**. For Enterprise/Edu, an admin first
+grants access under **Workspace Settings → Permissions & Roles → Connected Data**, then an enabled
+user turns on developer mode under **Settings → Apps → Advanced Settings**. Create the app, click
+**Scan Tools**, complete OAuth with your Open Assembly key, wait for the 13-tool scan, and select it
+from `+ → More` or an `@` mention in a new chat. Availability depends on workspace policy. See [OpenAI's current
 developer-mode guide](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta).
 
 After the server adds tools, use the app's **Refresh** action and review the changed actions;
