@@ -42,7 +42,7 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
             "topic": "kbd-research",
             "retryAfterSeconds": 15,
             "initialDelaySeconds": 0,
-            "maxConcurrency": 32,
+            "maxConcurrency": 64,
         }
     ]
     assert config["functions"]["api/queues/kbd-research-recovery.ts"] == {

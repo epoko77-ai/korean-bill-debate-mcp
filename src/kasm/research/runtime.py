@@ -139,9 +139,9 @@ def create_hosted_research_runtime(
         ),
         status_page_size=int(os.getenv("KBD_RESEARCH_STATUS_PAGE_SIZE", "100")),
         direct_fanout_limit=int(os.getenv("KBD_RESEARCH_DIRECT_FANOUT_LIMIT", "7")),
-        # A coordinator opens a bounded half-capacity window. Independent
+        # A coordinator opens a bounded quarter-capacity window. Independent
         # sixteen-item shards leave capacity for other users' exact searches
-        # under the 32-message production consumer ceiling.
+        # under the 64-message production consumer ceiling.
         fanout_chunk_size=int(os.getenv("KBD_RESEARCH_FANOUT_CHUNK_SIZE", "16")),
         fanout_delay_seconds=int(
             os.getenv("KBD_RESEARCH_FANOUT_DELAY_SECONDS", "0")

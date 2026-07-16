@@ -73,8 +73,9 @@ delayed phase barrier, an exact investigation seeds no more than eight initial Q
 removes a coordinator round trip for the complete seven-part exact-bill plan while preserving the
 Queue trigger's concurrency ceiling. Larger plans seed independent durable sixteen-item coordinator
 shards up front; no shard depends on a preceding coordinator to publish it, and each coordinator
-still opens only a bounded worker window. The production consumer admits at most 32 in-flight
-messages, leaving room for another user's exact search while a broad shard is active. Override
+still opens only a bounded worker window. The production consumer admits at most 64 in-flight
+messages while each broad coordinator opens only 16 children, leaving capacity for other users'
+exact searches while broad shards are active. Override
 `KBD_RESEARCH_DIRECT_FANOUT_LIMIT`, `KBD_RESEARCH_FANOUT_CHUNK_SIZE`, and
 `KBD_RESEARCH_FANOUT_DELAY_SECONDS` only together with a measured Queue concurrency change.
 
