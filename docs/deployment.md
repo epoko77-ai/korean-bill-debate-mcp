@@ -48,25 +48,30 @@ Before deploying the 13-tool surface:
    system-provided `VERCEL_DEPLOYMENT_ID` to keep queue messages deployment-bound. The queue bridge
    uses the system-provided `VERCEL_URL` for its same-deployment internal dispatch target; it never
    trusts an inbound Host header for that secret-bearing request.
-6. Keep the queue topic at `kbd-research`, or change `KBD_RESEARCH_QUEUE_TOPIC` and the
+6. Keep the leaf and control queue topics at `kbd-research` and `kbd-research-control`. If either
+   changes, update `KBD_RESEARCH_QUEUE_TOPIC` or `KBD_RESEARCH_CONTROL_QUEUE_TOPIC` and its matching
    `experimentalTriggers[].topic` value in `vercel.json` together.
 7. Allow the production host and the web-client origins in `KASM_ALLOWED_HOSTS` and
    `KASM_ALLOWED_ORIGINS`. The production smoke must cover both `https://claude.ai` and
    `https://chatgpt.com`.
 
-Push delivery remains the primary path. Poll recovery uses that route's exact auto-derived consumer
-group, `api_Squeues_Skbd-research_Dts`, rather than creating a second group that would receive another
-copy of every task. It is deployment-pinned, leases at most four available messages concurrently,
-and immediately sends each through the same private dispatcher with a mandatory completion-receipt
-check. It processes at most 16 independently bounded messages per cron invocation and never
-collapses a research job into one synchronous operation. Push and recovery races therefore converge
-through the same immutable artifacts, queue idempotency keys, and write-once task receipts without
-adding a receipt lookup to the normal first push delivery.
+Push delivery remains the primary path. Leaf fetch/parse work uses `kbd-research`; lightweight
+fan-out coordinators and readiness barriers use `kbd-research-control`, so those control messages do
+not sit behind a large backlog in the leaf topic. Poll recovery uses each
+route's exact auto-derived consumer group, `api_Squeues_Skbd-research_Dts` and
+`api_Squeues_Skbd-research-control_Dts`, rather than creating a second group that would receive
+another copy of every task. It is deployment-pinned, checks both topics fairly with at most four
+workers, and immediately sends each leased message through the same private dispatcher with a
+mandatory completion-receipt check. It processes at most 16 independently bounded messages per cron
+invocation and never collapses a research job into one synchronous operation. Push and recovery
+races therefore converge through the same immutable artifacts, queue idempotency keys, and write-once
+task receipts without adding a receipt lookup to the normal first push delivery.
 
-Both Node entry points import `serverless/kbd-research-shared.mjs`. Keep that deployable JavaScript
-module and its `kbd-research-shared.d.mts` type contract together outside `api/`: importing one
-generated TypeScript function entry from the other leaves no sibling module in Vercel's isolated
-bundle, while placing the shared module under `api/` incorrectly creates a fifth public function.
+Both queue-trigger entry points import `serverless/kbd-research-queue-callback.ts`; that shared
+callback and the recovery function import `serverless/kbd-research-shared.mjs`. Keep these deployable
+shared modules and the `kbd-research-shared.d.mts` type contract together outside `api/`: importing
+one generated TypeScript function entry from the other leaves no sibling module in Vercel's isolated
+bundle, while placing a shared module under `api/` incorrectly creates another public function.
 
 The hosted defaults publish at most seven page tasks directly from the request; together with the
 delayed phase barrier, an exact investigation seeds no more than eight initial Queue messages. This
@@ -76,12 +81,14 @@ research run at the top-level discovery and deferred-routing stages. A dedicated
 verifies every partition, bill-status route, or bill-document route in that window before opening
 its successor, and resets its bounded polling backoff for each new window. A source partition with
 many follow-up pages also opens only one sixteen-page window at a time; these per-partition page
-windows may run in parallel inside the Queue's global concurrency ceiling. Official-text hydration
+windows may run in parallel inside the leaf Queue's concurrency ceiling. Official-text hydration
 uses one sixteen-document window per run with compact task-completion receipts. The last verified
 document window passes that durable boundary to the finalizer, so it does not re-read all document
 receipts before loading the full-text outcomes once. New immutable result shards use one atomic
 Blob put-if-absent request; only duplicate, conflicting, or ambiguous writes require a read-back
-verification. The production consumer admits at most 64 total in-flight messages. Override
+verification. The production leaf consumer admits at most 64 in-flight messages, while the
+independent control consumer admits at most 16 coordinators and barriers. These are separate topic
+ceilings, not a guarantee of project-wide compute reservation. Override
 `KBD_RESEARCH_DIRECT_FANOUT_LIMIT`, `KBD_RESEARCH_FANOUT_CHUNK_SIZE`, and
 `KBD_RESEARCH_FANOUT_DELAY_SECONDS` only together with a measured Queue concurrency change.
 

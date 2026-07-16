@@ -20,6 +20,9 @@ const TEST_OIDC_TOKEN = `${encode({ alg: "RS256", typ: "JWT" })}.${encode({
 process.env.VERCEL_OIDC_TOKEN = TEST_OIDC_TOKEN;
 
 const queueModule = await import("../../api/queues/kbd-research.ts");
+const controlQueueModule = await import(
+  "../../api/queues/kbd-research-control.ts"
+);
 const { POST } = queueModule;
 const NODE_HANDLER = queueModule.default;
 const {
@@ -29,6 +32,11 @@ const {
   runRoutingOnlyQueueCallback,
 } = queueModule;
 const FETCH = POST;
+
+test("leaf and control triggers share the exact callback implementation", () => {
+  assert.equal(controlQueueModule.POST, queueModule.POST);
+  assert.equal(controlQueueModule.default, queueModule.default);
+});
 
 const TASK = {
   schema_version: 1,

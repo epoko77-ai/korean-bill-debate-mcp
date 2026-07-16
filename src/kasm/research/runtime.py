@@ -71,6 +71,10 @@ def create_hosted_research_runtime(
     )
     queue = VercelResearchTaskQueue(
         topic=os.getenv("KBD_RESEARCH_QUEUE_TOPIC", "kbd-research"),
+        control_topic=os.getenv(
+            "KBD_RESEARCH_CONTROL_QUEUE_TOPIC",
+            "kbd-research-control",
+        ),
         region=os.getenv("KBD_RESEARCH_QUEUE_REGION") or None,
         timeout=float(os.getenv("KBD_RESEARCH_QUEUE_TIMEOUT_SECONDS", "10")),
     )

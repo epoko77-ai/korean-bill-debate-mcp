@@ -7,6 +7,7 @@ import urllib.request
 import pytest
 
 from kasm.research.queue import (
+    CONTROL_WORK_KINDS,
     LeasedResearchTask,
     ResearchTask,
     ResearchTaskStage,
@@ -16,14 +17,24 @@ from kasm.research.queue import (
 )
 
 
-def _task(*, capability: str | None = None) -> ResearchTask:
+def _task(
+    *,
+    capability: str | None = None,
+    work_kind: str | None = None,
+) -> ResearchTask:
+    payload: tuple[tuple[str, str | int], ...] = (
+        ("assembly_term", 22),
+        ("query", "최근 AI 입법"),
+    )
+    if work_kind is not None:
+        payload += (("work_kind", work_kind),)
     return ResearchTask(
         research_id="research_123",
         stage=ResearchTaskStage.COLLECT_METADATA,
         work_id="scope",
         query_fingerprint="a" * 64,
         index_revision="index-1",
-        payload=(("assembly_term", 22), ("query", "최근 AI 입법")),
+        payload=payload,
         credential_capability=capability,
     )
 
@@ -72,6 +83,47 @@ def test_publish_uses_oidc_and_idempotency_without_leaking_token() -> None:
     assert request.get_header("Vqs-idempotency-key") == _task().idempotency_key
     assert request.get_header("Vqs-deployment-id") == "dpl_current"
     assert b"secret-oidc" not in (request.data or b"")
+
+
+def test_publish_routes_only_coordinators_and_barriers_to_control_topic() -> None:
+    requests: list[urllib.request.Request] = []
+
+    def transport(request: urllib.request.Request, _timeout: float) -> _HttpResponse:
+        requests.append(request)
+        return _HttpResponse(201, {}, b'{"messageId":"msg_1"}')
+
+    queue = VercelResearchTaskQueue(
+        topic="kbd-research",
+        control_topic="kbd-research-control",
+        oidc_token_provider=lambda: "oidc",
+        deployment_id_provider=lambda: "dpl_current",
+        transport=transport,
+    )
+
+    for work_kind in sorted(CONTROL_WORK_KINDS):
+        task = _task(work_kind=work_kind)
+        queue.publish(task)
+        request = requests[-1]
+        assert request.full_url.endswith("/topic/kbd-research-control")
+        assert request.get_header("Vqs-idempotency-key") == task.idempotency_key
+        assert request.get_header("Vqs-deployment-id") == "dpl_current"
+
+    for work_kind in ("metadata_page", "bill_documents", "document", "unknown"):
+        queue.publish(_task(work_kind=work_kind))
+        assert requests[-1].full_url.endswith("/topic/kbd-research")
+
+    queue.publish(_task())
+    assert requests[-1].full_url.endswith("/topic/kbd-research")
+
+
+def test_control_topic_must_be_valid_and_distinct() -> None:
+    with pytest.raises(ValueError, match="distinct"):
+        VercelResearchTaskQueue(
+            topic="kbd-research",
+            control_topic="kbd-research",
+        )
+    with pytest.raises(ValueError, match="invalid"):
+        VercelResearchTaskQueue(control_topic="invalid/topic")
 
 
 def test_queue_omits_deployment_partition_only_when_not_configured() -> None:

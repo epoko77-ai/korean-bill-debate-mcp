@@ -19,6 +19,23 @@ _QUEUE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _REGION = re.compile(r"^[a-z][a-z0-9-]{1,15}$")
 _MAX_TASK_BYTES = 64 * 1024
 
+# These tasks coordinate bounded windows or prove that a phase can advance.
+# Keeping them off the high-volume leaf queue prevents a completed window from
+# waiting behind the very leaves whose successor it needs to schedule.
+CONTROL_WORK_KINDS = frozenset(
+    {
+        "deferred_fanout",
+        "discovery_fanout",
+        "document_finalize_barrier",
+        "document_fanout",
+        "document_window_barrier",
+        "metadata_window_barrier",
+        "page_fanout",
+        "page_window_barrier",
+        "phase_barrier",
+    }
+)
+
 
 class ResearchTaskStage(StrEnum):
     COLLECT_METADATA = "collect_metadata"
@@ -163,6 +180,7 @@ class VercelResearchTaskQueue:
         self,
         *,
         topic: str = "kbd-research",
+        control_topic: str | None = None,
         consumer: str = "kbd-workers",
         region: str | None = None,
         oidc_token_provider: Callable[[], str] | None = None,
@@ -171,13 +189,23 @@ class VercelResearchTaskQueue:
         transport: _Transport | None = None,
     ) -> None:
         selected_region = region or os.getenv("VERCEL_REGION") or "iad1"
-        if not _QUEUE_NAME.fullmatch(topic) or not _QUEUE_NAME.fullmatch(consumer):
+        if (
+            not _QUEUE_NAME.fullmatch(topic)
+            or (
+                control_topic is not None
+                and not _QUEUE_NAME.fullmatch(control_topic)
+            )
+            or not _QUEUE_NAME.fullmatch(consumer)
+        ):
             raise ValueError("queue topic and consumer names contain invalid characters")
+        if control_topic == topic:
+            raise ValueError("control queue topic must be distinct from the leaf topic")
         if not _REGION.fullmatch(selected_region):
             raise ValueError("invalid Vercel queue region")
         if timeout <= 0:
             raise ValueError("queue timeout must be positive")
         self.topic = topic
+        self.control_topic = control_topic
         self.consumer = consumer
         self.region = selected_region
         self._oidc_token_provider = oidc_token_provider or _default_oidc_token
@@ -207,7 +235,7 @@ class VercelResearchTaskQueue:
             raise ValueError("research task exceeds the queue payload limit")
         response = self._request(
             "POST",
-            f"/topic/{urllib.parse.quote(self.topic, safe='')}",
+            f"/topic/{urllib.parse.quote(self._publish_topic(task), safe='')}",
             body=body,
             headers={
                 "Content-Type": "application/json",
@@ -227,6 +255,12 @@ class VercelResearchTaskQueue:
         if not message_id:
             raise RuntimeError("Vercel Queue response did not contain a message id")
         return message_id
+
+    def _publish_topic(self, task: ResearchTask) -> str:
+        work_kind = dict(task.payload).get("work_kind")
+        if self.control_topic is not None and work_kind in CONTROL_WORK_KINDS:
+            return self.control_topic
+        return self.topic
 
     def receive(
         self,

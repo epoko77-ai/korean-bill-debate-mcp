@@ -66,6 +66,11 @@
 - Raise the production Queue ceiling from 8 to 64 in-flight messages and use readiness-gated,
   sixteen-item hosted fan-out windows. Broad runs retain bounded coordinator publication instead
   of inserting every planned route ahead of later exact-bill and interactive connector requests.
+- Split lightweight fan-out coordinators, readiness barriers, and finalization barriers into the
+  deployment-pinned `kbd-research-control` topic while keeping API, document, and PDF leaf work on
+  `kbd-research`. Each topic has its own push consumer and the recovery cron checks both matching
+  consumer groups, so a large leaf backlog no longer places the message that opens its next bounded
+  window behind that same backlog.
 - Update the Claude.ai and ChatGPT web-connection guides to the current official plan availability,
   menu paths, OAuth approval flow, per-chat activation step, and public `/mcp` endpoint.
 

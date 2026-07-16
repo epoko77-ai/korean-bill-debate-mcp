@@ -7,6 +7,7 @@ from kasm.research.artifact_job_storage import ArtifactResearchJobStore
 from kasm.research.artifact_run_storage import ArtifactResearchRunStore
 from kasm.research.backend import DurableResearchBackend
 from kasm.research.corpus_runtime import RevisionCorpusRecallProvider
+from kasm.research.queue import VercelResearchTaskQueue
 from kasm.research.runtime import create_hosted_research_runtime
 from kasm.research.status_storage import StatusSnapshotResearchRunStore
 
@@ -32,6 +33,9 @@ def test_hosted_runtime_is_composed_lazily_without_network_or_user_key(monkeypat
     assert runtime.engine.direct_fanout_limit == 7
     assert runtime.engine.fanout_chunk_size == 16
     assert runtime.engine.fanout_delay_seconds == 0
+    assert isinstance(runtime.engine.queue, VercelResearchTaskQueue)
+    assert runtime.engine.queue.topic == "kbd-research"
+    assert runtime.engine.queue.control_topic == "kbd-research-control"
 
 
 def test_hosted_runtime_allows_explicit_smaller_metadata_pages(monkeypatch) -> None:
@@ -43,6 +47,18 @@ def test_hosted_runtime_allows_explicit_smaller_metadata_pages(monkeypatch) -> N
     )
 
     assert runtime.engine.partition_planner.page_size == 250
+
+
+def test_hosted_runtime_allows_explicit_control_queue_topic(monkeypatch) -> None:
+    monkeypatch.setenv("KBD_RESEARCH_CREDENTIAL_SECRET", Fernet.generate_key().decode())
+    monkeypatch.setenv("KBD_RESEARCH_CONTROL_QUEUE_TOPIC", "kbd-priority")
+
+    runtime = create_hosted_research_runtime(
+        assembly_api_key_provider=lambda: "user-key"
+    )
+
+    assert isinstance(runtime.engine.queue, VercelResearchTaskQueue)
+    assert runtime.engine.queue.control_topic == "kbd-priority"
 
 
 def test_hosted_runtime_requires_an_encryption_secret(monkeypatch) -> None:

@@ -10,6 +10,7 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
     config = json.loads((root / "vercel.json").read_text())
 
     assert (root / "serverless/kbd-research-shared.mjs").is_file()
+    assert (root / "serverless/kbd-research-queue-callback.ts").is_file()
     assert not (root / "api/queues/kbd-research-shared.mjs").exists()
 
     # The project was once detected as the monolithic `python` framework,
@@ -45,6 +46,19 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
             "maxConcurrency": 64,
         }
     ]
+    control_queue_function = config["functions"][
+        "api/queues/kbd-research-control.ts"
+    ]
+    assert control_queue_function["maxDuration"] == 300
+    assert control_queue_function["experimentalTriggers"] == [
+        {
+            "type": "queue/v2beta",
+            "topic": "kbd-research-control",
+            "retryAfterSeconds": 15,
+            "initialDelaySeconds": 0,
+            "maxConcurrency": 16,
+        }
+    ]
     assert config["functions"]["api/queues/kbd-research-recovery.ts"] == {
         "maxDuration": 300,
     }
@@ -70,14 +84,18 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
 def test_queue_bridge_never_reads_failure_body_or_logs_task() -> None:
     root = Path(__file__).resolve().parents[2]
     entry = (root / "api/queues/kbd-research.ts").read_text()
+    control_entry = (root / "api/queues/kbd-research-control.ts").read_text()
+    callback = (root / "serverless/kbd-research-queue-callback.ts").read_text()
     shared = (root / "serverless/kbd-research-shared.mjs").read_text()
-    source = entry + shared
+    source = entry + control_entry + callback + shared
 
-    assert 'handleCallback<unknown>' in entry
-    assert 'handleNodeCallback<unknown>' in entry
-    assert "export default nodeQueueRoute" in entry
-    assert 'currentDeploymentOrigin(request)' in entry
-    assert '../../serverless/kbd-research-shared.mjs' in entry
+    assert 'handleCallback<unknown>' in callback
+    assert 'handleNodeCallback<unknown>' in callback
+    assert "export default nodeQueueRoute" in callback
+    assert 'currentDeploymentOrigin(request)' in callback
+    assert './kbd-research-shared.mjs' in callback
+    assert '../../serverless/kbd-research-queue-callback.ts' in entry
+    assert '../../serverless/kbd-research-queue-callback.ts' in control_entry
     assert 'new URL(INTERNAL_PATH, deploymentOrigin)' in source
     assert 'response.body?.cancel()' in source
     assert 'const error = `research dispatch failed (${response.status})`' in source

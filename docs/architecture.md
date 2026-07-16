@@ -5,7 +5,7 @@
 ```text
 Hosted durable MCP
   → OAuth or legacy personal token → request-scoped Open Assembly key
-  → start_research → durable queue → isolated metadata/document workers
+  → start_research → control queue + leaf queue → isolated metadata/document workers
   → immutable job, coverage, overview, evidence-index, and source-text artifacts
   → status → complete map → core/selected text → optional exhaustive traversal
 
@@ -115,6 +115,10 @@ synthesis. The Assembly key never enters the LLM request, and the LLM key never 
 client. The browser does not persist either key in cookies or web storage.
 
 The durable queue, immutable run artifacts, and isolated document workers now exist for hosted MCP.
+Coordinator and barrier tasks use a deployment-pinned control topic, while official API page,
+document-discovery, and PDF hydration tasks use the higher-volume leaf topic. The separation keeps a
+completed window's successor out of its own leaf backlog; both paths retain the same at-least-once,
+idempotency, completion-receipt, retry, and same-deployment dispatch rules.
 The workspace still uses the earlier single-request alpha boundary and does not inherit background
 retries or durable progress. Distributed ingress limits, cancellation, legacy artifact migration,
 and production corpus/deployment validation remain before platform stability. See [the workspace

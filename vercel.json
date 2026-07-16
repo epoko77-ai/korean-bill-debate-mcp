@@ -26,6 +26,18 @@
         }
       ]
     },
+    "api/queues/kbd-research-control.ts": {
+      "maxDuration": 300,
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "kbd-research-control",
+          "retryAfterSeconds": 15,
+          "initialDelaySeconds": 0,
+          "maxConcurrency": 16
+        }
+      ]
+    },
     "api/queues/kbd-research-recovery.ts": {
       "maxDuration": 300
     }

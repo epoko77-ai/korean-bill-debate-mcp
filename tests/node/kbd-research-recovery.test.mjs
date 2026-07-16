@@ -8,6 +8,8 @@ process.env.VERCEL_DEPLOYMENT_ID = "dpl_recovery_test";
 process.env.VERCEL = "1";
 process.env.VERCEL_URL = "kbd-current-deployment.vercel.app";
 process.env.VERCEL_REGION = "icn1";
+process.env.KBD_RESEARCH_QUEUE_TOPIC = "kbd-research";
+process.env.KBD_RESEARCH_CONTROL_QUEUE_TOPIC = "kbd-research-control";
 const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
 const TEST_OIDC_TOKEN = `${encode({ alg: "RS256", typ: "JWT" })}.${encode({
   exp: 4_102_444_800,
@@ -54,7 +56,11 @@ class FakeReceiver {
 
   async receive(topic, consumer, handler, options) {
     this.calls.push({ topic, consumer, options });
-    const item = this.messages.shift();
+    const index = this.messages.findIndex(
+      (candidate) =>
+        (candidate.topic ?? "kbd-research") === topic,
+    );
+    const item = index < 0 ? undefined : this.messages.splice(index, 1)[0];
     if (!item) {
       return { ok: false, reason: "empty" };
     }
@@ -121,12 +127,57 @@ test("an available same-group message is recovered immediately", async () => {
     assert.equal(result.attempted, 1);
     assert.deepEqual(receiver.directives, []);
     assert.equal(fake.calls.length, 1);
-    assert.equal(receiver.calls[0].topic, "kbd-research");
+    assert.deepEqual(
+      receiver.calls.slice(0, 2).map((call) => call.topic),
+      ["kbd-research-control", "kbd-research"],
+    );
+    const leafCall = receiver.calls.find(
+      (call) => call.topic === "kbd-research",
+    );
+    assert.ok(leafCall);
     assert.equal(
-      receiver.calls[0].consumer,
+      leafCall.consumer,
       "api_Squeues_Skbd-research_Dts",
     );
-    assert.equal(receiver.calls[0].options.visibilityTimeoutSeconds, 300);
+    assert.equal(leafCall.options.visibilityTimeoutSeconds, 300);
+  } finally {
+    fake.restore();
+  }
+});
+
+test("recovery polls the control topic with its push consumer group", async () => {
+  const now = Date.parse("2026-07-14T12:00:00Z");
+  const receiver = new FakeReceiver([
+    {
+      topic: "kbd-research-control",
+      message: {
+        ...TASK,
+        work_id: "phase_barrier:discovery:1",
+        payload: { work_kind: "phase_barrier", attempt: 1 },
+      },
+      metadata: metadata(new Date(now), {
+        topicName: "kbd-research-control",
+        consumerGroup: "api_Squeues_Skbd-research-control_Dts",
+      }),
+    },
+  ]);
+  const fake = installInternalFetch();
+  try {
+    const result = await runRecovery({
+      receiver,
+      oidcToken: TEST_OIDC_TOKEN,
+      deploymentOrigin: "https://kbd-current-deployment.vercel.app",
+      now: () => now,
+      concurrency: 1,
+      maxTasks: 1,
+    });
+    assert.equal(result.processed, 1);
+    assert.equal(receiver.calls.length, 1);
+    assert.equal(receiver.calls[0].topic, "kbd-research-control");
+    assert.equal(
+      receiver.calls[0].consumer,
+      "api_Squeues_Skbd-research-control_Dts",
+    );
   } finally {
     fake.restore();
   }
@@ -254,13 +305,23 @@ test("plain api default export polls with deployment pin and bounded concurrency
     assert.equal(result.status, 200);
     assert.equal(result.body.ok, true);
     assert.equal(result.body.attempted, 0);
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 8);
     assert.ok(
       calls.every(
         (call) =>
           call.headers.get("vqs-max-concurrency") === "4" &&
           call.headers.get("vqs-deployment-id") === "dpl_recovery_test",
       ),
+    );
+    assert.equal(
+      calls.filter((call) => call.url.includes("/topic/kbd-research/")).length,
+      4,
+    );
+    assert.equal(
+      calls.filter((call) =>
+        call.url.includes("/topic/kbd-research-control/")
+      ).length,
+      4,
     );
   } finally {
     globalThis.fetch = original;

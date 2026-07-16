@@ -17,10 +17,13 @@ import {
 } from "../../serverless/kbd-research-shared.mjs";
 
 const DEFAULT_TOPIC = "kbd-research";
+const DEFAULT_CONTROL_TOPIC = "kbd-research-control";
 // Vercel derives this consumer group from api/queues/kbd-research.ts. Polling
 // the same group leases only messages that the primary push consumer has not
 // already claimed; a second group would replay every task as another copy.
 const DEFAULT_CONSUMER = "api_Squeues_Skbd-research_Dts";
+const DEFAULT_CONTROL_CONSUMER =
+  "api_Squeues_Skbd-research-control_Dts";
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_MAX_TASKS = 16;
 const RECOVERY_DISPATCH_TIMEOUT_MS = 210_000;
@@ -47,6 +50,11 @@ type RecoveryOptions = {
   now?: () => number;
   concurrency?: number;
   maxTasks?: number;
+};
+
+type RecoveryRoute = {
+  topic: string;
+  consumer: string;
 };
 
 export type RecoveryResult = {
@@ -97,6 +105,23 @@ function createReceiver(concurrency: number): RecoveryReceiver {
   });
 }
 
+function configuredRoutes(): readonly RecoveryRoute[] {
+  const controlTopic = configuredName(
+    "KBD_RESEARCH_CONTROL_QUEUE_TOPIC",
+    DEFAULT_CONTROL_TOPIC,
+  );
+  const leafTopic = configuredName("KBD_RESEARCH_QUEUE_TOPIC", DEFAULT_TOPIC);
+  if (controlTopic === leafTopic) {
+    throw new Error("research recovery topics must be distinct");
+  }
+  // Check control work first. Rotating the starting route across concurrent
+  // slots prevents either topic from monopolizing recovery capacity.
+  return [
+    { topic: controlTopic, consumer: DEFAULT_CONTROL_CONSUMER },
+    { topic: leafTopic, consumer: DEFAULT_CONSUMER },
+  ];
+}
+
 export async function runRecovery(
   options: RecoveryOptions = {},
 ): Promise<RecoveryResult> {
@@ -116,8 +141,7 @@ export async function runRecovery(
     currentDeploymentOrigin(new Request("https://recovery.invalid"));
   const now = options.now ?? Date.now;
   const started = now();
-  const topic = configuredName("KBD_RESEARCH_QUEUE_TOPIC", DEFAULT_TOPIC);
-  const consumer = DEFAULT_CONSUMER;
+  const routes = configuredRoutes();
   const counters: RecoveryResult = {
     attempted: 0,
     processed: 0,
@@ -134,40 +158,48 @@ export async function runRecovery(
     const slots = Math.min(concurrency, maxTasks - counters.attempted);
     let roundHandlers = 0;
     const outcomes = await Promise.allSettled(
-      Array.from({ length: slots }, async () => {
-        try {
-          return await receiver.receive(
-            topic,
-            consumer,
-            async (message, metadata) => {
-              counters.attempted += 1;
-              roundHandlers += 1;
-              // A message available in the push consumer's own group is
-              // already eligible for recovery. Always check its durable
-              // receipt before doing work so an ACK race cannot repeat it.
-              await handleMessage(
-                message,
-                deploymentOrigin,
-                metadata.deliveryCount,
-                oidcToken,
-                true,
-                RECOVERY_DISPATCH_TIMEOUT_MS,
-              );
-              counters.processed += 1;
-            },
-            {
-              limit: 1,
-              visibilityTimeoutSeconds: VISIBILITY_TIMEOUT_SECONDS,
-              retry: retryDirective,
-            },
-          );
-        } catch (error) {
-          if (error instanceof TooManyRequestsError) {
-            counters.saturated += 1;
-            return { ok: false, reason: "empty" } as const;
+      Array.from({ length: slots }, async (_unused, slot) => {
+        for (let offset = 0; offset < routes.length; offset += 1) {
+          const route = routes[(slot + offset) % routes.length];
+          try {
+            const outcome = await receiver.receive(
+              route.topic,
+              route.consumer,
+              async (message, metadata) => {
+                counters.attempted += 1;
+                roundHandlers += 1;
+                // A message available in the push consumer's own group is
+                // already eligible for recovery. Always check its durable
+                // receipt before doing work so an ACK race cannot repeat it.
+                await handleMessage(
+                  message,
+                  deploymentOrigin,
+                  metadata.deliveryCount,
+                  oidcToken,
+                  true,
+                  RECOVERY_DISPATCH_TIMEOUT_MS,
+                );
+                counters.processed += 1;
+              },
+              {
+                limit: 1,
+                visibilityTimeoutSeconds: VISIBILITY_TIMEOUT_SECONDS,
+                retry: retryDirective,
+              },
+            );
+            if (outcome.ok) {
+              return outcome;
+            }
+            counters.empty += 1;
+          } catch (error) {
+            if (error instanceof TooManyRequestsError) {
+              counters.saturated += 1;
+              return { ok: false, reason: "empty" } as const;
+            }
+            throw error;
           }
-          throw error;
         }
+        return { ok: false, reason: "empty" } as const;
       }),
     );
     const failed = outcomes.find(
@@ -175,11 +207,6 @@ export async function runRecovery(
     );
     if (failed) {
       throw failed.reason;
-    }
-    for (const outcome of outcomes) {
-      if (outcome.status === "fulfilled" && !outcome.value.ok) {
-        counters.empty += 1;
-      }
     }
     if (roundHandlers === 0 || counters.saturated > 0) {
       break;
