@@ -75,10 +75,11 @@ Queue trigger's concurrency ceiling. Larger metadata plans seed independent dura
 coordinator shards up front so one failed coordinator cannot strand the remaining official-source
 partitions. Document hydration is deliberately stricter: one coordinator opens 16 documents, a
 window barrier verifies all 16 compact task-completion receipts, and only then may the next window
-open. The finalizer is queued after the last window and reads the full-text outcomes once instead of
-repeatedly scanning them while work is pending. The production consumer admits at most 64 in-flight
-messages, so two broad jobs use at most 32 active document slots and leave capacity for exact
-searches. Override
+open. The last verified window passes that durable boundary to the finalizer, so it does not re-read
+all document receipts before loading the full-text outcomes once. New immutable result shards use
+one atomic Blob put-if-absent request; only duplicate, conflicting, or ambiguous writes require a
+read-back verification. The production consumer admits at most 64 in-flight messages, so two broad
+jobs use at most 32 active document slots and leave capacity for exact searches. Override
 `KBD_RESEARCH_DIRECT_FANOUT_LIMIT`, `KBD_RESEARCH_FANOUT_CHUNK_SIZE`, and
 `KBD_RESEARCH_FANOUT_DELAY_SECONDS` only together with a measured Queue concurrency change.
 

@@ -272,6 +272,10 @@ def test_blob_store_is_private_immutable_and_injectable() -> None:
     store = VercelBlobResearchArtifactStore(client=client, prefix="kbd/private")
 
     ref = store.write_result_page("research_1", "page-1", {"items": [1]})
+    # New immutable objects use the backend's atomic put-if-absent directly.
+    # A preliminary existence GET would double every first-pass snapshot-shard
+    # round trip and can push large finalization beyond its hosted deadline.
+    assert client.get_calls == []
     assert store.read(ref) is not None
     assert store.list("research_1", ArtifactKind.RESULT_PAGE) == (ref,)
     assert client.put_calls == [
@@ -283,10 +287,46 @@ def test_blob_store_is_private_immutable_and_injectable() -> None:
             "content_type": "application/json; charset=utf-8",
         }
     ]
+    client.get_calls.clear()
     assert store.write_result_page("research_1", "page-1", {"items": [1]}) == ref
     assert len(client.put_calls) == 1
+    assert client.get_calls == ["kbd/private/" + ref.object_path]
+    client.get_calls.clear()
     with pytest.raises(ArtifactConflictError):
         store.write_result_page("research_1", "page-1", {"items": [2]})
+    assert client.get_calls == ["kbd/private/" + ref.object_path]
+
+
+def test_blob_put_first_recovers_an_ambiguous_committed_response() -> None:
+    class AmbiguousCommittedClient(FakeBlobClient):
+        def put(
+            self,
+            pathname: str,
+            body: bytes,
+            *,
+            access: str,
+            add_random_suffix: bool,
+            allow_overwrite: bool,
+            content_type: str,
+        ) -> object:
+            super().put(
+                pathname,
+                body,
+                access=access,
+                add_random_suffix=add_random_suffix,
+                allow_overwrite=allow_overwrite,
+                content_type=content_type,
+            )
+            raise RuntimeError("response was lost after the object became durable")
+
+    client = AmbiguousCommittedClient()
+    store = VercelBlobResearchArtifactStore(client=client, prefix="kbd/private")
+
+    ref = store.write_manifest("research_1", {"documents": 120})
+
+    assert len(client.put_calls) == 1
+    assert client.get_calls == ["kbd/private/" + ref.object_path]
+    assert store.read(ref) is not None
 
 
 def test_blob_sdk_is_lazy_and_public_access_is_forbidden(monkeypatch) -> None:

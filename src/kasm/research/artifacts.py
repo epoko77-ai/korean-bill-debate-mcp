@@ -459,9 +459,6 @@ class VercelBlobResearchArtifactStore(BaseResearchArtifactStore):
         encoded, ref = _encode_artifact(research_id, kind, payload, logical_key)
         pathname = self._blob_path(ref.object_path)
         client = self._client()
-        existing = self._safe_get(client, pathname)
-        if existing is not None:
-            return self._verify_existing(existing, encoded, ref)
         try:
             client.put(
                 pathname,
@@ -472,8 +469,13 @@ class VercelBlobResearchArtifactStore(BaseResearchArtifactStore):
                 content_type="application/json; charset=utf-8",
             )
         except Exception:
-            # Resolve a possible create race without ever including the SDK's
-            # exception or response body in our public error.
+            # ``allow_overwrite=False`` is the atomic put-if-absent boundary.
+            # Avoid a preliminary GET for the overwhelmingly common new-object
+            # path: a broad snapshot can contain more than one hundred shards,
+            # and paying two Blob round trips for every immutable shard can
+            # exceed the hosted function deadline.  On a duplicate, create
+            # race, or an ambiguous failed response, read back the exact path
+            # and retain the same idempotency and conflict validation.
             raced = self._safe_get(client, pathname, suppress_errors=True)
             if raced is not None:
                 return self._verify_existing(raced, encoded, ref)

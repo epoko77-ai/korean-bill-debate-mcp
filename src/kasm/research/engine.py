@@ -87,6 +87,8 @@ _OFFICIAL_URL = "official_url"
 _START = "start"
 _STOP = "stop"
 _CHAIN_NEXT = "chain_next"
+_RECEIPT_GATED = "receipt_gated"
+_RECEIPTS_VERIFIED = "receipts_verified"
 
 ROUTING_SHARD_SIZE: Final = 4
 
@@ -2121,6 +2123,7 @@ class ResearchEngine:
     def _process_document_fanout(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
         start, stop = self._validate_fanout_identity(task, payload, _DOCUMENT_FANOUT)
         expected_total = self._fanout_expected_total(payload, stop)
+        receipt_gated = payload.get(_RECEIPT_GATED) is True
         window_stop = self._fanout_window_stop(start, stop)
         items = self.runs.document_routes_for(
             task.research_id,
@@ -2144,6 +2147,7 @@ class ResearchEngine:
             stop=window_stop,
             expected_total=expected_total,
             chain_next=stop == expected_total and window_stop < stop,
+            receipt_gated=receipt_gated,
             attempt=1,
             delay_seconds=self._barrier_delay_seconds(1),
         )
@@ -2153,7 +2157,7 @@ class ResearchEngine:
         task: ResearchTask,
         payload: Mapping[str, Any],
     ) -> None:
-        start, stop, expected_total, chain_next, attempt = (
+        start, stop, expected_total, chain_next, receipt_gated, attempt = (
             self._validate_document_window_barrier(task, payload)
         )
         items = self.runs.document_routes_for(
@@ -2172,6 +2176,7 @@ class ResearchEngine:
                 stop=stop,
                 expected_total=expected_total,
                 chain_next=chain_next,
+                receipt_gated=receipt_gated,
                 attempt=attempt + 1,
                 delay_seconds=self._barrier_delay_seconds(attempt + 1),
             )
@@ -2183,6 +2188,7 @@ class ResearchEngine:
                 stop,
                 expected_total,
                 expected_total=expected_total,
+                receipt_gated=receipt_gated,
             )
             return
         # Compatibility with the old fixed-shard publisher: non-final fixed
@@ -2192,6 +2198,7 @@ class ResearchEngine:
             self._publish_document_finalize_barrier(
                 job,
                 attempt=1,
+                receipts_verified=receipt_gated,
                 delay_seconds=self._barrier_delay_seconds(1),
             )
 
@@ -2389,12 +2396,7 @@ class ResearchEngine:
     def process_finalize_task(self, task: ResearchTask) -> ResearchSnapshot | None:
         self._validate_task(task, ResearchTaskStage.FINALIZE)
         payload = dict(task.payload)
-        attempt = self._validate_barrier_task(
-            task,
-            payload,
-            _DOCUMENT_FINALIZE_BARRIER,
-            "documents",
-        )
+        attempt, receipts_verified = self._validate_document_finalize_barrier(task, payload)
         # A lost queue ACK may redeliver the final barrier after the immutable
         # snapshot readiness marker was already written. Avoid re-reading every
         # large document outcome on that idempotent terminal path.
@@ -2402,7 +2404,10 @@ class ResearchEngine:
             return None
         manifest = self._required_document_manifest(task.research_id)
         job = self._required_job(task.research_id)
-        if not self._document_receipts_complete(job, manifest.items):
+        if not receipts_verified and not self._document_receipts_complete(
+            job,
+            manifest.items,
+        ):
             self._publish_document_finalize_barrier(
                 job,
                 attempt=attempt + 1,
@@ -2418,6 +2423,7 @@ class ResearchEngine:
             self._publish_document_finalize_barrier(
                 job,
                 attempt=attempt + 1,
+                receipts_verified=receipts_verified,
                 delay_seconds=self._barrier_delay_seconds(attempt + 1),
             )
             return None
@@ -3064,6 +3070,7 @@ class ResearchEngine:
                 0,
                 len(manifest.items),
                 expected_total=len(manifest.items),
+                receipt_gated=True,
             )
         else:
             self._publish_document_items(research_id, manifest.items)
@@ -3110,26 +3117,33 @@ class ResearchEngine:
         stop: int,
         expected_total: int,
         chain_next: bool,
+        receipt_gated: bool,
         attempt: int,
         delay_seconds: int = 0,
     ) -> None:
+        identity = (
+            f"{_DOCUMENT_WINDOW_BARRIER}:{start}:{stop}:"
+            f"{expected_total}:{int(chain_next)}:{attempt}"
+        )
+        if receipt_gated:
+            identity = f"{identity}:gated"
+        barrier_payload: tuple[tuple[str, str | int | bool], ...] = (
+            (_WORK_KIND, _DOCUMENT_WINDOW_BARRIER),
+            (_START, start),
+            (_STOP, stop),
+            (_EXPECTED_TOTAL, expected_total),
+            (_CHAIN_NEXT, chain_next),
+            (_ATTEMPT, attempt),
+        )
+        if receipt_gated:
+            barrier_payload = (*barrier_payload, (_RECEIPT_GATED, True))
         task = ResearchTask(
             research_id=job.id,
             stage=ResearchTaskStage.COLLECT_METADATA,
-            work_id=(
-                f"{_DOCUMENT_WINDOW_BARRIER}:{start}:{stop}:"
-                f"{expected_total}:{int(chain_next)}:{attempt}"
-            ),
+            work_id=identity,
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=(
-                (_WORK_KIND, _DOCUMENT_WINDOW_BARRIER),
-                (_START, start),
-                (_STOP, stop),
-                (_EXPECTED_TOTAL, expected_total),
-                (_CHAIN_NEXT, chain_next),
-                (_ATTEMPT, attempt),
-            ),
+            payload=barrier_payload,
         )
         self.queue.publish(
             task,
@@ -3183,18 +3197,25 @@ class ResearchEngine:
         job: ResearchJob,
         *,
         attempt: int,
+        receipts_verified: bool = False,
         delay_seconds: int = 0,
     ) -> None:
+        work_id = f"{_DOCUMENT_FINALIZE_BARRIER}:documents:{attempt}"
+        if receipts_verified:
+            work_id = f"{_DOCUMENT_FINALIZE_BARRIER}:documents:{attempt}:verified"
+        barrier_payload: tuple[tuple[str, str | int | bool], ...] = (
+            (_WORK_KIND, _DOCUMENT_FINALIZE_BARRIER),
+            (_ATTEMPT, attempt),
+        )
+        if receipts_verified:
+            barrier_payload = (*barrier_payload, (_RECEIPTS_VERIFIED, True))
         task = ResearchTask(
             research_id=job.id,
             stage=ResearchTaskStage.FINALIZE,
-            work_id=f"{_DOCUMENT_FINALIZE_BARRIER}:documents:{attempt}",
+            work_id=work_id,
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=(
-                (_WORK_KIND, _DOCUMENT_FINALIZE_BARRIER),
-                (_ATTEMPT, attempt),
-            ),
+            payload=barrier_payload,
         )
         self.queue.publish(
             task,
@@ -3236,6 +3257,7 @@ class ResearchEngine:
         stop: int,
         *,
         expected_total: int | None = None,
+        receipt_gated: bool = False,
         credential_capability: str | None = None,
         delay_seconds: int = 0,
     ) -> None:
@@ -3246,6 +3268,8 @@ class ResearchEngine:
         )
         if expected_total is not None:
             payload = (*payload, (_EXPECTED_TOTAL, expected_total))
+        if receipt_gated:
+            payload = (*payload, (_RECEIPT_GATED, True))
         task = ResearchTask(
             research_id=job.id,
             stage=ResearchTaskStage.COLLECT_METADATA,
@@ -3269,6 +3293,7 @@ class ResearchEngine:
         stop: int,
         *,
         expected_total: int | None = None,
+        receipt_gated: bool = False,
         credential_capability: str | None = None,
     ) -> None:
         if start >= stop:
@@ -3279,6 +3304,7 @@ class ResearchEngine:
             start,
             stop,
             expected_total=expected_total,
+            receipt_gated=receipt_gated,
             credential_capability=credential_capability,
             delay_seconds=self.fanout_delay_seconds,
         )
@@ -3399,16 +3425,18 @@ class ResearchEngine:
     def _validate_document_window_barrier(
         task: ResearchTask,
         payload: Mapping[str, Any],
-    ) -> tuple[int, int, int, bool, int]:
+    ) -> tuple[int, int, int, bool, bool, int]:
         start = int(payload.get(_START, -1))
         stop = int(payload.get(_STOP, -1))
         expected_total = int(payload.get(_EXPECTED_TOTAL, -1))
         chain_next = payload.get(_CHAIN_NEXT)
+        receipt_gated = payload.get(_RECEIPT_GATED, False)
         attempt = int(payload.get(_ATTEMPT, 0))
         if (
             payload.get(_WORK_KIND) != _DOCUMENT_WINDOW_BARRIER
             or not 0 <= start < stop <= expected_total
             or not isinstance(chain_next, bool)
+            or not isinstance(receipt_gated, bool)
             or not 1 <= attempt <= 1_000_000
         ):
             raise ValueError("document window barrier payload is invalid")
@@ -3416,11 +3444,33 @@ class ResearchEngine:
             f"{_DOCUMENT_WINDOW_BARRIER}:{start}:{stop}:"
             f"{expected_total}:{int(chain_next)}:{attempt}"
         )
+        if receipt_gated:
+            expected = f"{expected}:gated"
         if task.work_id != expected:
             raise ValueError("document window barrier task identity does not match")
         if chain_next and stop >= expected_total:
             raise ValueError("terminal document window cannot chain a successor")
-        return start, stop, expected_total, chain_next, attempt
+        return start, stop, expected_total, chain_next, receipt_gated, attempt
+
+    @staticmethod
+    def _validate_document_finalize_barrier(
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+    ) -> tuple[int, bool]:
+        attempt = int(payload.get(_ATTEMPT, 0))
+        receipts_verified = payload.get(_RECEIPTS_VERIFIED, False)
+        if (
+            payload.get(_WORK_KIND) != _DOCUMENT_FINALIZE_BARRIER
+            or not isinstance(receipts_verified, bool)
+            or not 1 <= attempt <= 1_000_000
+        ):
+            raise ValueError("document finalize barrier payload is invalid")
+        expected = f"{_DOCUMENT_FINALIZE_BARRIER}:documents:{attempt}"
+        if receipts_verified:
+            expected = f"{expected}:verified"
+        if task.work_id != expected:
+            raise ValueError("document finalize barrier task identity does not match")
+        return attempt, receipts_verified
 
     @staticmethod
     def _validate_page_fanout_task(

@@ -1636,6 +1636,7 @@ def test_hot_workers_and_document_fanout_never_read_global_manifests(
         (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in initial_fanouts
     ] == [(0, 10)]
     assert all(dict(task.payload)["expected_total"] == 10 for task in initial_fanouts)
+    assert all(dict(task.payload)["receipt_gated"] is True for task in initial_fanouts)
     assert not any(
         dict(task.payload).get("work_kind") == "document_finalize_barrier"
         for task in queue.tasks
@@ -1734,9 +1735,33 @@ def test_hot_workers_and_document_fanout_never_read_global_manifests(
     ]
     assert len(finalize_tasks) == 1
     assert dict(finalize_tasks[0].payload)["attempt"] == 1
+    assert dict(finalize_tasks[0].payload)["receipts_verified"] is True
+    assert finalize_tasks[0].work_id.endswith(":verified")
     assert len(worker.calls) == 10
     assert guarded_runs.deferred_manifest_reads == 0
     assert guarded_runs.document_manifest_reads == 0
+
+    original_task_completions_for = guarded_runs.task_completions_for
+
+    def forbidden_global_receipt_scan(
+        _tasks: tuple[ResearchTask, ...],
+    ) -> tuple[object, ...]:
+        raise AssertionError("receipt-gated finalization must not re-read every receipt")
+
+    guarded_runs.forbid_global_manifest_reads = False
+    monkeypatch.setattr(
+        guarded_runs,
+        "task_completions_for",
+        forbidden_global_receipt_scan,
+    )
+    value.process_finalize_task(finalize_tasks[0])
+    assert guarded_runs.get_snapshot_summary(finalize_tasks[0].research_id) is not None
+    monkeypatch.setattr(
+        guarded_runs,
+        "task_completions_for",
+        original_task_completions_for,
+    )
+    guarded_runs.forbid_global_manifest_reads = True
 
     seed = initial_fanouts[0]
     legacy = ResearchTask(

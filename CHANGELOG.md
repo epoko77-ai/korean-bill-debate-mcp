@@ -53,9 +53,13 @@
   discovery, follow-up pages, bill status, and document discovery. Hydrate official documents in
   receipt-gated sixteen-item windows: the next window opens only after every compact task receipt in
   the current window is terminal, and the finalizer starts only after the last window.
-- Stop polling every full-text document outcome while hydration is incomplete. Finalization checks
-  compact receipts first, reads the large outcomes once, returns immediately after an already-built
-  snapshot, and avoids redundant raw-Blob rewrites on parsed-document cache hits.
+- Stop polling every full-text document outcome while hydration is incomplete. Receipt-gated chains
+  carry their verified boundary into finalization instead of re-reading the full receipt set, then
+  read the large outcomes once, return immediately after an already-built snapshot, and avoid
+  redundant raw-Blob rewrites on parsed-document cache hits.
+- Publish new immutable Vercel Blob result shards with one atomic put-if-absent request. Duplicate,
+  conflicting, and ambiguous committed writes still read back and verify the exact bytes, while a
+  first-pass broad snapshot no longer pays a preliminary GET for every index and text shard.
 - Include a validated research ID and a bounded, credential-free last-progress snapshot in failed
   production-matrix results so a stalled live job can be traced without exposing its user API key.
 - Raise the production Queue ceiling from 8 to 64 in-flight messages and use sixteen-item hosted
