@@ -56,6 +56,9 @@
   period rather than remaining locked for ten minutes.
 - Include a validated research ID and a bounded, credential-free last-progress snapshot in failed
   production-matrix results so a stalled live job can be traced without exposing its user API key.
+- Raise the production Queue ceiling from 8 to 32 in-flight messages and use sixteen-item hosted
+  fan-out shards. This preserves bounded official-source work while preventing one broad research
+  run from delaying another user's seven-part exact-bill first map behind a single global slot wave.
 
 ### Known limitations
 
