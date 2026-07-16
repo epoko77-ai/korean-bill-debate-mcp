@@ -1302,6 +1302,13 @@ class ArtifactResearchRunStore:
         gateway = self.get_gateway(task.research_id)
         if gateway is None:
             return None
+        return self._get_task_completion(task, gateway)
+
+    def _get_task_completion(
+        self,
+        task: ResearchTask,
+        gateway: GatewayPlanState,
+    ) -> TaskCompletionReceipt | None:
         record = self._get_fixed_record(
             task.research_id,
             ArtifactKind.MANIFEST,
@@ -1320,6 +1327,31 @@ class ArtifactResearchRunStore:
             raise ResearchRunStorageError("task completion identity is invalid")
         self._validate_task_receipt_binding(gateway, task, receipt)
         return receipt
+
+    def task_completions_for(
+        self,
+        tasks: Sequence[ResearchTask],
+    ) -> tuple[TaskCompletionReceipt, ...]:
+        """Read compact planned receipts with bounded parallel artifact I/O."""
+
+        planned = tuple(tasks)
+        identities = tuple(task.idempotency_key for task in planned)
+        if len(identities) != len(set(identities)):
+            raise ValueError("task completion identities must be unique")
+        if not planned:
+            return ()
+        research_id = planned[0].research_id
+        if any(task.research_id != research_id for task in planned):
+            raise ValueError("task completions must belong to one research run")
+        gateway = self.get_gateway(research_id)
+        if gateway is None:
+            return ()
+        values = self._bounded_map(
+            lambda task: self._get_task_completion(task, gateway),
+            planned,
+            "kbd-task-receipt-read",
+        )
+        return tuple(value for value in values if value is not None)
 
     def put_document_outcome(self, research_id: str, outcome: DocumentOutcome) -> DocumentOutcome:
         gateway = self._require_active(research_id)

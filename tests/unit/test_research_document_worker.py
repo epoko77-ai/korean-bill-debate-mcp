@@ -161,6 +161,7 @@ def test_preserves_raw_before_parsing_and_keeps_200k_text_untruncated(
 
 def test_same_source_hash_and_parser_version_is_an_idempotent_cache_hit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     content = b"%PDF-1.4 cached"
     opener_calls = 0
@@ -177,6 +178,15 @@ def test_same_source_hash_and_parser_version_is_an_idempotent_cache_hit(
         return ("전체 원문",)
 
     document_worker = worker(tmp_path, opener=opener, page_extractor=extractor)
+    put_raw_calls = 0
+    original_put_raw = document_worker.store.put_raw
+
+    def counted_put_raw(raw: Any) -> Any:
+        nonlocal put_raw_calls
+        put_raw_calls += 1
+        return original_put_raw(raw)
+
+    monkeypatch.setattr(document_worker.store, "put_raw", counted_put_raw)
 
     first = document_worker.process(OfficialDocumentKind.MINUTES, MINUTES_URL)
     second = document_worker.process(OfficialDocumentKind.MINUTES, MINUTES_URL)
@@ -191,6 +201,9 @@ def test_same_source_hash_and_parser_version_is_an_idempotent_cache_hit(
     assert first.text_hash == second.text_hash == refreshed.text_hash
     assert opener_calls == 2
     assert parser_calls == 1
+    # The URL-cache hit is already immutable and validated. Only the first and
+    # explicit refresh downloads need a raw-store write.
+    assert put_raw_calls == 2
 
 
 def test_kind_specific_official_hosts_are_enforced_before_network(tmp_path: Path) -> None:

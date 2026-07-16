@@ -370,6 +370,7 @@ class _DrainingBackend(DurableResearchBackend):
                 self.engine.process_finalize_task(task)
             else:  # pragma: no cover - enum exhaustiveness guard
                 raise AssertionError(f"unexpected task stage: {task.stage}")
+            self.engine.complete_task(task)
             processed += 1
             if max_tasks is not None and processed >= max_tasks:
                 return

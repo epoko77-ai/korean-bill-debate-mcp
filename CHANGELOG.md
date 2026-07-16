@@ -49,16 +49,20 @@
   ambiguous delivery backoff from ten minutes to 30 seconds. Redeliveries check the durable
   task-completion receipt before repeating work; normal and terminal retries are now capped at 60
   seconds instead of creating multi-minute blind spots.
-- Replace serial broad-search fan-out chains with independent bounded coordinator shards for
-  discovery, follow-up pages, bill status, document discovery, and document hydration. Coordinators
-  from an older deployment publish their continuation before their children, phase barriers recheck
-  within ten seconds, and a crashed 300-second finalizer becomes reclaimable after a 30-second grace
-  period rather than remaining locked for ten minutes.
+- Replace serial broad-search metadata chains with independent bounded coordinator shards for
+  discovery, follow-up pages, bill status, and document discovery. Hydrate official documents in
+  receipt-gated sixteen-item windows: the next window opens only after every compact task receipt in
+  the current window is terminal, and the finalizer starts only after the last window.
+- Stop polling every full-text document outcome while hydration is incomplete. Finalization checks
+  compact receipts first, reads the large outcomes once, returns immediately after an already-built
+  snapshot, and avoids redundant raw-Blob rewrites on parsed-document cache hits.
 - Include a validated research ID and a bounded, credential-free last-progress snapshot in failed
   production-matrix results so a stalled live job can be traced without exposing its user API key.
 - Raise the production Queue ceiling from 8 to 64 in-flight messages and use sixteen-item hosted
   fan-out shards. This preserves bounded official-source work while preventing one broad research
   run from delaying another user's seven-part exact-bill first map behind a single global slot wave.
+- Update the Claude.ai and ChatGPT web-connection guides to the current official plan availability,
+  menu paths, OAuth approval flow, per-chat activation step, and public `/mcp` endpoint.
 
 ### Known limitations
 

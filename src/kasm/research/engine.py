@@ -72,6 +72,7 @@ _BILL_DOCUMENTS = "bill_documents"
 _DISCOVERY_FANOUT = "discovery_fanout"
 _DEFERRED_FANOUT = "deferred_fanout"
 _DOCUMENT_FANOUT = "document_fanout"
+_DOCUMENT_WINDOW_BARRIER = "document_window_barrier"
 _PAGE_FANOUT = "page_fanout"
 _PHASE_BARRIER = "phase_barrier"
 _DOCUMENT_FINALIZE_BARRIER = "document_finalize_barrier"
@@ -85,6 +86,7 @@ _DOCUMENT_KIND = "document_kind"
 _OFFICIAL_URL = "official_url"
 _START = "start"
 _STOP = "stop"
+_CHAIN_NEXT = "chain_next"
 
 ROUTING_SHARD_SIZE: Final = 4
 
@@ -1080,6 +1082,11 @@ class ResearchRunStore(Protocol):
 
     def get_task_completion(self, task: ResearchTask) -> TaskCompletionReceipt | None: ...
 
+    def task_completions_for(
+        self,
+        tasks: Sequence[ResearchTask],
+    ) -> tuple[TaskCompletionReceipt, ...]: ...
+
     def put_document_outcome(
         self, research_id: str, outcome: DocumentOutcome
     ) -> DocumentOutcome: ...
@@ -1491,6 +1498,16 @@ class InMemoryResearchRunStore:
             if receipt is not None and receipt != TaskCompletionReceipt.from_task(task):
                 raise ValueError("task completion binding is invalid")
             return receipt
+
+    def task_completions_for(
+        self,
+        tasks: Sequence[ResearchTask],
+    ) -> tuple[TaskCompletionReceipt, ...]:
+        return tuple(
+            receipt
+            for task in tasks
+            if (receipt := self.get_task_completion(task)) is not None
+        )
 
     def put_document_outcome(self, research_id: str, outcome: DocumentOutcome) -> DocumentOutcome:
         key = (research_id, outcome.work_id)
@@ -2023,6 +2040,9 @@ class ResearchEngine:
         if work_kind == _DOCUMENT_FANOUT:
             self._process_document_fanout(task, payload)
             return None
+        if work_kind == _DOCUMENT_WINDOW_BARRIER:
+            self._process_document_window_barrier(task, payload)
+            return None
         if work_kind == _PAGE_FANOUT:
             self._process_page_fanout(task, payload)
             return None
@@ -2110,17 +2130,70 @@ class ResearchEngine:
         )
         if len(items) != window_stop - start:
             raise LookupError("document fan-out routing window is unavailable")
-        self._chain_fanout(
-            self._required_job(task.research_id),
-            _DOCUMENT_FANOUT,
-            window_stop,
-            stop,
-            expected_total=expected_total,
-        )
+        # Publish one bounded hydration window, then wait for compact task
+        # completion receipts before opening the next window. A write failure
+        # here leaves no barrier, so redelivery safely resumes this idempotent
+        # coordinator without advancing the phase.
         self._publish_document_items(
             task.research_id,
             items,
         )
+        self._publish_document_window_barrier(
+            self._required_job(task.research_id),
+            start=start,
+            stop=window_stop,
+            expected_total=expected_total,
+            chain_next=stop == expected_total and window_stop < stop,
+            attempt=1,
+            delay_seconds=self._barrier_delay_seconds(1),
+        )
+
+    def _process_document_window_barrier(
+        self,
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+    ) -> None:
+        start, stop, expected_total, chain_next, attempt = (
+            self._validate_document_window_barrier(task, payload)
+        )
+        items = self.runs.document_routes_for(
+            task.research_id,
+            start,
+            stop,
+            expected_total=expected_total,
+        )
+        if len(items) != stop - start:
+            raise LookupError("document window routing range is unavailable")
+        job = self._required_job(task.research_id)
+        if not self._document_receipts_complete(job, items):
+            self._publish_document_window_barrier(
+                job,
+                start=start,
+                stop=stop,
+                expected_total=expected_total,
+                chain_next=chain_next,
+                attempt=attempt + 1,
+                delay_seconds=self._barrier_delay_seconds(attempt + 1),
+            )
+            return
+        if chain_next:
+            self._publish_fanout(
+                job,
+                _DOCUMENT_FANOUT,
+                stop,
+                expected_total,
+                expected_total=expected_total,
+            )
+            return
+        # Compatibility with the old fixed-shard publisher: non-final fixed
+        # windows simply finish because their sibling shards were already
+        # queued. Its final shard opens the receipt-gated finalization phase.
+        if stop == expected_total:
+            self._publish_document_finalize_barrier(
+                job,
+                attempt=1,
+                delay_seconds=self._barrier_delay_seconds(1),
+            )
 
     def _process_page_fanout(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
         phase = MetadataPhase(str(payload.get(_PHASE) or ""))
@@ -2322,12 +2395,28 @@ class ResearchEngine:
             _DOCUMENT_FINALIZE_BARRIER,
             "documents",
         )
+        # A lost queue ACK may redeliver the final barrier after the immutable
+        # snapshot readiness marker was already written. Avoid re-reading every
+        # large document outcome on that idempotent terminal path.
+        if self.runs.get_snapshot_summary(task.research_id) is not None:
+            return None
         manifest = self._required_document_manifest(task.research_id)
+        job = self._required_job(task.research_id)
+        if not self._document_receipts_complete(job, manifest.items):
+            self._publish_document_finalize_barrier(
+                job,
+                attempt=attempt + 1,
+                delay_seconds=self._barrier_delay_seconds(attempt + 1),
+            )
+            return None
         required_ids = tuple(item.work_id for item in manifest.items)
+        # Full outcomes can contain hundreds of thousands of official-text
+        # characters. Read them only once all compact task receipts prove every
+        # hydration worker has reached its durable terminal boundary.
         outcomes = self.runs.document_outcomes_for(task.research_id, required_ids)
         if len(outcomes) != len(required_ids):
             self._publish_document_finalize_barrier(
-                self._required_job(task.research_id),
+                job,
                 attempt=attempt + 1,
                 delay_seconds=self._barrier_delay_seconds(attempt + 1),
             )
@@ -2966,31 +3055,87 @@ class ResearchEngine:
     def _publish_document_manifest(self, research_id: str, manifest: DocumentWorkManifest) -> None:
         job = self._required_job(research_id)
         if len(manifest.items) > self.direct_fanout_limit:
-            self._publish_fanout_shards(job, _DOCUMENT_FANOUT, len(manifest.items))
+            # One resumable coordinator opens at most one bounded hydration
+            # window at a time. Each processed window chains its successor, and
+            # the last window alone publishes the finalize barrier.
+            self._publish_fanout(
+                job,
+                _DOCUMENT_FANOUT,
+                0,
+                len(manifest.items),
+                expected_total=len(manifest.items),
+            )
         else:
             self._publish_document_items(research_id, manifest.items)
-        self._publish_document_finalize_barrier(
-            job,
-            attempt=1,
-            delay_seconds=self._barrier_delay_seconds(1),
-        )
+            self._publish_document_finalize_barrier(
+                job,
+                attempt=1,
+                delay_seconds=self._barrier_delay_seconds(1),
+            )
 
     def _publish_document_items(self, research_id: str, items: Sequence[DocumentWorkItem]) -> None:
         job = self._required_job(research_id)
         for item in items:
-            task = ResearchTask(
-                research_id=research_id,
-                stage=ResearchTaskStage.HYDRATE_DOCUMENT,
-                work_id=item.work_id,
-                query_fingerprint=job.query_fingerprint,
-                index_revision=job.index_revision,
-                payload=(
-                    (_WORK_KIND, "document"),
-                    (_DOCUMENT_KIND, item.kind.value),
-                    (_OFFICIAL_URL, item.official_url),
-                ),
-            )
+            task = self._document_task(job, item)
             self.queue.publish(task, retention_seconds=self.task_retention_seconds)
+
+    @staticmethod
+    def _document_task(job: ResearchJob, item: DocumentWorkItem) -> ResearchTask:
+        return ResearchTask(
+            research_id=job.id,
+            stage=ResearchTaskStage.HYDRATE_DOCUMENT,
+            work_id=item.work_id,
+            query_fingerprint=job.query_fingerprint,
+            index_revision=job.index_revision,
+            payload=(
+                (_WORK_KIND, "document"),
+                (_DOCUMENT_KIND, item.kind.value),
+                (_OFFICIAL_URL, item.official_url),
+            ),
+        )
+
+    def _document_receipts_complete(
+        self,
+        job: ResearchJob,
+        items: Sequence[DocumentWorkItem],
+    ) -> bool:
+        tasks = tuple(self._document_task(job, item) for item in items)
+        return len(self.runs.task_completions_for(tasks)) == len(tasks)
+
+    def _publish_document_window_barrier(
+        self,
+        job: ResearchJob,
+        *,
+        start: int,
+        stop: int,
+        expected_total: int,
+        chain_next: bool,
+        attempt: int,
+        delay_seconds: int = 0,
+    ) -> None:
+        task = ResearchTask(
+            research_id=job.id,
+            stage=ResearchTaskStage.COLLECT_METADATA,
+            work_id=(
+                f"{_DOCUMENT_WINDOW_BARRIER}:{start}:{stop}:"
+                f"{expected_total}:{int(chain_next)}:{attempt}"
+            ),
+            query_fingerprint=job.query_fingerprint,
+            index_revision=job.index_revision,
+            payload=(
+                (_WORK_KIND, _DOCUMENT_WINDOW_BARRIER),
+                (_START, start),
+                (_STOP, stop),
+                (_EXPECTED_TOTAL, expected_total),
+                (_CHAIN_NEXT, chain_next),
+                (_ATTEMPT, attempt),
+            ),
+        )
+        self.queue.publish(
+            task,
+            retention_seconds=self.task_retention_seconds,
+            delay_seconds=delay_seconds,
+        )
 
     def _publish_bill_document(self, job: ResearchJob, bill_number: str) -> None:
         if not re.fullmatch(r"\d{7}", bill_number):
@@ -3249,6 +3394,33 @@ class ResearchEngine:
         if task.work_id != f"{work_kind}:{scope}:{attempt}":
             raise ValueError("research barrier task identity does not match")
         return attempt
+
+    @staticmethod
+    def _validate_document_window_barrier(
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+    ) -> tuple[int, int, int, bool, int]:
+        start = int(payload.get(_START, -1))
+        stop = int(payload.get(_STOP, -1))
+        expected_total = int(payload.get(_EXPECTED_TOTAL, -1))
+        chain_next = payload.get(_CHAIN_NEXT)
+        attempt = int(payload.get(_ATTEMPT, 0))
+        if (
+            payload.get(_WORK_KIND) != _DOCUMENT_WINDOW_BARRIER
+            or not 0 <= start < stop <= expected_total
+            or not isinstance(chain_next, bool)
+            or not 1 <= attempt <= 1_000_000
+        ):
+            raise ValueError("document window barrier payload is invalid")
+        expected = (
+            f"{_DOCUMENT_WINDOW_BARRIER}:{start}:{stop}:"
+            f"{expected_total}:{int(chain_next)}:{attempt}"
+        )
+        if task.work_id != expected:
+            raise ValueError("document window barrier task identity does not match")
+        if chain_next and stop >= expected_total:
+            raise ValueError("terminal document window cannot chain a successor")
+        return start, stop, expected_total, chain_next, attempt
 
     @staticmethod
     def _validate_page_fanout_task(

@@ -190,6 +190,7 @@ class OfficialDocumentWorker:
 
         _validate_kind_url(kind, official_url)
         raw = None if refresh else self.store.latest_raw_for_url(official_url)
+        downloaded = raw is None
         if raw is None:
             raw = self._download(kind, official_url)
         elif raw.kind is not kind:
@@ -197,10 +198,11 @@ class OfficialDocumentWorker:
                 "cached official document kind does not match the requested kind",
                 code="cached_kind_mismatch",
             )
-        # Even a freshly downloaded PDF is preserved before cache lookup and
-        # parsing.  Thus a damaged but authentic PDF remains available for
-        # parser improvements and forensic inspection.
-        self.store.put_raw(raw)
+        if downloaded:
+            # A freshly downloaded PDF is preserved before cache lookup and
+            # parsing. A URL-cache hit already passed this immutable store's
+            # validation, so re-putting it only repeats Blob reads and hashes.
+            self.store.put_raw(raw)
         cached = self.store.get_parsed(raw.source_hash, self.parser_version)
         if cached is not None:
             if cached.kind is not kind or cached.official_url != official_url:

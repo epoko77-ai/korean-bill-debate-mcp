@@ -1906,6 +1906,18 @@ def test_task_completion_receipts_are_fixed_bound_and_outside_job_history(
     rotated = replace(task, credential_capability="h" * 80)
     assert store.get_task_completion(rotated) == receipt
     assert receipt == type(receipt).from_task(rotated)
+    artifacts.reset_counts()
+    missing = replace(task, work_id="page:missing")
+    assert store.task_completions_for((rotated, missing)) == (receipt,)
+    assert artifacts.list_calls == 0
+    assert artifacts.logical_reads.count("run/gateway") == 1
+    assert sorted(artifacts.logical_reads) == sorted(
+        (
+            "run/gateway",
+            f"run/task-completion/{rotated.idempotency_key}",
+            f"run/task-completion/{missing.idempotency_key}",
+        )
+    )
     stored_bytes = b"\n".join(path.read_bytes() for path in tmp_path.rglob("*.json"))
     assert ("g" * 80).encode() not in stored_bytes
     assert b"credential_capability" not in stored_bytes

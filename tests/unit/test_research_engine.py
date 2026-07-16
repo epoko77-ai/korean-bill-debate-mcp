@@ -617,6 +617,12 @@ def process_finalize_barrier(
     )
 
 
+def process_document(value: ResearchEngine, task: ResearchTask) -> DocumentOutcome:
+    outcome = value.process_document_task(task)
+    value.complete_task(task)
+    return outcome
+
+
 def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
     value, queue, client, _jobs, _runs, _finalizer = engine(exact_responder)
 
@@ -807,7 +813,7 @@ def test_exact_fast_path_produces_overview_and_terminal_result_with_bounded_work
     process_phase_barrier(value, queue, "bill_status")
     for task in tuple(queue.tasks):
         if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT:
-            value.process_document_task(task)
+            process_document(value, task)
     process_finalize_barrier(value, queue)
 
     snapshot = runs.get_snapshot(receipt.research_id)
@@ -1559,8 +1565,8 @@ def test_exact_status_document_pipeline_completes_and_is_idempotent(
         task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
     )
 
-    outcome = value.process_document_task(document_task)
-    repeated = value.process_document_task(document_task)
+    outcome = process_document(value, document_task)
+    repeated = process_document(value, document_task)
     process_finalize_barrier(value, queue)
 
     assert outcome.status is DocumentOutcomeStatus.SUCCEEDED
@@ -1628,31 +1634,106 @@ def test_hot_workers_and_document_fanout_never_read_global_manifests(
     ]
     assert [
         (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in initial_fanouts
-    ] == [(0, 8), (8, 10)]
+    ] == [(0, 10)]
     assert all(dict(task.payload)["expected_total"] == 10 for task in initial_fanouts)
+    assert not any(
+        dict(task.payload).get("work_kind") == "document_finalize_barrier"
+        for task in queue.tasks
+    )
 
-    processed_fanouts: set[str] = set()
-    while True:
-        pending = next(
-            (
-                task
-                for task in queue.tasks
-                if dict(task.payload).get("work_kind") == "document_fanout"
-                and task.idempotency_key not in processed_fanouts
-            ),
-            None,
+    original_publish = queue.publish
+    hydration_attempts = 0
+
+    def fail_during_first_window(
+        task: ResearchTask,
+        *,
+        retention_seconds: int = 86_400,
+        delay_seconds: int = 0,
+    ) -> str:
+        nonlocal hydration_attempts
+        if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT:
+            hydration_attempts += 1
+            if hydration_attempts == 2:
+                raise RuntimeError("injected document queue failure")
+        return original_publish(
+            task,
+            retention_seconds=retention_seconds,
+            delay_seconds=delay_seconds,
         )
-        if pending is None:
-            break
-        value.process_metadata_task(pending)
-        processed_fanouts.add(pending.idempotency_key)
 
+    monkeypatch.setattr(queue, "publish", fail_during_first_window)
+    with pytest.raises(RuntimeError, match="injected document queue failure"):
+        value.process_metadata_task(initial_fanouts[0])
+    assert sum(task.stage is ResearchTaskStage.HYDRATE_DOCUMENT for task in queue.tasks) == 1
+    assert initial_fanouts == [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "document_fanout"
+    ]
+    assert not any(
+        dict(task.payload).get("work_kind") == "document_finalize_barrier"
+        for task in queue.tasks
+    )
+    monkeypatch.setattr(queue, "publish", original_publish)
+
+    value.process_metadata_task(initial_fanouts[0])
+    first_window = [
+        task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
+    ]
+    assert len(first_window) == value.fanout_chunk_size
+    first_barrier = task_with(
+        queue,
+        work_kind="document_window_barrier",
+        start=0,
+        stop=value.fanout_chunk_size,
+        attempt=1,
+    )
+    value.process_metadata_task(first_barrier)
+    assert not any(
+        dict(task.payload).get("work_kind") == "document_fanout"
+        and dict(task.payload).get("start") == value.fanout_chunk_size
+        for task in queue.tasks
+    )
+
+    for task in first_window:
+        assert process_document(value, task).status is DocumentOutcomeStatus.SUCCEEDED
+    value.process_metadata_task(
+        task_with(
+            queue,
+            work_kind="document_window_barrier",
+            start=0,
+            stop=value.fanout_chunk_size,
+            attempt=2,
+        )
+    )
+    second_fanout = task_with(
+        queue,
+        work_kind="document_fanout",
+        start=value.fanout_chunk_size,
+        stop=10,
+    )
+    value.process_metadata_task(second_fanout)
     document_tasks = [
         task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
     ]
     assert len(document_tasks) == 10
-    for task in document_tasks:
-        assert value.process_document_task(task).status is DocumentOutcomeStatus.SUCCEEDED
+    second_window = document_tasks[value.fanout_chunk_size :]
+    for task in second_window:
+        assert process_document(value, task).status is DocumentOutcomeStatus.SUCCEEDED
+    value.process_metadata_task(
+        task_with(
+            queue,
+            work_kind="document_window_barrier",
+            start=value.fanout_chunk_size,
+            stop=10,
+            attempt=1,
+        )
+    )
+    finalize_tasks = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "document_finalize_barrier"
+    ]
+    assert len(finalize_tasks) == 1
+    assert dict(finalize_tasks[0].payload)["attempt"] == 1
     assert len(worker.calls) == 10
     assert guarded_runs.deferred_manifest_reads == 0
     assert guarded_runs.document_manifest_reads == 0
@@ -1674,13 +1755,43 @@ def test_hot_workers_and_document_fanout_never_read_global_manifests(
 
     value.process_metadata_task(legacy)
 
-    assert dict(attempts[0].payload) == {
-        "work_kind": "document_fanout",
+    assert all(
+        task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
+        for task in attempts[: value.fanout_chunk_size]
+    )
+    assert dict(attempts[-1].payload) == {
+        "attempt": 1,
+        "chain_next": True,
         "expected_total": 10,
-        "start": value.fanout_chunk_size,
-        "stop": 10,
+        "start": 0,
+        "stop": value.fanout_chunk_size,
+        "work_kind": "document_window_barrier",
     }
-    assert all(task.stage is ResearchTaskStage.HYDRATE_DOCUMENT for task in attempts[1:])
+
+    # A coordinator published by the previous fixed-shard deployment remains
+    # valid, but its completed non-final shard must not duplicate the already
+    # published sibling windows.
+    attempts.clear()
+    fixed = ResearchTask(
+        research_id=seed.research_id,
+        stage=seed.stage,
+        work_id=f"document_fanout:0:{value.fanout_chunk_size}",
+        query_fingerprint=seed.query_fingerprint,
+        index_revision=seed.index_revision,
+        payload=(
+            ("work_kind", "document_fanout"),
+            ("expected_total", 10),
+            ("start", 0),
+            ("stop", value.fanout_chunk_size),
+        ),
+    )
+    value.process_metadata_task(fixed)
+    assert dict(attempts[-1].payload)["work_kind"] == "document_window_barrier"
+    assert dict(attempts[-1].payload)["chain_next"] is False
+    fixed_barrier = attempts[-1]
+    attempts.clear()
+    value.process_metadata_task(fixed_barrier)
+    assert attempts == []
 
 
 def test_bill_document_task_uses_single_identity_lookup_not_sibling_scan(
@@ -1753,7 +1864,7 @@ def test_document_tasks_and_finalize_barrier_use_exact_terminal_lookups(
     monkeypatch.setattr(runs, "document_outcomes_for", counted_document_outcomes_for)
 
     process_finalize_barrier(value, queue, attempt=1)
-    assert outcome_reads == [(document_task.work_id,)]
+    assert outcome_reads == []
     current = jobs.get(receipt.research_id)
     assert current is not None
     assert current.stage == "documents"
@@ -1766,19 +1877,24 @@ def test_document_tasks_and_finalize_barrier_use_exact_terminal_lookups(
     assert retry.work_id == "document_finalize_barrier:documents:2"
     assert queue.delays[retry.idempotency_key] == value._barrier_delay_seconds(2)
 
-    first = value.process_document_task(document_task)
-    repeated = value.process_document_task(document_task)
+    first = process_document(value, document_task)
+    repeated = process_document(value, document_task)
 
     assert first == repeated
     assert len(worker.calls) == 1
-    assert outcome_reads == [(document_task.work_id,)]
+    assert outcome_reads == []
     current = jobs.get(receipt.research_id)
     assert current is not None
     assert current.stage == "documents"
     assert current.progress == 0.4
     process_finalize_barrier(value, queue, attempt=2)
-    assert outcome_reads == [(document_task.work_id,), (document_task.work_id,)]
+    assert outcome_reads == [(document_task.work_id,)]
     assert runs.get_snapshot(receipt.research_id) is not None
+
+    # If the final barrier's queue ACK is lost after the snapshot marker was
+    # written, redelivery must not read the large document outcomes again.
+    process_finalize_barrier(value, queue, attempt=2)
+    assert outcome_reads == [(document_task.work_id,)]
 
 
 def test_cross_term_date_scope_collects_every_term_without_a_false_gap() -> None:
@@ -1952,12 +2068,12 @@ def test_transient_document_failure_is_not_acked_and_redelivery_can_finalize() -
     )
 
     with pytest.raises(TransientDocumentError, match="temporary upstream timeout"):
-        value.process_document_task(document_task)
+        process_document(value, document_task)
 
     first = runs.document_outcomes(receipt.research_id)[0]
     assert first.status is DocumentOutcomeStatus.RETRYABLE_FAILURE
     assert runs.get_snapshot(receipt.research_id) is None
-    outcome = value.process_document_task(document_task)
+    outcome = process_document(value, document_task)
     process_finalize_barrier(value, queue)
 
     assert outcome.status is DocumentOutcomeStatus.SUCCEEDED
