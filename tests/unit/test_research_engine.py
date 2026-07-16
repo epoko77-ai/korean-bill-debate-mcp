@@ -499,6 +499,7 @@ def engine(
     bill_documents: BillDocuments | None = None,
     document_worker: Worker | None = None,
     run_store: InMemoryResearchRunStore | None = None,
+    fanout_chunk_size: int = 8,
 ) -> tuple[
     ResearchEngine,
     Queue,
@@ -530,6 +531,7 @@ def engine(
         document_worker=document_worker or Worker(),
         finalizer=finalizer,
         runs=runs,
+        fanout_chunk_size=fanout_chunk_size,
     )
     return value, queue, client, jobs, runs, finalizer
 
@@ -918,8 +920,22 @@ def test_concurrent_duplicate_barriers_allow_only_one_full_assembly(
     )
 
 
-def test_broad_gateway_publishes_independent_bounded_coordinator_shards() -> None:
-    value, queue, client, _jobs, _runs, _finalizer = engine(exact_responder)
+def test_broad_gateway_opens_one_fixed_coordinator_wave_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def empty_responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        _parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        return page(dataset, number, page_size, 0, [])
+
+    value, queue, client, _jobs, _runs, _finalizer = engine(
+        empty_responder,
+        fanout_chunk_size=16,
+    )
 
     receipt = value.gateway(
         "2025년부터 현재까지 AI 입법",
@@ -932,27 +948,91 @@ def test_broad_gateway_publishes_independent_bounded_coordinator_shards() -> Non
     coordinators = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
     ]
-    expected_coordinators = (
-        receipt.metadata_task_count + value.fanout_chunk_size - 1
-    ) // value.fanout_chunk_size
-    assert len(coordinators) == expected_coordinators
-    assert [(dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators] == [
-        (start, min(receipt.metadata_task_count, start + value.fanout_chunk_size))
-        for start in range(0, receipt.metadata_task_count, value.fanout_chunk_size)
-    ]
+    assert len(coordinators) == 1
+    first = coordinators[0]
+    assert dict(first.payload) == {
+        "work_kind": "discovery_fanout",
+        "expected_total": receipt.metadata_task_count,
+        "start": 0,
+        "stop": 16,
+    }
+
+    fixed_attempts = record_queue_publications(monkeypatch, queue)
+    value.process_metadata_task(first)
+    assert fixed_attempts
     assert all(
-        dict(task.payload)["expected_total"] == receipt.metadata_task_count for task in coordinators
+        dict(task.payload).get("work_kind") == "metadata_page" for task in fixed_attempts
     )
-    for coordinator in coordinators:
-        value.process_metadata_task(coordinator)
-    children = [
-        task for task in queue.tasks if dict(task.payload).get("work_kind") == "metadata_page"
+    first_children = [
+        task
+        for task in queue.tasks
+        if task.research_id == receipt.research_id
+        and dict(task.payload).get("work_kind") == "metadata_page"
     ]
-    assert len(children) == receipt.metadata_task_count
+    assert len(first_children) == 16
+
+    barrier = task_with(
+        queue,
+        work_kind="metadata_window_barrier",
+        phase="discovery",
+        attempt=1,
+    )
+    value.process_metadata_task(barrier)
     assert [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
-    ] == coordinators
-    assert client.calls == []
+    ] == [first]
+
+    for child in first_children:
+        value.process_metadata_task(child)
+    completed_first_barrier = task_with(
+        queue,
+        work_kind="metadata_window_barrier",
+        phase="discovery",
+        attempt=2,
+    )
+    value.process_metadata_task(completed_first_barrier)
+    coordinators = [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
+    ]
+    assert [
+        (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators
+    ] == [(0, 16), (16, 32)]
+    assert all(
+        dict(task.payload)["expected_total"] == receipt.metadata_task_count
+        for task in coordinators
+    )
+    unique_publications = len(queue.tasks)
+    value.process_metadata_task(completed_first_barrier)
+    assert len(queue.tasks) == unique_publications
+    assert [
+        (dict(task.payload)["start"], dict(task.payload)["stop"])
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "discovery_fanout"
+    ] == [(0, 16), (16, 32)]
+
+    second = coordinators[1]
+    second_barrier = task_with(
+        queue,
+        work_kind="metadata_window_barrier",
+        phase="discovery",
+        start=16,
+        stop=32,
+        attempt=1,
+    )
+    assert queue.delays[second_barrier.idempotency_key] == value._barrier_delay_seconds(1)
+    publications_before = len(queue.tasks)
+    value.process_metadata_task(second)
+    publications_after_first_delivery = len(queue.tasks)
+    value.process_metadata_task(second)
+    assert publications_after_first_delivery - publications_before == 16
+    assert len(queue.tasks) == publications_after_first_delivery
+    assert not [
+        task
+        for task in fixed_attempts
+        if dict(task.payload).get("work_kind") == "discovery_fanout"
+        and dict(task.payload).get("start") == 32
+    ]
+    assert len(client.calls) == 16
 
 
 def test_legacy_wide_discovery_coordinator_chains_before_children(
@@ -1183,7 +1263,7 @@ def test_one_worker_fetches_only_one_page_then_fans_out_every_remaining_page() -
     assert all(dict(task.payload)["expected_total"] == 237 for task in follow_ups)
 
 
-def test_large_page_expansion_uses_independent_shards_without_prior_page_rescans(
+def test_large_page_expansion_opens_one_bounded_page_wave_at_a_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def responder(
@@ -1192,16 +1272,16 @@ def test_large_page_expansion_uses_independent_shards_without_prior_page_rescans
         page_size: int,
         _parameters: dict[str, str | int],
     ) -> ApiPage:
-        assert number == 1
+        start = (number - 1) * page_size
         rows = [
             {
-                "BILL_NO": f"{2210000 + index:07d}",
-                "BILL_NAME": f"인공지능 법안 {index}",
+                "BILL_NO": f"{2210000 + start + index:07d}",
+                "BILL_NAME": f"인공지능 법안 {start + index}",
                 "PROPOSE_DT": "2026-06-01",
             }
             for index in range(page_size)
         ]
-        return page(dataset, 1, page_size, 1_500, rows)
+        return page(dataset, number, page_size, 1_500, rows)
 
     value, queue, client, _jobs, runs, _finalizer = engine(
         responder,
@@ -1232,6 +1312,7 @@ def test_large_page_expansion_uses_independent_shards_without_prior_page_rescans
     ) -> ApiPage | None:
         raise AssertionError("page fan-out must read the small readiness marker")
 
+    original_get_page = runs.get_page
     monkeypatch.setattr(runs, "get_page", forbidden_raw_page_read)
 
     assert len(client.calls) == 1
@@ -1246,40 +1327,86 @@ def test_large_page_expansion_uses_independent_shards_without_prior_page_rescans
     ]
     assert [
         (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in initial_coordinators
-    ] == [(0, 8), (8, 14)]
-    processed: set[str] = set()
-    while True:
-        coordinator = next(
-            (
-                task
-                for task in queue.tasks
-                if dict(task.payload).get("work_kind") == "page_fanout"
-                and task.idempotency_key not in processed
-            ),
-            None,
-        )
-        if coordinator is None:
-            break
-        children_before = len(
-            [
-                task
-                for task in queue.tasks
-                if dict(task.payload).get("work_kind") == "metadata_page"
-                and dict(task.payload).get("page") != 1
-            ]
-        )
-        value.process_metadata_task(coordinator)
-        processed.add(coordinator.idempotency_key)
-        children_after = len(
-            [
-                task
-                for task in queue.tasks
-                if dict(task.payload).get("work_kind") == "metadata_page"
-                and dict(task.payload).get("page") != 1
-            ]
-        )
-        assert 1 <= children_after - children_before <= value.fanout_chunk_size
+    ] == [(0, 8)]
+    assert all(
+        dict(task.payload)["stop"] - dict(task.payload)["start"] <= value.fanout_chunk_size
+        for task in initial_coordinators
+    )
+    first = initial_coordinators[0]
+    value.process_metadata_task(first)
+    first_follow_ups = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "metadata_page"
+        and dict(task.payload).get("page") != 1
+    ]
+    assert [dict(task.payload)["page"] for task in first_follow_ups] == list(range(2, 10))
+    first_barrier = task_with(
+        queue,
+        work_kind="page_window_barrier",
+        phase="discovery",
+        start=0,
+        stop=8,
+        attempt=1,
+    )
+    original_readiness = runs.page_readiness_for
 
+    def tampered_first_readiness(
+        research_id: str,
+        phase: MetadataPhase,
+        partition_id: str,
+        page_numbers: tuple[int, ...],
+    ) -> tuple[engine_module.MetadataPageReadiness, ...]:
+        values = original_readiness(research_id, phase, partition_id, page_numbers)
+        if page_numbers == (1,):
+            return (replace(values[0], page=2),)
+        return values
+
+    monkeypatch.setattr(runs, "page_readiness_for", tampered_first_readiness)
+    with pytest.raises(ValueError, match="does not match its stored first page"):
+        value.process_metadata_task(first_barrier)
+    monkeypatch.setattr(runs, "page_readiness_for", original_readiness)
+    value.process_metadata_task(first_barrier)
+    assert [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "page_fanout"
+    ] == [first]
+
+    monkeypatch.setattr(runs, "get_page", original_get_page)
+    for task in first_follow_ups:
+        value.process_metadata_task(task)
+    value.process_metadata_task(
+        task_with(
+            queue,
+            work_kind="page_window_barrier",
+            phase="discovery",
+            start=0,
+            stop=8,
+            attempt=2,
+        )
+    )
+    coordinators = [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "page_fanout"
+    ]
+    assert [
+        (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators
+    ] == [(0, 8), (8, 14)]
+    second_barrier = task_with(
+        queue,
+        work_kind="page_window_barrier",
+        phase="discovery",
+        start=8,
+        stop=14,
+        attempt=1,
+    )
+    assert queue.delays[second_barrier.idempotency_key] == value._barrier_delay_seconds(1)
+
+    second = coordinators[1]
+    publications_before = len(queue.tasks)
+    value.process_metadata_task(second)
+    publications_after_first_delivery = len(queue.tasks)
+    value.process_metadata_task(second)
+    assert publications_after_first_delivery - publications_before == 6
+    assert len(queue.tasks) == publications_after_first_delivery
     follow_ups = [
         task
         for task in queue.tasks
@@ -1287,17 +1414,6 @@ def test_large_page_expansion_uses_independent_shards_without_prior_page_rescans
         and dict(task.payload).get("page") != 1
     ]
     assert [dict(task.payload)["page"] for task in follow_ups] == list(range(2, 16))
-    coordinators = [
-        task for task in queue.tasks if dict(task.payload).get("work_kind") == "page_fanout"
-    ]
-    assert (
-        len(coordinators)
-        == (len(follow_ups) + value.fanout_chunk_size - 1) // value.fanout_chunk_size
-    )
-    assert coordinators == initial_coordinators
-    assert all(
-        queue.delays[task.idempotency_key] == value.fanout_delay_seconds for task in coordinators
-    )
 
     seed = coordinators[0]
     seed_payload = dict(seed.payload)
@@ -1427,9 +1543,13 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     initial_fanout_tasks = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
-    expected_fanouts = (206 + value.fanout_chunk_size - 1) // value.fanout_chunk_size
-    assert len(initial_fanout_tasks) == expected_fanouts
-    assert all(dict(task.payload)["expected_total"] == 206 for task in initial_fanout_tasks)
+    assert len(initial_fanout_tasks) == 1
+    assert dict(initial_fanout_tasks[0].payload) == {
+        "work_kind": "deferred_fanout",
+        "expected_total": 206,
+        "start": 0,
+        "stop": value.fanout_chunk_size,
+    }
     assert not [
         task
         for task in queue.tasks
@@ -1439,58 +1559,70 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     guarded_runs.deferred_manifest_reads = 0
     guarded_runs.document_manifest_reads = 0
     guarded_runs.forbid_global_manifest_reads = True
-    processed: set[str] = set()
-    while True:
-        pending = next(
-            (
-                task
-                for task in queue.tasks
-                if dict(task.payload).get("work_kind") == "deferred_fanout"
-                and task.idempotency_key not in processed
-            ),
-            None,
-        )
-        if pending is None:
-            break
-        children_before = len(
-            [
-                task
-                for task in queue.tasks
-                if dict(task.payload).get("phase") == "bill_status"
-                or dict(task.payload).get("work_kind") == "bill_documents"
-            ]
-        )
-        task = pending
-        value.process_metadata_task(task)
-        processed.add(task.idempotency_key)
-        children_after = len(
-            [
-                task
-                for task in queue.tasks
-                if dict(task.payload).get("phase") == "bill_status"
-                or dict(task.payload).get("work_kind") == "bill_documents"
-            ]
-        )
-        assert 1 <= children_after - children_before <= value.fanout_chunk_size
+    value.process_metadata_task(initial_fanout_tasks[0])
     fanout_tasks = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
-    assert len(fanout_tasks) == expected_fanouts
     assert fanout_tasks == initial_fanout_tasks
-    assert all(
-        queue.delays[task.idempotency_key] == value.fanout_delay_seconds for task in fanout_tasks
-    )
     status_tasks = [
         task
         for task in queue.tasks
         if dict(task.payload).get("phase") == "bill_status" and dict(task.payload).get("page") == 1
     ]
-    discovery_tasks = [
-        task for task in queue.tasks if dict(task.payload).get("work_kind") == "bill_documents"
+    assert len(status_tasks) == value.fanout_chunk_size
+    for task in status_tasks:
+        value.process_metadata_task(task)
+    first_window_barrier = task_with(
+        queue,
+        work_kind="metadata_window_barrier",
+        phase="bill_status",
+        start=0,
+        stop=value.fanout_chunk_size,
+        attempt=1,
+    )
+    value.process_metadata_task(first_window_barrier)
+    assert [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
+    ] == initial_fanout_tasks
+
+    status_page_twos = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("phase") == "bill_status"
+        and dict(task.payload).get("page") == 2
     ]
-    assert len(status_tasks) == 103
-    assert len(discovery_tasks) == 103
-    assert len(client.calls) == 2
+    assert len(status_page_twos) == value.fanout_chunk_size
+    for task in status_page_twos:
+        value.process_metadata_task(task)
+    value.process_metadata_task(
+        task_with(
+            queue,
+            work_kind="metadata_window_barrier",
+            phase="bill_status",
+            start=0,
+            stop=value.fanout_chunk_size,
+            attempt=2,
+        )
+    )
+    fanout_tasks = [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
+    ]
+    assert [
+        (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in fanout_tasks
+    ] == [
+        (0, value.fanout_chunk_size),
+        (value.fanout_chunk_size, value.fanout_chunk_size * 2),
+    ]
+    next_window_barrier = task_with(
+        queue,
+        work_kind="metadata_window_barrier",
+        phase="bill_status",
+        start=value.fanout_chunk_size,
+        stop=value.fanout_chunk_size * 2,
+        attempt=1,
+    )
+    assert queue.delays[next_window_barrier.idempotency_key] == value._barrier_delay_seconds(1)
+    assert len(client.calls) == 2 + (value.fanout_chunk_size * 2)
     assert guarded_runs.deferred_manifest_reads == 0
     assert guarded_runs.document_manifest_reads == 0
 
@@ -1522,6 +1654,234 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
         dict(task.payload).get("work_kind") in {"metadata_page", "bill_documents"}
         for task in attempts[1:]
     )
+
+
+def test_deferred_wave_waits_across_status_and_bill_document_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bills = [
+        {
+            "BILL_NO": f"{2210000 + index:07d}",
+            "BILL_NAME": f"인공지능 산업 진흥 제{index}호 법안",
+            "PROPOSE_DT": "2026-06-01",
+        }
+        for index in range(20)
+    ]
+
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        if dataset == BILL_STATUS_DATASET:
+            bill_number = str(parameters["BILL_NO"])
+            return page(
+                dataset,
+                number,
+                page_size,
+                1,
+                [{"BILL_NO": bill_number, "PROC_RESULT": "위원회 심사"}],
+            )
+        return page(dataset, number, page_size, len(bills), bills)
+
+    value, queue, _client, _jobs, _runs, _finalizer = engine(
+        responder,
+        partition_planner=ReducedPartitionPlanner(),
+        fanout_chunk_size=16,
+    )
+    receipt = value.gateway(
+        "최근 AI 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="discovery", page=1)
+    )
+    process_phase_barrier(value, queue, "discovery")
+
+    first = task_with(queue, work_kind="deferred_fanout", start=0, stop=16)
+    value.process_metadata_task(first)
+    first_status_tasks = [
+        task
+        for task in queue.tasks
+        if task.research_id == receipt.research_id
+        and dict(task.payload).get("phase") == "bill_status"
+        and dict(task.payload).get("page") == 1
+    ]
+    assert len(first_status_tasks) == 16
+    for task in first_status_tasks:
+        value.process_metadata_task(task)
+    value.process_metadata_task(
+        task_with(
+            queue,
+            work_kind="metadata_window_barrier",
+            phase="bill_status",
+            start=0,
+            stop=16,
+            attempt=1,
+        )
+    )
+
+    second = task_with(queue, work_kind="deferred_fanout", start=16, stop=32)
+    attempts = record_queue_publications(monkeypatch, queue)
+    value.process_metadata_task(second)
+    second_children = tuple(attempts)
+    assert len(second_children) == 16
+    assert not [
+        task
+        for task in second_children
+        if dict(task.payload).get("work_kind") == "deferred_fanout"
+    ]
+    second_status = [
+        task for task in second_children if dict(task.payload).get("phase") == "bill_status"
+    ]
+    second_documents = [
+        task
+        for task in second_children
+        if dict(task.payload).get("work_kind") == "bill_documents"
+    ]
+    assert len(second_status) == 4
+    assert len(second_documents) == 12
+    for task in second_status:
+        value.process_metadata_task(task)
+    for task in second_documents[:-1]:
+        value.process_metadata_task(task)
+
+    mixed_barrier = task_with(
+        queue,
+        work_kind="metadata_window_barrier",
+        phase="bill_status",
+        start=16,
+        stop=32,
+        attempt=1,
+    )
+    value.process_metadata_task(mixed_barrier)
+    assert not [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "deferred_fanout"
+        and dict(task.payload).get("start") == 32
+    ]
+    unique_publications = len(queue.tasks)
+    value.process_metadata_task(mixed_barrier)
+    assert len(queue.tasks) == unique_publications
+
+    value.process_metadata_task(second_documents[-1])
+    value.process_metadata_task(
+        task_with(
+            queue,
+            work_kind="metadata_window_barrier",
+            phase="bill_status",
+            start=16,
+            stop=32,
+            attempt=2,
+        )
+    )
+    third = task_with(queue, work_kind="deferred_fanout", start=32, stop=40)
+    assert dict(third.payload)["expected_total"] == 40
+    third_barrier = task_with(
+        queue,
+        work_kind="metadata_window_barrier",
+        phase="bill_status",
+        start=32,
+        stop=40,
+        attempt=1,
+    )
+    assert queue.delays[third_barrier.idempotency_key] == value._barrier_delay_seconds(1)
+
+
+def test_legacy_upfront_deferred_shards_allow_credentialless_phase_barrier() -> None:
+    bills = [
+        {
+            "BILL_NO": f"{2210000 + index:07d}",
+            "BILL_NAME": f"인공지능 산업 진흥 제{index}호 법안",
+            "PROPOSE_DT": "2026-06-01",
+        }
+        for index in range(20)
+    ]
+
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        _parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        return page(dataset, number, page_size, len(bills), bills)
+
+    value, queue, _client, _jobs, runs, _finalizer = engine(
+        responder,
+        partition_planner=ReducedPartitionPlanner(),
+        fanout_chunk_size=16,
+    )
+    receipt = value.gateway(
+        "최근 AI 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="discovery", page=1)
+    )
+    process_phase_barrier(value, queue, "discovery")
+
+    seed = task_with(queue, work_kind="deferred_fanout", start=0, stop=16)
+    gateway = runs.get_gateway(receipt.research_id)
+    assert gateway is not None
+    value._publish_fanout(
+        gateway.job,
+        "deferred_fanout",
+        16,
+        32,
+        expected_total=40,
+        credential_capability=seed.credential_capability,
+    )
+    value._publish_fanout(
+        gateway.job,
+        "deferred_fanout",
+        32,
+        40,
+        expected_total=40,
+        credential_capability=seed.credential_capability,
+    )
+    legacy_barrier = ResearchTask(
+        research_id=receipt.research_id,
+        stage=ResearchTaskStage.COLLECT_METADATA,
+        work_id="phase_barrier:bill_status:1",
+        query_fingerprint=gateway.job.query_fingerprint,
+        index_revision=gateway.job.index_revision,
+        payload=(
+            ("work_kind", "phase_barrier"),
+            ("phase", "bill_status"),
+            ("attempt", 1),
+        ),
+    )
+
+    value.process_metadata_task(legacy_barrier)
+
+    assert [
+        (dict(task.payload)["start"], dict(task.payload)["stop"])
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "deferred_fanout"
+    ] == [(0, 16), (16, 32), (32, 40)]
+    retry = task_with(
+        queue,
+        work_kind="phase_barrier",
+        phase="bill_status",
+        attempt=2,
+    )
+    assert retry.credential_capability is None
 
 
 def test_exact_status_document_pipeline_completes_and_is_idempotent(

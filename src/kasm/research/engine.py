@@ -72,8 +72,10 @@ _BILL_DOCUMENTS = "bill_documents"
 _DISCOVERY_FANOUT = "discovery_fanout"
 _DEFERRED_FANOUT = "deferred_fanout"
 _DOCUMENT_FANOUT = "document_fanout"
+_METADATA_WINDOW_BARRIER = "metadata_window_barrier"
 _DOCUMENT_WINDOW_BARRIER = "document_window_barrier"
 _PAGE_FANOUT = "page_fanout"
+_PAGE_WINDOW_BARRIER = "page_window_barrier"
 _PHASE_BARRIER = "phase_barrier"
 _DOCUMENT_FINALIZE_BARRIER = "document_finalize_barrier"
 _PHASE = "phase"
@@ -1904,23 +1906,33 @@ class ResearchEngine:
                         capability,
                     )
             else:
-                # Publish independent bounded coordinators up front.  No shard
-                # depends on an earlier coordinator surviving long enough to
-                # publish the next one, while each delivery still creates at
-                # most ``fanout_chunk_size`` official-source workers.
-                self._publish_fanout_shards(
+                # Open one bounded wave. Its dedicated barrier resets polling
+                # backoff for every successor and removes the prior up-front
+                # top-level shard flood from the shared FIFO queue.
+                self._publish_initial_fanout_window(
                     job,
                     _DISCOVERY_FANOUT,
                     len(discovery),
                     credential_capability=capability,
                 )
-            self._publish_phase_barrier(
-                job,
-                MetadataPhase.DISCOVERY,
-                attempt=1,
-                credential_capability=capability,
-                delay_seconds=self._barrier_delay_seconds(1),
-            )
+                self._publish_metadata_window_barrier(
+                    job,
+                    MetadataPhase.DISCOVERY,
+                    start=0,
+                    stop=min(len(discovery), self.fanout_chunk_size),
+                    expected_total=len(discovery),
+                    attempt=1,
+                    credential_capability=capability,
+                    delay_seconds=self._barrier_delay_seconds(1),
+                )
+            if len(discovery) <= self.direct_fanout_limit:
+                self._publish_phase_barrier(
+                    job,
+                    MetadataPhase.DISCOVERY,
+                    attempt=1,
+                    credential_capability=capability,
+                    delay_seconds=self._barrier_delay_seconds(1),
+                )
         except Exception:
             with suppress(Exception):
                 self.jobs.transition(
@@ -2042,11 +2054,17 @@ class ResearchEngine:
         if work_kind == _DOCUMENT_FANOUT:
             self._process_document_fanout(task, payload)
             return None
+        if work_kind == _METADATA_WINDOW_BARRIER:
+            self._process_metadata_window_barrier(task, payload)
+            return None
         if work_kind == _DOCUMENT_WINDOW_BARRIER:
             self._process_document_window_barrier(task, payload)
             return None
         if work_kind == _PAGE_FANOUT:
             self._process_page_fanout(task, payload)
+            return None
+        if work_kind == _PAGE_WINDOW_BARRIER:
+            self._process_page_window_barrier(task, payload)
             return None
         if work_kind == _PHASE_BARRIER:
             self._process_phase_barrier(task, payload)
@@ -2149,6 +2167,80 @@ class ResearchEngine:
             chain_next=stop == expected_total and window_stop < stop,
             receipt_gated=receipt_gated,
             attempt=1,
+            delay_seconds=self._barrier_delay_seconds(1),
+        )
+
+    def _process_metadata_window_barrier(
+        self,
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+    ) -> None:
+        phase, start, stop, expected_total, attempt = self._validate_metadata_window_barrier(
+            task,
+            payload,
+        )
+        job = self._required_job(task.research_id)
+        if phase is MetadataPhase.DISCOVERY:
+            partitions = self._phase_partitions(task.research_id, phase)
+            if len(partitions) != expected_total:
+                raise ValueError("discovery window total does not match its immutable plan")
+            complete = self._metadata_partitions_complete(
+                task.research_id,
+                phase,
+                partitions[start:stop],
+            )
+            fanout_kind = _DISCOVERY_FANOUT
+        else:
+            routes = self.runs.deferred_routes_for(
+                task.research_id,
+                start,
+                stop,
+                expected_total=expected_total,
+            )
+            if len(routes) != stop - start:
+                raise LookupError("deferred window routing range is unavailable")
+            complete = self._deferred_routes_complete(task.research_id, routes)
+            fanout_kind = _DEFERRED_FANOUT
+        if not complete:
+            self._publish_metadata_window_barrier(
+                job,
+                phase,
+                start=start,
+                stop=stop,
+                expected_total=expected_total,
+                attempt=attempt + 1,
+                credential_capability=task.credential_capability,
+                delay_seconds=self._barrier_delay_seconds(attempt + 1),
+            )
+            return
+        if stop < expected_total:
+            if task.credential_capability is None:
+                raise ValueError("metadata wave successor requires a credential capability")
+            next_stop = min(expected_total, stop + self.fanout_chunk_size)
+            self._publish_fanout(
+                job,
+                fanout_kind,
+                stop,
+                next_stop,
+                expected_total=expected_total,
+                credential_capability=task.credential_capability,
+            )
+            self._publish_metadata_window_barrier(
+                job,
+                phase,
+                start=stop,
+                stop=next_stop,
+                expected_total=expected_total,
+                attempt=1,
+                credential_capability=task.credential_capability,
+                delay_seconds=self._barrier_delay_seconds(1),
+            )
+            return
+        self._publish_phase_barrier(
+            job,
+            phase,
+            attempt=1,
+            credential_capability=task.credential_capability,
             delay_seconds=self._barrier_delay_seconds(1),
         )
 
@@ -2261,6 +2353,97 @@ class ResearchEngine:
                 follow_up,
                 task.credential_capability,
             )
+
+    def _process_page_window_barrier(
+        self,
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+    ) -> None:
+        phase, partition_id, start, stop, expected_total, attempt = (
+            self._validate_page_window_barrier(task, payload)
+        )
+        partition = self._partition(task.research_id, phase, partition_id)
+        first_values = self.runs.page_readiness_for(
+            task.research_id,
+            phase,
+            partition_id,
+            (1,),
+        )
+        if len(first_values) != 1:
+            raise ValueError("page window barrier requires a ready stored first page")
+        first = first_values[0]
+        if (
+            first.phase is not phase
+            or first.partition_id != partition_id
+            or first.dataset != partition.dataset
+            or first.page != 1
+            or first.page_size != partition.page_size
+            or first.total_count != expected_total
+        ):
+            raise ValueError("page window barrier does not match its stored first page")
+        total_pages = max(1, (expected_total + first.page_size - 1) // first.page_size)
+        follow_up_count = total_pages - 1
+        if stop > follow_up_count:
+            raise ValueError("page window barrier range is outside its immutable plan")
+        page_numbers = tuple(range(start + 2, stop + 2))
+        readiness = self.runs.page_readiness_for(
+            task.research_id,
+            phase,
+            partition_id,
+            page_numbers,
+        )
+        complete = len(readiness) == len(page_numbers)
+        if complete and (
+            tuple(item.page for item in readiness) != page_numbers
+            or any(
+                item.phase is not phase
+                or item.partition_id != partition_id
+                or item.dataset != first.dataset
+                or item.page_size != first.page_size
+                or item.total_count != expected_total
+                for item in readiness
+            )
+        ):
+            raise RuntimeError("page window readiness does not match its immutable plan")
+        job = self._required_job(task.research_id)
+        if not complete:
+            self._publish_page_window_barrier(
+                job,
+                phase,
+                partition,
+                expected_total,
+                start,
+                stop,
+                attempt=attempt + 1,
+                credential_capability=task.credential_capability,
+                delay_seconds=self._barrier_delay_seconds(attempt + 1),
+            )
+            return
+        if stop >= follow_up_count:
+            return
+        if task.credential_capability is None:
+            raise ValueError("page wave successor requires a credential capability")
+        next_stop = min(follow_up_count, stop + self.fanout_chunk_size)
+        self._publish_page_fanout(
+            job,
+            phase,
+            partition,
+            expected_total,
+            stop,
+            next_stop,
+            task.credential_capability,
+        )
+        self._publish_page_window_barrier(
+            job,
+            phase,
+            partition,
+            expected_total,
+            stop,
+            next_stop,
+            attempt=1,
+            credential_capability=task.credential_capability,
+            delay_seconds=self._barrier_delay_seconds(1),
+        )
 
     def _process_phase_barrier(self, task: ResearchTask, payload: Mapping[str, Any]) -> None:
         phase = MetadataPhase(str(payload.get(_PHASE) or ""))
@@ -2588,13 +2771,24 @@ class ResearchEngine:
             job = self._required_job(task.research_id)
             if len(expansion.pages) > self.direct_fanout_limit:
                 assert existing.total_count is not None
-                self._publish_page_fanout_shards(
+                self._publish_initial_page_fanout_window(
                     job,
                     phase,
                     partition,
                     existing.total_count,
                     len(expansion.pages),
                     task.credential_capability,
+                )
+                self._publish_page_window_barrier(
+                    job,
+                    phase,
+                    partition,
+                    existing.total_count,
+                    0,
+                    min(len(expansion.pages), self.fanout_chunk_size),
+                    attempt=1,
+                    credential_capability=task.credential_capability,
+                    delay_seconds=self._barrier_delay_seconds(1),
                 )
             else:
                 for follow_up in expansion.pages:
@@ -2842,11 +3036,21 @@ class ResearchEngine:
         if deferred_count > self.direct_fanout_limit:
             if deferred.status_partitions and credential_capability is None:
                 raise ValueError("status fan-out requires a credential capability")
-            self._publish_fanout_shards(
+            self._publish_initial_fanout_window(
                 job,
                 _DEFERRED_FANOUT,
                 deferred_count,
                 credential_capability=credential_capability,
+            )
+            self._publish_metadata_window_barrier(
+                job,
+                MetadataPhase.BILL_STATUS,
+                start=0,
+                stop=min(deferred_count, self.fanout_chunk_size),
+                expected_total=deferred_count,
+                attempt=1,
+                credential_capability=credential_capability,
+                delay_seconds=self._barrier_delay_seconds(1),
             )
         else:
             if deferred.status_partitions:
@@ -2868,14 +3072,15 @@ class ResearchEngine:
             stage="deferred_metadata",
             progress=0.25,
         )
-        if deferred_count:
+        if 0 < deferred_count <= self.direct_fanout_limit:
             self._publish_phase_barrier(
                 job,
                 MetadataPhase.BILL_STATUS,
                 attempt=1,
+                credential_capability=credential_capability,
                 delay_seconds=self._barrier_delay_seconds(1),
             )
-        else:
+        elif deferred_count == 0:
             self._complete_metadata(research_id, prerequisites_verified=True)
 
     def _recall_from_corpus(
@@ -3151,6 +3356,44 @@ class ResearchEngine:
             delay_seconds=delay_seconds,
         )
 
+    def _publish_metadata_window_barrier(
+        self,
+        job: ResearchJob,
+        phase: MetadataPhase,
+        *,
+        start: int,
+        stop: int,
+        expected_total: int,
+        attempt: int,
+        credential_capability: str | None,
+        delay_seconds: int = 0,
+    ) -> None:
+        identity = (
+            f"{_METADATA_WINDOW_BARRIER}:{phase.value}:{start}:{stop}:"
+            f"{expected_total}:{attempt}"
+        )
+        task = ResearchTask(
+            research_id=job.id,
+            stage=ResearchTaskStage.COLLECT_METADATA,
+            work_id=identity,
+            query_fingerprint=job.query_fingerprint,
+            index_revision=job.index_revision,
+            payload=(
+                (_WORK_KIND, _METADATA_WINDOW_BARRIER),
+                (_PHASE, phase.value),
+                (_START, start),
+                (_STOP, stop),
+                (_EXPECTED_TOTAL, expected_total),
+                (_ATTEMPT, attempt),
+            ),
+            credential_capability=credential_capability,
+        )
+        self.queue.publish(
+            task,
+            retention_seconds=self.task_retention_seconds,
+            delay_seconds=delay_seconds,
+        )
+
     def _publish_bill_document(self, job: ResearchJob, bill_number: str) -> None:
         if not re.fullmatch(r"\d{7}", bill_number):
             raise ValueError("bill document task requires an exact bill number")
@@ -3229,7 +3472,7 @@ class ResearchEngine:
         base = max(1, self.fanout_delay_seconds)
         return min(10, base * attempt)
 
-    def _publish_fanout_shards(
+    def _publish_initial_fanout_window(
         self,
         job: ResearchJob,
         work_kind: str,
@@ -3239,15 +3482,14 @@ class ResearchEngine:
     ) -> None:
         if total < 1:
             raise ValueError("research fan-out total must be positive")
-        for start in range(0, total, self.fanout_chunk_size):
-            self._publish_fanout(
-                job,
-                work_kind,
-                start,
-                min(total, start + self.fanout_chunk_size),
-                expected_total=total,
-                credential_capability=credential_capability,
-            )
+        self._publish_fanout(
+            job,
+            work_kind,
+            0,
+            min(total, self.fanout_chunk_size),
+            expected_total=total,
+            credential_capability=credential_capability,
+        )
 
     def _publish_fanout(
         self,
@@ -3322,7 +3564,7 @@ class ResearchEngine:
             raise ValueError("research fan-out total is smaller than its shard")
         return expected_total
 
-    def _publish_page_fanout_shards(
+    def _publish_initial_page_fanout_window(
         self,
         job: ResearchJob,
         phase: MetadataPhase,
@@ -3333,16 +3575,15 @@ class ResearchEngine:
     ) -> None:
         if follow_up_count < 1:
             raise ValueError("page fan-out total must be positive")
-        for start in range(0, follow_up_count, self.fanout_chunk_size):
-            self._publish_page_fanout(
-                job,
-                phase,
-                partition,
-                expected_total,
-                start,
-                min(follow_up_count, start + self.fanout_chunk_size),
-                capability,
-            )
+        self._publish_page_fanout(
+            job,
+            phase,
+            partition,
+            expected_total,
+            0,
+            min(follow_up_count, self.fanout_chunk_size),
+            capability,
+        )
 
     def _publish_page_fanout(
         self,
@@ -3372,6 +3613,46 @@ class ResearchEngine:
                 (_STOP, stop),
             ),
             credential_capability=capability,
+        )
+        self.queue.publish(
+            task,
+            retention_seconds=self.task_retention_seconds,
+            delay_seconds=delay_seconds,
+        )
+
+    def _publish_page_window_barrier(
+        self,
+        job: ResearchJob,
+        phase: MetadataPhase,
+        partition: MetadataPartition,
+        expected_total: int,
+        start: int,
+        stop: int,
+        *,
+        attempt: int,
+        credential_capability: str | None,
+        delay_seconds: int = 0,
+    ) -> None:
+        work_id = (
+            f"{_PAGE_WINDOW_BARRIER}:{phase.value}:{partition.partition_id}:"
+            f"{start}:{stop}:{expected_total}:{attempt}"
+        )
+        task = ResearchTask(
+            research_id=job.id,
+            stage=ResearchTaskStage.COLLECT_METADATA,
+            work_id=work_id,
+            query_fingerprint=job.query_fingerprint,
+            index_revision=job.index_revision,
+            payload=(
+                (_WORK_KIND, _PAGE_WINDOW_BARRIER),
+                (_PHASE, phase.value),
+                (_PARTITION_ID, partition.partition_id),
+                (_EXPECTED_TOTAL, expected_total),
+                (_START, start),
+                (_STOP, stop),
+                (_ATTEMPT, attempt),
+            ),
+            credential_capability=credential_capability,
         )
         self.queue.publish(
             task,
@@ -3453,6 +3734,30 @@ class ResearchEngine:
         return start, stop, expected_total, chain_next, receipt_gated, attempt
 
     @staticmethod
+    def _validate_metadata_window_barrier(
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+    ) -> tuple[MetadataPhase, int, int, int, int]:
+        phase = MetadataPhase(str(payload.get(_PHASE) or ""))
+        start = int(payload.get(_START, -1))
+        stop = int(payload.get(_STOP, -1))
+        expected_total = int(payload.get(_EXPECTED_TOTAL, -1))
+        attempt = int(payload.get(_ATTEMPT, 0))
+        if (
+            payload.get(_WORK_KIND) != _METADATA_WINDOW_BARRIER
+            or not 0 <= start < stop <= expected_total
+            or not 1 <= attempt <= 1_000_000
+        ):
+            raise ValueError("metadata window barrier payload is invalid")
+        expected = (
+            f"{_METADATA_WINDOW_BARRIER}:{phase.value}:{start}:{stop}:"
+            f"{expected_total}:{attempt}"
+        )
+        if task.work_id != expected:
+            raise ValueError("metadata window barrier task identity does not match")
+        return phase, start, stop, expected_total, attempt
+
+    @staticmethod
     def _validate_document_finalize_barrier(
         task: ResearchTask,
         payload: Mapping[str, Any],
@@ -3489,10 +3794,48 @@ class ResearchEngine:
             raise ValueError("page fan-out task identity does not match")
         return start, stop
 
+    @staticmethod
+    def _validate_page_window_barrier(
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+    ) -> tuple[MetadataPhase, str, int, int, int, int]:
+        phase = MetadataPhase(str(payload.get(_PHASE) or ""))
+        partition_id = str(payload.get(_PARTITION_ID) or "")
+        start = int(payload.get(_START, -1))
+        stop = int(payload.get(_STOP, -1))
+        expected_total = int(payload.get(_EXPECTED_TOTAL, -1))
+        attempt = int(payload.get(_ATTEMPT, 0))
+        if (
+            payload.get(_WORK_KIND) != _PAGE_WINDOW_BARRIER
+            or not partition_id
+            or not 0 <= start < stop
+            or expected_total < 0
+            or not 1 <= attempt <= 1_000_000
+        ):
+            raise ValueError("page window barrier payload is invalid")
+        expected = (
+            f"{_PAGE_WINDOW_BARRIER}:{phase.value}:{partition_id}:"
+            f"{start}:{stop}:{expected_total}:{attempt}"
+        )
+        if task.work_id != expected:
+            raise ValueError("page window barrier task identity does not match")
+        return phase, partition_id, start, stop, expected_total, attempt
+
     def _phase_complete(self, research_id: str, phase: MetadataPhase) -> bool:
         """Check only small page-ready markers; never decode raw page blobs."""
 
-        partitions = self._phase_partitions(research_id, phase)
+        return self._metadata_partitions_complete(
+            research_id,
+            phase,
+            self._phase_partitions(research_id, phase),
+        )
+
+    def _metadata_partitions_complete(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+        partitions: Sequence[MetadataPartition],
+    ) -> bool:
         for partition in partitions:
             first_values = self.runs.page_readiness_for(
                 research_id,
@@ -3531,6 +3874,26 @@ class ResearchEngine:
                 for item in readiness
             ):
                 raise RuntimeError("metadata page readiness totals are inconsistent")
+        return True
+
+    def _deferred_routes_complete(
+        self,
+        research_id: str,
+        routes: Sequence[DeferredWorkRoute],
+    ) -> bool:
+        for route in routes:
+            if route.kind is DeferredRouteKind.BILL_STATUS:
+                assert route.status_partition is not None
+                if not self._metadata_partitions_complete(
+                    research_id,
+                    MetadataPhase.BILL_STATUS,
+                    (route.status_partition,),
+                ):
+                    return False
+                continue
+            assert route.bill_number is not None
+            if self.runs.get_bill_discovery(research_id, route.bill_number) is None:
+                return False
         return True
 
     def _assemble_collection(

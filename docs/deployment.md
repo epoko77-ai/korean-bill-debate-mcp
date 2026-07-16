@@ -71,15 +71,17 @@ bundle, while placing the shared module under `api/` incorrectly creates a fifth
 The hosted defaults publish at most seven page tasks directly from the request; together with the
 delayed phase barrier, an exact investigation seeds no more than eight initial Queue messages. This
 removes a coordinator round trip for the complete seven-part exact-bill plan while preserving the
-Queue trigger's concurrency ceiling. Larger metadata plans seed independent durable sixteen-item
-coordinator shards up front so one failed coordinator cannot strand the remaining official-source
-partitions. Document hydration is deliberately stricter: one coordinator opens 16 documents, a
-window barrier verifies all 16 compact task-completion receipts, and only then may the next window
-open. The last verified window passes that durable boundary to the finalizer, so it does not re-read
-all document receipts before loading the full-text outcomes once. New immutable result shards use
-one atomic Blob put-if-absent request; only duplicate, conflicting, or ambiguous writes require a
-read-back verification. The production consumer admits at most 64 in-flight messages, so two broad
-jobs use at most 32 active document slots and leave capacity for exact searches. Override
+Queue trigger's concurrency ceiling. Larger metadata plans open one durable sixteen-item window per
+research run at the top-level discovery and deferred-routing stages. A dedicated readiness barrier
+verifies every partition, bill-status route, or bill-document route in that window before opening
+its successor, and resets its bounded polling backoff for each new window. A source partition with
+many follow-up pages also opens only one sixteen-page window at a time; these per-partition page
+windows may run in parallel inside the Queue's global concurrency ceiling. Official-text hydration
+uses one sixteen-document window per run with compact task-completion receipts. The last verified
+document window passes that durable boundary to the finalizer, so it does not re-read all document
+receipts before loading the full-text outcomes once. New immutable result shards use one atomic
+Blob put-if-absent request; only duplicate, conflicting, or ambiguous writes require a read-back
+verification. The production consumer admits at most 64 total in-flight messages. Override
 `KBD_RESEARCH_DIRECT_FANOUT_LIMIT`, `KBD_RESEARCH_FANOUT_CHUNK_SIZE`, and
 `KBD_RESEARCH_FANOUT_DELAY_SECONDS` only together with a measured Queue concurrency change.
 
