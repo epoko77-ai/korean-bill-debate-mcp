@@ -247,7 +247,10 @@ class OfficialDocumentWorker:
 
         parsed = self._parse(raw)
         self.store.put_parsed(parsed)
-        return _result(raw, parsed, cache_hit=False)
+        canonical = self.store.get_parsed(raw.source_hash, self.parser_version)
+        if canonical is None:
+            raise RuntimeError("stored parsed official document is missing")
+        return _result(raw, canonical, cache_hit=False)
 
     def hydrate(self, result: DocumentWorkResult) -> DocumentWorkResult:
         """Restore and verify a compact run result from the global parsed cache."""

@@ -122,7 +122,8 @@ Hosted terminal outcomes are compact references. The finalizer hydrates their gl
 parsed documents with the same bounded partition-read concurrency and fails closed on any identity,
 hash, page-count, character-count, or object-key mismatch. Warm document workers use private Blob
 HEAD plus immutable pointer metadata to avoid downloading cached raw PDF bytes before a parsed-cache
-hit.
+hit. The warm path treats the private content-addressed, no-overwrite Blob store as an integrity
+boundary; the initial preservation still hashes the complete raw body.
 
 Do not set `KBD_RESEARCH_CORPUS_REVISION` merely to make the health field true. Set it only to a
 published, complete revision whose readiness marker and referenced objects have been verified. It

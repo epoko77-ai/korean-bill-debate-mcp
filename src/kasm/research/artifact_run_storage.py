@@ -2719,7 +2719,10 @@ def _compact_document_outcome(outcome: DocumentOutcome) -> DocumentOutcome:
     result = outcome.result
     if result is None or result.document is None:
         return outcome
-    compact = replace(result, document=None)
+    # Cache-hit state is delivery-local telemetry. It cannot participate in a
+    # write-once terminal identity because overlapping redeliveries may observe
+    # the same immutable parsed object on opposite sides of its first publish.
+    compact = replace(result, cache_hit=False, document=None)
     return replace(outcome, result=compact)
 
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.1.0] - 2026-07-15
+## [1.1.0] - 2026-07-18
 
 ### Added
 
@@ -62,9 +62,11 @@
   This preserves every parsed page segment and extracted character while removing multi-megabyte
   per-run PUTs and repeated full-text status polling.
 - Resolve a warm official-document cache through immutable pointer metadata plus Blob HEAD size,
-  without transferring the preserved PDF body before reading its parsed result. Concurrent cold-cache
-  parsers now accept an equivalent immutable winner even when their observation timestamps differ,
-  while any difference in source identity, parser version, page text, or warnings still fails closed.
+  without transferring the preserved PDF body before reading its parsed result. The private,
+  content-addressed, no-overwrite Blob store is the warm-path integrity boundary; the source hash is
+  established when raw bytes are first preserved. Concurrent cold-cache parsers now adopt the same
+  canonical immutable winner even when their observation timestamps differ, while any difference in
+  source identity, parser version, page text, or warnings still fails closed.
 - Publish new immutable Vercel Blob result shards with one atomic put-if-absent request. Duplicate,
   conflicting, and ambiguous committed writes still read back and verify the exact bytes, while a
   first-pass broad snapshot no longer pays a preliminary GET for every index and text shard.

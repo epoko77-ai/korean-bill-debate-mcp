@@ -145,7 +145,9 @@ global parsed-object key—not a second copy of every PDF page. Status polling t
 terminal records. Finalization restores the globally preserved parsed documents with bounded
 parallel reads and verifies kind, URL, source hash, parser version, text hash, page count, character
 count, and object key before any evidence is published. Warm workers resolve raw source identity
-with pointer metadata and Blob HEAD rather than transferring the preserved PDF body again.
+with pointer metadata and Blob HEAD rather than transferring the preserved PDF body again. This
+fast path trusts the private, content-addressed, no-overwrite Blob boundary after the source hash was
+established from the raw bytes during their first preservation.
 This internal split does not change the stable public `/mcp` endpoint or previously issued
 `/mcp/t/...` capability URLs.
 The workspace still uses the earlier single-request alpha boundary and does not inherit background

@@ -704,7 +704,10 @@ def _seed_through_metadata(store: ArtifactResearchRunStore, state: FixtureState)
 
 def _compact_outcome(outcome: DocumentOutcome) -> DocumentOutcome:
     assert outcome.result is not None
-    return replace(outcome, result=replace(outcome.result, document=None))
+    return replace(
+        outcome,
+        result=replace(outcome.result, cache_hit=False, document=None),
+    )
 
 
 def test_every_run_stage_survives_restart_and_preserves_120k_text(tmp_path: Path) -> None:
@@ -1811,6 +1814,12 @@ def test_retryable_outcomes_are_append_only_then_terminal_becomes_current(
     assert store.get_document_outcome(research_id, state.work_item.work_id) is None
     compact_terminal = _compact_outcome(terminal)
     assert store.put_document_outcome(research_id, terminal) == compact_terminal
+    assert terminal.result is not None
+    cache_hit_delivery = replace(
+        terminal,
+        result=replace(terminal.result, cache_hit=True),
+    )
+    assert store.put_document_outcome(research_id, cache_hit_delivery) == compact_terminal
     assert store.get_document_outcome(research_id, state.work_item.work_id) == compact_terminal
 
     assert store.document_outcomes(research_id) == (compact_terminal,)
