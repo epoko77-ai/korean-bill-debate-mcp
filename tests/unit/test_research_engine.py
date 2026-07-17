@@ -2042,6 +2042,79 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     )
 
 
+def test_hosted_broad_preview_is_coalesced_by_the_global_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "BILL_NO": f"{2210000 + index:07d}",
+            "BILL_NAME": f"인공지능 산업 진흥 제{index}호 법안",
+            "PROPOSE_DT": "2026-06-01",
+        }
+        for index in range(101)
+    ]
+
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        _parameters: dict[str, str | int],
+    ) -> ApiPage:
+        start = (number - 1) * page_size
+        return page(
+            dataset,
+            number,
+            page_size,
+            len(rows),
+            rows[start : start + page_size],
+        )
+
+    value, queue, _client, _jobs, runs, _finalizer = engine(
+        responder,
+        partition_planner=ReducedPartitionPlanner(),
+        bulk_parallel_fanout=True,
+    )
+    value.gateway(
+        "최근 인공지능 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+    )
+    original = value._try_publish_first_page_preview
+    preview_attempts = 0
+
+    def counted_preview(research_id: str) -> Any:
+        nonlocal preview_attempts
+        preview_attempts += 1
+        return original(research_id)
+
+    monkeypatch.setattr(value, "_try_publish_first_page_preview", counted_preview)
+
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="discovery", page=1)
+    )
+    first_barrier = task_with(queue, work_kind="phase_barrier", attempt=1)
+    assert preview_attempts == 0
+    assert runs.get_first_page_preview(first_barrier.research_id) is None
+
+    process_phase_barrier(value, queue, "discovery", attempt=1)
+    research_id = task_with(queue, work_kind="phase_barrier", attempt=2).research_id
+    preview = runs.get_first_page_preview(research_id)
+    assert preview_attempts == 1
+    assert preview is not None
+    assert preview.accepted_total == 100
+    assert preview.source.source_complete is False
+
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="discovery", page=2)
+    )
+    process_phase_barrier(value, queue, "discovery", attempt=2)
+
+    complete_overview = runs.get_provisional_overview(research_id)
+    assert complete_overview is not None
+    assert complete_overview.accepted_total == 101
+    assert complete_overview.source.source_complete is True
+
+
 def test_discovery_recovery_enqueues_deferred_work_before_status_checkpoint_healing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

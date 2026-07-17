@@ -108,6 +108,13 @@ result shards use one atomic Blob put-if-absent request; only duplicate, conflic
 writes require a read-back verification. Override
 `KBD_RESEARCH_DIRECT_FANOUT_LIMIT`, `KBD_RESEARCH_FANOUT_CHUNK_SIZE`, and
 `KBD_RESEARCH_FANOUT_DELAY_SECONDS` only together with a measured Queue concurrency change.
+The default `KBD_RESEARCH_PAGE_READ_CONCURRENCY=16` bounds parallel reads of private immutable
+artifacts during barriers and assembly; it does not change official Open Assembly request
+concurrency. Hosted broad page workers leave first-page preview publication to the single global
+discovery barrier, preventing an all-partition scan per completed worker.
+`KBD_RESEARCH_PARTITION_READ_CONCURRENCY=8` separately bounds independent partition-marker and
+partition-page reads. Incomplete barriers stop after the first batch containing a missing marker;
+raising this value trades more private-Blob pressure for lower terminal assembly latency.
 
 Do not set `KBD_RESEARCH_CORPUS_REVISION` merely to make the health field true. Set it only to a
 published, complete revision whose readiness marker and referenced objects have been verified. It

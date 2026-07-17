@@ -33,6 +33,8 @@ def test_hosted_runtime_is_composed_lazily_without_network_or_user_key(monkeypat
     assert runtime.engine.direct_fanout_limit == 7
     assert runtime.engine.fanout_chunk_size == 16
     assert runtime.engine.fanout_delay_seconds == 0
+    assert runtime.engine.runs._page_read_concurrency == 16
+    assert runtime.engine.partition_read_concurrency == 8
     assert isinstance(runtime.engine.queue, VercelResearchTaskQueue)
     assert runtime.engine.queue.topic == "kbd-research"
     assert runtime.engine.queue.control_topic == "kbd-research-control"

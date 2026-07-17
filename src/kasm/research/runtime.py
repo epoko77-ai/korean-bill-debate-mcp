@@ -84,6 +84,8 @@ def create_hosted_research_runtime(
     )
 
     api_timeout = float(os.getenv("KBD_RESEARCH_API_TIMEOUT_SECONDS", "30"))
+    partition_read_concurrency = int(os.getenv("KBD_RESEARCH_PARTITION_READ_CONCURRENCY", "8"))
+    page_read_concurrency = int(os.getenv("KBD_RESEARCH_PAGE_READ_CONCURRENCY", "16"))
     cache_root = Path(os.getenv("KBD_RESEARCH_CACHE_DIR", "/tmp/kbd-research"))
     resolved_corpus_provider = corpus_recall_provider
     if resolved_corpus_provider is None:
@@ -137,7 +139,7 @@ def create_hosted_research_runtime(
         finalizer=ConnectedResearchFinalizer(build_sha=build_sha),
         runs=StatusSnapshotResearchRunStore(
             artifacts,
-            page_read_concurrency=int(os.getenv("KBD_RESEARCH_PAGE_READ_CONCURRENCY", "8")),
+            page_read_concurrency=page_read_concurrency,
         ),
         status_page_size=int(os.getenv("KBD_RESEARCH_STATUS_PAGE_SIZE", "100")),
         direct_fanout_limit=int(os.getenv("KBD_RESEARCH_DIRECT_FANOUT_LIMIT", "7")),
@@ -148,6 +150,7 @@ def create_hosted_research_runtime(
         fanout_chunk_size=int(os.getenv("KBD_RESEARCH_FANOUT_CHUNK_SIZE", "16")),
         fanout_delay_seconds=int(os.getenv("KBD_RESEARCH_FANOUT_DELAY_SECONDS", "0")),
         bulk_parallel_fanout=True,
+        partition_read_concurrency=partition_read_concurrency,
         corpus_recall_provider=resolved_corpus_provider,
     )
     backend = DurableResearchBackend(

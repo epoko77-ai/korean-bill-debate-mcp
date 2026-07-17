@@ -130,6 +130,12 @@ hydration likewise makes bounded fixed shards runnable while finalization still 
 compact completion receipt. Exact-bill work remains sequentially readiness-gated, so bulk traffic
 cannot consume either exact queue budget. All three paths retain the
 same at-least-once, idempotency, completion-receipt, retry, and same-deployment dispatch rules.
+The discovery barrier also coalesces the observed-only first-page preview check. Individual hosted
+page workers never rescan the full partition prefix, while a broad run with pending follow-up pages
+can still publish its truthful incomplete orientation map before full discovery completes.
+Terminal barriers check immutable source partitions in bounded parallel batches and preserve an
+early stop after the first incomplete batch. Once ready, raw partitions are likewise read in plan
+order with bounded parallel I/O before the unchanged deterministic collector validates them.
 This internal split does not change the stable public `/mcp` endpoint or previously issued
 `/mcp/t/...` capability URLs.
 The workspace still uses the earlier single-request alpha boundary and does not inherit background

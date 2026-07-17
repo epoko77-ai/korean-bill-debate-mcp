@@ -78,6 +78,12 @@
   Queue handlers to catch missing shared modules before production traffic reaches them.
 - Update the Claude.ai and ChatGPT web-connection guides to the current official plan availability,
   menu paths, OAuth approval flow, per-chat activation step, and public `/mcp` endpoint.
+- Coalesce hosted broad first-page preview publication into the single retrying discovery barrier.
+  Page workers no longer rescan the growing all-partition prefix independently, removing quadratic
+  private-Blob reads while retaining the observed-only early map whenever follow-up pages remain.
+  Raise bounded immutable-page read concurrency from 8 to 16 and check/assemble independent source
+  partitions in batches of 8. This does not increase Open Assembly API request concurrency, alter
+  deterministic ordering, or omit any source record.
 
 ### Known limitations
 

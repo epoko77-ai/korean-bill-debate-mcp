@@ -13,6 +13,7 @@ import json
 import re
 import threading
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
@@ -1813,6 +1814,7 @@ class ResearchEngine:
         fanout_chunk_size: int = 8,
         fanout_delay_seconds: int = 0,
         bulk_parallel_fanout: bool = False,
+        partition_read_concurrency: int = 1,
         corpus_recall_provider: CorpusRecallProvider | None = None,
     ) -> None:
         if not index_revision.strip():
@@ -1825,6 +1827,8 @@ class ResearchEngine:
             raise ValueError("research fan-out limits must be positive")
         if not 0 <= fanout_delay_seconds <= task_retention_seconds:
             raise ValueError("research fan-out delay is outside task retention")
+        if not 1 <= partition_read_concurrency <= 16:
+            raise ValueError("partition read concurrency must be between 1 and 16")
         self.corpus_recall_provider = corpus_recall_provider
         self.corpus_revision_id = (
             corpus_recall_provider.revision_id if corpus_recall_provider else None
@@ -1853,6 +1857,7 @@ class ResearchEngine:
         self.fanout_chunk_size = fanout_chunk_size
         self.fanout_delay_seconds = fanout_delay_seconds
         self.bulk_parallel_fanout = bulk_parallel_fanout
+        self.partition_read_concurrency = partition_read_concurrency
 
     def gateway(
         self,
@@ -2485,6 +2490,7 @@ class ResearchEngine:
             _PHASE_BARRIER,
             phase.value,
         )
+        job = self._required_job(task.research_id)
         discovery_collection: MetadataCollection | None = None
         status_collection: MetadataCollection | None = None
         bill_discoveries: tuple[BillDocumentDiscovery, ...] | None = None
@@ -2493,10 +2499,19 @@ class ResearchEngine:
             # only small final-write page markers. Raw page blobs are assembled
             # exactly once, after every dynamically expected marker is present.
             complete = self.runs.get_deferred_manifest(task.research_id) is not None
-            if not complete and self._phase_complete(task.research_id, phase):
+            phase_complete = complete or self._phase_complete(task.research_id, phase)
+            if not phase_complete and self._is_bulk_job(job):
+                # Hosted broad page workers deliberately do not race one
+                # another through an all-partition preview scan. This one
+                # retrying barrier preserves the early observed-only map when
+                # every first page is ready but follow-up pages are still in
+                # flight, reducing the scan count from O(partitions^2) to one
+                # bounded scan per barrier attempt.
+                self._try_publish_first_page_preview(task.research_id)
+            if not complete and phase_complete:
                 if not self.runs.claim_phase_finalization(task.research_id, phase):
                     self._publish_phase_barrier(
-                        self._required_job(task.research_id),
+                        job,
                         phase,
                         attempt=attempt + 1,
                         credential_capability=task.credential_capability,
@@ -2523,7 +2538,7 @@ class ResearchEngine:
                 if complete:
                     if not self.runs.claim_phase_finalization(task.research_id, phase):
                         self._publish_phase_barrier(
-                            self._required_job(task.research_id),
+                            job,
                             phase,
                             attempt=attempt + 1,
                             credential_capability=task.credential_capability,
@@ -2543,7 +2558,7 @@ class ResearchEngine:
                         raise RuntimeError("ready metadata pages are not durably readable")
         if not complete:
             self._publish_phase_barrier(
-                self._required_job(task.research_id),
+                job,
                 phase,
                 attempt=attempt + 1,
                 credential_capability=task.credential_capability,
@@ -2831,7 +2846,12 @@ class ResearchEngine:
                         follow_up,
                         task.credential_capability,
                     )
-            if phase is MetadataPhase.DISCOVERY:
+            # A hosted broad run can finish dozens of page-one workers at once.
+            # Letting every worker scan every planned first page makes preview
+            # publication quadratic in the partition count. Its single global
+            # phase barrier performs the same observed-only check instead. The
+            # local compatibility path retains its immediate in-process preview.
+            if phase is MetadataPhase.DISCOVERY and not self._is_bulk_job(job):
                 self._try_publish_first_page_preview(task.research_id)
         return existing
 
@@ -4035,44 +4055,69 @@ class ResearchEngine:
         phase: MetadataPhase,
         partitions: Sequence[MetadataPartition],
     ) -> bool:
-        for partition in partitions:
-            first_values = self.runs.page_readiness_for(
-                research_id,
-                phase,
-                partition.partition_id,
-                (1,),
+        planned = tuple(partitions)
+        # Preserve the early-incomplete exit without serializing a terminal
+        # barrier across dozens of private-Blob round trips. Small batches cap
+        # read pressure; results remain in immutable plan order and every
+        # validation below is unchanged.
+        for start in range(0, len(planned), self.partition_read_concurrency):
+            batch = planned[start : start + self.partition_read_concurrency]
+            complete = self._bounded_partition_map(
+                batch,
+                lambda partition: self._metadata_partition_complete(
+                    research_id,
+                    phase,
+                    partition,
+                ),
+                thread_name_prefix="kbd-partition-ready",
             )
-            if len(first_values) != 1:
+            if not all(complete):
                 return False
-            first = first_values[0]
-            if (
-                first.phase is not phase
-                or first.partition_id != partition.partition_id
-                or first.dataset != partition.dataset
-                or first.page != 1
-                or first.page_size != partition.page_size
-            ):
-                raise RuntimeError("metadata page readiness does not match its partition")
-            expected_pages = max(1, (first.total_count + first.page_size - 1) // first.page_size)
-            following_numbers = tuple(range(2, expected_pages + 1))
-            following = self.runs.page_readiness_for(
-                research_id,
-                phase,
-                partition.partition_id,
-                following_numbers,
-            )
-            if len(following) != len(following_numbers):
-                return False
-            readiness = (first, *following)
-            if tuple(item.page for item in readiness) != tuple(range(1, expected_pages + 1)):
-                raise RuntimeError("metadata page readiness sequence is invalid")
-            if any(
-                item.total_count != first.total_count
-                or item.page_size != first.page_size
-                or item.dataset != first.dataset
-                for item in readiness
-            ):
-                raise RuntimeError("metadata page readiness totals are inconsistent")
+        return True
+
+    def _metadata_partition_complete(
+        self,
+        research_id: str,
+        phase: MetadataPhase,
+        partition: MetadataPartition,
+    ) -> bool:
+        first_values = self.runs.page_readiness_for(
+            research_id,
+            phase,
+            partition.partition_id,
+            (1,),
+        )
+        if len(first_values) != 1:
+            return False
+        first = first_values[0]
+        if (
+            first.phase is not phase
+            or first.partition_id != partition.partition_id
+            or first.dataset != partition.dataset
+            or first.page != 1
+            or first.page_size != partition.page_size
+        ):
+            raise RuntimeError("metadata page readiness does not match its partition")
+        expected_pages = max(1, (first.total_count + first.page_size - 1) // first.page_size)
+        following_numbers = tuple(range(2, expected_pages + 1))
+        following = self.runs.page_readiness_for(
+            research_id,
+            phase,
+            partition.partition_id,
+            following_numbers,
+        )
+        if len(following) != len(following_numbers):
+            return False
+        readiness = (first, *following)
+        if tuple(item.page for item in readiness) != tuple(range(1, expected_pages + 1)):
+            raise RuntimeError("metadata page readiness sequence is invalid")
+        if any(
+            item.total_count != first.total_count
+            or item.page_size != first.page_size
+            or item.dataset != first.dataset
+            for item in readiness
+        ):
+            raise RuntimeError("metadata page readiness totals are inconsistent")
         return True
 
     def _deferred_routes_complete(
@@ -4114,8 +4159,11 @@ class ResearchEngine:
     ) -> MetadataCollection | None:
         """Load and validate each immutable page exactly once for this attempt."""
 
-        page_sets: dict[str, tuple[ApiPage, ...]] = {}
-        for partition in partitions:
+        planned = tuple(partitions)
+
+        def load_partition(
+            partition: MetadataPartition,
+        ) -> tuple[str, tuple[ApiPage, ...]] | None:
             pages = self.runs.pages(research_id, phase, partition.partition_id)
             first = next((page for page in pages if page.page == 1), None)
             if first is None or first.total_count is None:
@@ -4126,16 +4174,41 @@ class ResearchEngine:
             )
             if {page.page for page in pages} != set(range(1, expected_pages + 1)):
                 return None
-            page_sets[partition.partition_id] = pages
+            return partition.partition_id, pages
+
+        loaded = self._bounded_partition_map(
+            planned,
+            load_partition,
+            thread_name_prefix="kbd-partition-page-read",
+        )
+        if any(item is None for item in loaded):
+            return None
+        page_sets = dict(cast(tuple[str, tuple[ApiPage, ...]], item) for item in loaded)
         results = {
             partition.partition_id: assemble_partition_pages(
                 partition,
                 page_sets[partition.partition_id],
             )
-            for partition in partitions
+            for partition in planned
         }
-        client = _ArtifactResultClient(partitions, results)
-        return MetadataCollector(cast(AssemblyOpenApiClient, client)).collect(partitions)
+        client = _ArtifactResultClient(planned, results)
+        return MetadataCollector(cast(AssemblyOpenApiClient, client)).collect(planned)
+
+    def _bounded_partition_map(
+        self,
+        partitions: Sequence[MetadataPartition],
+        operation: Callable[[MetadataPartition], _Value],
+        *,
+        thread_name_prefix: str,
+    ) -> tuple[_Value, ...]:
+        planned = tuple(partitions)
+        if len(planned) <= 1 or self.partition_read_concurrency == 1:
+            return tuple(operation(partition) for partition in planned)
+        with ThreadPoolExecutor(
+            max_workers=min(self.partition_read_concurrency, len(planned)),
+            thread_name_prefix=thread_name_prefix,
+        ) as executor:
+            return tuple(executor.map(operation, planned))
 
     def _publish_page(
         self,
