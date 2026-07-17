@@ -59,8 +59,8 @@
   carry their verified boundary into finalization instead of re-reading the full receipt set. Hosted
   run outcomes now keep a verified compact reference instead of duplicating the complete parsed PDF
   text per investigation; finalization restores those global parsed objects in bounded parallel reads.
-  This preserves every source page and character while removing multi-megabyte per-run PUTs and
-  repeated full-text status polling.
+  This preserves every parsed page segment and extracted character while removing multi-megabyte
+  per-run PUTs and repeated full-text status polling.
 - Resolve a warm official-document cache through immutable pointer metadata plus Blob HEAD size,
   without transferring the preserved PDF body before reading its parsed result. Concurrent cold-cache
   parsers now accept an equivalent immutable winner even when their observation timestamps differ,
@@ -75,8 +75,8 @@
   exact/interactive coordinator and barrier slots on `kbd-research-control`. Broad coordinators,
   barriers, metadata, and PDF work cannot consume either exact queue's admission budget. The
   recovery cron checks the matching consumer group for all three deployment-pinned topics. These
-  are admission ceilings rather than reserved project compute; production acceptance is measured
-  separately with six exact and two complete broad investigations.
+  are admission ceilings rather than reserved project compute; the production acceptance matrix
+  exercises six exact and two complete broad investigations separately.
 - Keep the public `/mcp` endpoint and previously issued `/mcp/t/...` capability URLs unchanged;
   the three-lane Queue split is internal and does not require Claude.ai or ChatGPT users to
   reconnect.
