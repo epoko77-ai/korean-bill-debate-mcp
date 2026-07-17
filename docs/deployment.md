@@ -88,18 +88,18 @@ The hosted defaults publish at most seven page tasks directly from the request; 
 delayed phase barrier, an exact investigation seeds no more than eight initial Queue messages.
 Larger exact metadata plans open one durable sixteen-item window at a time. A readiness barrier
 verifies that exact window before opening its successor, preserving interactive isolation on the
-32-slot `kbd-research` consumer.
+24-slot `kbd-research` consumer.
 
 Broad, non-exact top-level discovery and deferred-routing plans publish fixed, bounded sixteen-item
 coordinator shards through one durable ingress dispatcher; the coordinators, leaves, and global
-barriers all run on the separate 24-slot `kbd-research-bulk` consumer. One global completion barrier
+barriers all run on the separate 32-slot `kbd-research-bulk` consumer. One global completion barrier
 per phase verifies every partition, bill-status route, and bill-document route in its immutable plan
 before assembly; it does not publish duplicate successor shards. Broad
 official-text hydration uses the same fixed-shard principle, while the finalizer still requires
-every compact document completion receipt before loading the full-text outcomes once. Fan-out
+every write-once terminal outcome before publishing the snapshot. Fan-out
 coordinators and readiness/finalization barriers for exact/interactive runs use the 8-slot
 `kbd-research-control` consumer. Broad traffic therefore cannot consume either exact queue's
-admission budget. The configured trigger ceilings are 32 exact + 24 bulk + 8 control = 64 in-flight
+admission budget. The configured trigger ceilings are 24 exact + 32 bulk + 8 control = 64 in-flight
 Queue callbacks. These are Queue
 admission ceilings, not a guarantee of project-wide compute reservation.
 

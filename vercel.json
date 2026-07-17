@@ -22,7 +22,7 @@
           "topic": "kbd-research",
           "retryAfterSeconds": 15,
           "initialDelaySeconds": 0,
-          "maxConcurrency": 32
+          "maxConcurrency": 24
         }
       ]
     },
@@ -34,7 +34,7 @@
           "topic": "kbd-research-bulk",
           "retryAfterSeconds": 15,
           "initialDelaySeconds": 0,
-          "maxConcurrency": 24
+          "maxConcurrency": 32
         }
       ]
     },

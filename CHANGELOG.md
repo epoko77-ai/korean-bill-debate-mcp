@@ -64,11 +64,13 @@
   first-pass broad snapshot no longer pays a preliminary GET for every index and text shard.
 - Include a validated research ID and a bounded, credential-free last-progress snapshot in failed
   production-matrix results so a stalled live job can be traced without exposing its user API key.
-- Partition the 64-message production Queue ceiling into 32 exact/interactive leaf slots on
-  `kbd-research`, 24 fully isolated broad-work slots on `kbd-research-bulk`, and 8
+- Partition the 64-message production Queue ceiling into 24 exact/interactive leaf slots on
+  `kbd-research`, 32 fully isolated broad-work slots on `kbd-research-bulk`, and 8
   exact/interactive coordinator and barrier slots on `kbd-research-control`. Broad coordinators,
   barriers, metadata, and PDF work cannot consume either exact queue's admission budget. The
-  recovery cron checks the matching consumer group for all three deployment-pinned topics.
+  recovery cron checks the matching consumer group for all three deployment-pinned topics. This
+  measured rebalance keeps six concurrent exact investigations within their 300-second terminal
+  budget while giving two complete 120-document broad runs one fewer PDF-processing wave.
 - Keep the public `/mcp` endpoint and previously issued `/mcp/t/...` capability URLs unchanged;
   the three-lane Queue split is internal and does not require Claude.ai or ChatGPT users to
   reconnect.

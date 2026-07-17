@@ -44,7 +44,7 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
             "topic": "kbd-research",
             "retryAfterSeconds": 15,
             "initialDelaySeconds": 0,
-            "maxConcurrency": 32,
+            "maxConcurrency": 24,
         }
     ]
     bulk_queue_function = config["functions"]["api/queues/kbd-research-bulk.ts"]
@@ -55,7 +55,7 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
             "topic": "kbd-research-bulk",
             "retryAfterSeconds": 15,
             "initialDelaySeconds": 0,
-            "maxConcurrency": 24,
+            "maxConcurrency": 32,
         }
     ]
     control_queue_function = config["functions"]["api/queues/kbd-research-control.ts"]
