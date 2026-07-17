@@ -880,7 +880,7 @@ def test_bulk_lane_publishes_fixed_document_shards_without_claiming_global_recei
     assert all("receipt_gated" not in dict(task.payload) for task in fanouts)
 
     # Finish the terminal range first. Its local barrier may open finalization,
-    # but the global receipt check must not assemble a partial snapshot.
+    # but the global terminal-outcome check must not assemble a partial snapshot.
     value.process_metadata_task(fanouts[1])
     last_documents = [
         task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
@@ -898,8 +898,6 @@ def test_bulk_lane_publishes_fixed_document_shards_without_claiming_global_recei
         )
     )
     first_finalize = task_with(queue, work_kind="document_finalize_barrier", attempt=1)
-    original_receipt_check = value._document_receipts_complete
-
     def unexpected_global_receipt_scan(*_args: Any, **_kwargs: Any) -> bool:
         raise AssertionError("broad finalization repeated the global leaf-receipt scan")
 
@@ -911,7 +909,6 @@ def test_bulk_lane_publishes_fixed_document_shards_without_claiming_global_recei
     assert value.process_finalize_task(first_finalize) is None
     assert runs.get_snapshot(first_finalize.research_id) is None
 
-    monkeypatch.setattr(value, "_document_receipts_complete", original_receipt_check)
     value.process_metadata_task(fanouts[0])
     last_ids = {task.work_id for task in last_documents}
     first_documents = [
@@ -920,22 +917,14 @@ def test_bulk_lane_publishes_fixed_document_shards_without_claiming_global_recei
         if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT and task.work_id not in last_ids
     ]
     assert len(first_documents) == 8
-    for task in first_documents:
+    for task in first_documents[:-1]:
         process_document(value, task)
-    value.process_metadata_task(
-        task_with(
-            queue,
-            work_kind="document_window_barrier",
-            start=0,
-            stop=8,
-            attempt=1,
-        )
-    )
-    monkeypatch.setattr(
-        value,
-        "_document_receipts_complete",
-        unexpected_global_receipt_scan,
-    )
+    # The terminal outcome is the stronger finalization boundary. Simulate a
+    # worker that durably wrote it but lost its generic completion receipt and
+    # Queue ACK; broad finalization must still succeed without a second scan.
+    receiptless = first_documents[-1]
+    assert value.process_document_task(receiptless).terminal is True
+    assert runs.get_task_completion(receiptless) is None
     completed = value.process_finalize_task(
         task_with(queue, work_kind="document_finalize_barrier", attempt=2)
     )
