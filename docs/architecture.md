@@ -140,6 +140,12 @@ Each broad document-window barrier proves its own compact leaf receipts. The ter
 open finalization while a sibling is still running, so the global finalizer validates the complete
 set of stronger write-once terminal outcomes directly; one missing outcome still blocks publication
 and retries instead of producing a partial snapshot.
+Successful hosted outcomes contain integrity-bound document metadata, hashes, counts, and the
+global parsed-object key—not a second copy of every PDF page. Status polling therefore reads small
+terminal records. Finalization restores the globally preserved parsed documents with bounded
+parallel reads and verifies kind, URL, source hash, parser version, text hash, page count, character
+count, and object key before any evidence is published. Warm workers resolve raw source identity
+with pointer metadata and Blob HEAD rather than transferring the preserved PDF body again.
 This internal split does not change the stable public `/mcp` endpoint or previously issued
 `/mcp/t/...` capability URLs.
 The workspace still uses the earlier single-request alpha boundary and does not inherit background

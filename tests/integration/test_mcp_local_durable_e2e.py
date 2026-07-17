@@ -328,6 +328,11 @@ class _Worker:
             document=document,
         )
 
+    def hydrate(self, result: DocumentWorkResult) -> DocumentWorkResult:
+        hydrated = self.process(result.kind, result.official_url)
+        assert replace(hydrated, document=None) == result
+        return hydrated
+
 
 class _DrainingBackend(DurableResearchBackend):
     """Model a worker fleet after the first observable status poll."""

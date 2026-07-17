@@ -55,6 +55,30 @@ class RawOfficialDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class OfficialDocumentSource:
+    """Small, integrity-bound description of one preserved official PDF."""
+
+    kind: OfficialDocumentKind
+    official_url: str
+    media_type: str
+    source_hash: str
+    retrieved_at: datetime
+    byte_count: int
+
+    def __post_init__(self) -> None:
+        _validate_official_url(self.official_url)
+        _validate_sha256(self.source_hash)
+        if not self.media_type.strip() or self.byte_count < 1:
+            raise ValueError("official document media type and byte count are required")
+        if self.retrieved_at.tzinfo is None:
+            raise ValueError("retrieved_at must be timezone-aware")
+
+    @property
+    def object_key(self) -> str:
+        return f"official/raw/{self.source_hash}"
+
+
+@dataclass(frozen=True, slots=True)
 class TextSegment:
     """One parsed locator, normally an original PDF page."""
 
@@ -164,6 +188,10 @@ class OfficialDocumentStore(Protocol):
 
     def latest_raw_for_url(self, official_url: str) -> RawOfficialDocument | None: ...
 
+    def latest_source_for_url(
+        self, official_url: str
+    ) -> OfficialDocumentSource | None: ...
+
     def put_parsed(self, document: ParsedOfficialDocument) -> str: ...
 
     def get_parsed(
@@ -186,6 +214,8 @@ class OfficialDocumentBlobClient(Protocol):
     ) -> object: ...
 
     def get(self, pathname: str) -> bytes | None: ...
+
+    def size(self, pathname: str) -> int: ...
 
     def iter_objects(self, *, prefix: str) -> Iterable[str]: ...
 
@@ -260,6 +290,32 @@ class FilesystemOfficialDocumentStore:
             raise RuntimeError("official URL cache pointer does not match")
         return self.get_raw(str(pointer.get("source_hash") or ""))
 
+    def latest_source_for_url(
+        self, official_url: str
+    ) -> OfficialDocumentSource | None:
+        """Resolve a cached source without loading the preserved PDF bytes."""
+
+        _validate_official_url(official_url)
+        pointer_path = self._url_pointer_path(official_url)
+        if not pointer_path.exists():
+            return None
+        pointer = _read_json(pointer_path)
+        if pointer.get("official_url") != official_url:
+            raise RuntimeError("official URL cache pointer does not match")
+        source_hash = str(pointer.get("source_hash") or "")
+        _validate_sha256(source_hash)
+        content_path = self.root / f"official/raw/{source_hash}"
+        metadata_path = content_path.with_suffix(".json")
+        if not content_path.exists() or not metadata_path.exists():
+            raise RuntimeError("official URL pointer refers to a missing raw document")
+        metadata = _read_json(metadata_path)
+        return _source_from_metadata(
+            metadata,
+            source_hash=source_hash,
+            official_url=official_url,
+            byte_count=content_path.stat().st_size,
+        )
+
     def put_parsed(self, document: ParsedOfficialDocument) -> str:
         raw = self.get_raw(document.source_hash)
         if raw is None:
@@ -269,10 +325,13 @@ class FilesystemOfficialDocumentStore:
         path = self.root / document.object_key
         path.parent.mkdir(parents=True, exist_ok=True)
         encoded = _json_bytes(document.to_dict())
-        if path.exists() and path.read_bytes() != encoded:
-            raise RuntimeError("parser version produced non-deterministic output")
-        if not path.exists():
-            _atomic_write(path, encoded)
+        if path.exists():
+            _verify_equivalent_parsed(path.read_bytes(), document)
+        else:
+            try:
+                _atomic_write_once(path, encoded)
+            except FileExistsError:
+                _verify_equivalent_parsed(path.read_bytes(), document)
         return document.object_key
 
     def get_parsed(
@@ -376,31 +435,10 @@ class VercelBlobOfficialDocumentStore:
         return _decode_raw_document(content, metadata, source_hash=source_hash)
 
     def latest_raw_for_url(self, official_url: str) -> RawOfficialDocument | None:
-        _validate_official_url(official_url)
-        client = self._client()
-        prefix = self._url_pointer_prefix(official_url)
-        try:
-            pathnames = tuple(client.iter_objects(prefix=prefix))
-        except Exception:
-            raise RuntimeError("Vercel Blob official URL pointer list failed") from None
-        if not pathnames:
+        source = self.latest_source_for_url(official_url)
+        if source is None:
             return None
-
-        observations: list[tuple[datetime, str, str]] = []
-        for pathname in pathnames:
-            observations.append(
-                self._read_pointer(
-                    client,
-                    pathname,
-                    prefix=prefix,
-                    official_url=official_url,
-                )
-            )
-        retrieved_at, source_hash, _pointer_hash = max(
-            observations,
-            key=lambda item: (item[0].astimezone(UTC), item[1], item[2]),
-        )
-        raw = self.get_raw(source_hash)
+        raw = self.get_raw(source.source_hash)
         if raw is None:
             raise RuntimeError("official URL pointer refers to a missing raw document")
         if raw.official_url != official_url:
@@ -412,6 +450,59 @@ class VercelBlobOfficialDocumentStore:
             official_url=raw.official_url,
             media_type=raw.media_type,
             content=raw.content,
+            retrieved_at=source.retrieved_at,
+        )
+
+    def latest_source_for_url(
+        self, official_url: str
+    ) -> OfficialDocumentSource | None:
+        """Resolve a cached source without transferring the preserved PDF body."""
+
+        _validate_official_url(official_url)
+        client = self._client()
+        prefix = self._url_pointer_prefix(official_url)
+        try:
+            pathnames = tuple(client.iter_objects(prefix=prefix))
+        except Exception:
+            raise RuntimeError("Vercel Blob official URL pointer list failed") from None
+        if not pathnames:
+            return None
+        observations = tuple(
+            self._read_pointer(
+                client,
+                pathname,
+                prefix=prefix,
+                official_url=official_url,
+            )
+            for pathname in pathnames
+        )
+        retrieved_at, source_hash, _pointer_hash = max(
+            observations,
+            key=lambda item: (item[0].astimezone(UTC), item[1], item[2]),
+        )
+        content_path = self._blob_path(f"official/raw/{source_hash}")
+        encoded_metadata = self._safe_get(client, f"{content_path}.json")
+        if encoded_metadata is None:
+            raise RuntimeError("official URL pointer refers to missing raw metadata")
+        try:
+            size_reader = client.size
+        except AttributeError:
+            content = self._safe_get(client, content_path)
+            if content is None:
+                raise RuntimeError(
+                    "official URL pointer refers to a missing raw document"
+                ) from None
+            byte_count = len(content)
+        else:
+            try:
+                byte_count = int(size_reader(content_path))
+            except Exception:
+                raise RuntimeError("Vercel Blob official document head failed") from None
+        return _source_from_metadata(
+            _decode_blob_json(encoded_metadata),
+            source_hash=source_hash,
+            official_url=official_url,
+            byte_count=byte_count,
             retrieved_at=retrieved_at,
         )
 
@@ -421,13 +512,39 @@ class VercelBlobOfficialDocumentStore:
             raise ValueError("raw official document must be preserved before parsed text")
         if raw.official_url != document.official_url or raw.kind is not document.kind:
             raise ValueError("parsed document does not match its preserved raw source")
-        self._put_immutable(
+        self._put_parsed_immutable(
             self._client(),
             self._blob_path(document.object_key),
-            _json_bytes(document.to_dict()),
-            content_type="application/json; charset=utf-8",
+            document,
         )
         return document.object_key
+
+    def _put_parsed_immutable(
+        self,
+        client: OfficialDocumentBlobClient,
+        pathname: str,
+        document: ParsedOfficialDocument,
+    ) -> None:
+        encoded = _json_bytes(document.to_dict())
+        existing = self._safe_get(client, pathname)
+        if existing is not None:
+            _verify_equivalent_parsed(existing, document)
+            return
+        try:
+            client.put(
+                pathname,
+                encoded,
+                access=self.access,
+                add_random_suffix=False,
+                overwrite=False,
+                content_type="application/json; charset=utf-8",
+            )
+        except Exception:
+            raced = self._safe_get(client, pathname, suppress_errors=True)
+            if raced is not None:
+                _verify_equivalent_parsed(raced, document)
+                return
+            raise RuntimeError("Vercel Blob official document write failed") from None
 
     def get_parsed(
         self, source_hash: str, parser_version: str
@@ -667,6 +784,23 @@ class _VercelBlobOfficialDocumentModuleClient:
                 return content
         raise TypeError("Vercel Blob SDK returned unsupported content")
 
+    def size(self, pathname: str) -> int:
+        head = getattr(self.module, "head", None)
+        if callable(head):
+            result = head(pathname, token=self.token)
+            value = (
+                result.get("size")
+                if isinstance(result, Mapping)
+                else getattr(result, "size", None)
+            )
+            if isinstance(value, int) and value >= 0:
+                return value
+            raise TypeError("Vercel Blob head returned an invalid size")
+        content = self.get(pathname)
+        if content is None:
+            raise RuntimeError("Vercel Blob object is missing")
+        return len(content)
+
     def iter_objects(self, *, prefix: str) -> Iterable[str]:
         pathnames: list[str] = []
         iterator = getattr(self.module, "iter_objects", None)
@@ -763,6 +897,39 @@ def _raw_metadata(document: RawOfficialDocument) -> dict[str, Any]:
     }
 
 
+def _source_from_metadata(
+    metadata: Mapping[str, Any],
+    *,
+    source_hash: str,
+    official_url: str,
+    byte_count: int,
+    retrieved_at: datetime | None = None,
+) -> OfficialDocumentSource:
+    try:
+        if metadata.get("schema_version") != 1:
+            raise ValueError
+        if metadata.get("source_hash") != source_hash:
+            raise ValueError
+        if metadata.get("official_url") != official_url:
+            raise ValueError
+        stored_retrieved_at = datetime.fromisoformat(
+            str(metadata.get("retrieved_at") or "")
+        )
+        if stored_retrieved_at.tzinfo is None:
+            raise ValueError
+        result = OfficialDocumentSource(
+            kind=OfficialDocumentKind(str(metadata.get("kind") or "")),
+            official_url=official_url,
+            media_type=str(metadata.get("media_type") or ""),
+            source_hash=source_hash,
+            retrieved_at=retrieved_at or stored_retrieved_at,
+            byte_count=byte_count,
+        )
+    except (TypeError, ValueError, OverflowError):
+        raise RuntimeError("stored official document metadata is corrupt") from None
+    return result
+
+
 def _decode_blob_json(encoded: bytes) -> dict[str, Any]:
     try:
         payload = json.loads(encoded)
@@ -819,6 +986,25 @@ def _verify_raw_metadata(encoded: bytes, document: RawOfficialDocument) -> None:
         raise RuntimeError("immutable official document metadata conflicts")
 
 
+def _verify_equivalent_parsed(
+    encoded: bytes, document: ParsedOfficialDocument
+) -> None:
+    try:
+        existing = ParsedOfficialDocument.from_dict(_decode_blob_json(encoded))
+    except (TypeError, ValueError, OverflowError):
+        raise RuntimeError("stored parsed official document is corrupt") from None
+    if (
+        existing.kind is not document.kind
+        or existing.official_url != document.official_url
+        or existing.source_hash != document.source_hash
+        or existing.parser_version != document.parser_version
+        or existing.segments != document.segments
+        or existing.warnings != document.warnings
+        or existing.text_hash != document.text_hash
+    ):
+        raise RuntimeError("parser version produced non-deterministic output")
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_bytes())
@@ -836,6 +1022,17 @@ def _atomic_write(path: Path, content: bytes) -> None:
     try:
         temporary.write_bytes(content)
         os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_write_once(path: Path, content: bytes) -> None:
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temporary.write_bytes(content)
+        os.link(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 

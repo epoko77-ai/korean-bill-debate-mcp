@@ -27,6 +27,8 @@ class FakeOfficialBlobClient:
         self.put_calls: list[dict[str, Any]] = []
         self.race_values: dict[str, bytes] = {}
         self.read_error: Exception | None = None
+        self.get_calls: list[str] = []
+        self.size_calls: list[str] = []
 
     def put(
         self,
@@ -56,9 +58,16 @@ class FakeOfficialBlobClient:
         return {"pathname": pathname}
 
     def get(self, pathname: str) -> bytes | None:
+        self.get_calls.append(pathname)
         if self.read_error is not None:
             raise self.read_error
         return self.objects.get(pathname)
+
+    def size(self, pathname: str) -> int:
+        self.size_calls.append(pathname)
+        if self.read_error is not None:
+            raise self.read_error
+        return len(self.objects[pathname])
 
     def iter_objects(self, *, prefix: str) -> tuple[str, ...]:
         if self.read_error is not None:
@@ -168,6 +177,14 @@ def test_blob_store_preserves_private_raw_metadata_and_pointer() -> None:
     assert all(call["overwrite"] is False for call in client.put_calls)
     assert all(call["add_random_suffix"] is False for call in client.put_calls)
 
+    client.get_calls.clear()
+    source = store.latest_source_for_url(raw.official_url)
+    assert source is not None
+    assert source.source_hash == raw.source_hash
+    assert source.byte_count == len(raw.content)
+    assert f"kbd/private/{raw.object_key}" not in client.get_calls
+    assert client.size_calls[-1] == f"kbd/private/{raw.object_key}"
+
     first_put_count = len(client.put_calls)
     assert store.put_raw(raw) == raw.object_key
     assert len(client.put_calls) == first_put_count
@@ -253,6 +270,43 @@ def test_blob_parsed_text_is_lossless_private_and_requires_raw() -> None:
     put_count = len(client.put_calls)
     assert store.put_parsed(parsed) == parsed.object_key
     assert len(client.put_calls) == put_count
+
+
+def test_blob_parsed_cache_accepts_equivalent_concurrent_winner() -> None:
+    client = FakeOfficialBlobClient()
+    store = VercelBlobOfficialDocumentStore(client=client)
+    raw = _raw()
+    store.put_raw(raw)
+    first = ParsedOfficialDocument(
+        kind=raw.kind,
+        official_url=raw.official_url,
+        source_hash=raw.source_hash,
+        parser_version="concurrent-parser-v1",
+        parsed_at=datetime(2026, 7, 13, tzinfo=UTC),
+        segments=(TextSegment("p.1", "동일한 전체 본문"),),
+    )
+    concurrent = ParsedOfficialDocument(
+        kind=first.kind,
+        official_url=first.official_url,
+        source_hash=first.source_hash,
+        parser_version=first.parser_version,
+        parsed_at=datetime(2026, 7, 14, tzinfo=UTC),
+        segments=first.segments,
+    )
+    conflicting = ParsedOfficialDocument(
+        kind=first.kind,
+        official_url=first.official_url,
+        source_hash=first.source_hash,
+        parser_version=first.parser_version,
+        parsed_at=datetime(2026, 7, 15, tzinfo=UTC),
+        segments=(TextSegment("p.1", "다른 본문"),),
+    )
+
+    assert store.put_parsed(first) == first.object_key
+    assert store.put_parsed(concurrent) == concurrent.object_key
+    assert store.get_parsed(raw.source_hash, first.parser_version) == first
+    with pytest.raises(RuntimeError, match="non-deterministic"):
+        store.put_parsed(conflicting)
 
 
 def test_blob_create_race_accepts_only_the_same_immutable_bytes() -> None:

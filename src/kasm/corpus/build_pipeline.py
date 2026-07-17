@@ -497,9 +497,12 @@ class CorpusBuildRunner:
                         break
                     continue
 
+                document = result.document
+                if document is None:
+                    raise RuntimeError("document worker returned a compact result")
                 if (
                     result.parser_version != current.parser_version
-                    or result.document.parser_version != current.parser_version
+                    or document.parser_version != current.parser_version
                 ):
                     prior = CorpusBuildOutcome(
                         inventory_item.work_item.work_id,
@@ -523,7 +526,7 @@ class CorpusBuildRunner:
                         document_date=inventory_item.document_date,
                         committee=inventory_item.committee,
                     ),
-                    result.document,
+                    document,
                 )
                 if bridged.document is None:
                     assert bridged.gap is not None

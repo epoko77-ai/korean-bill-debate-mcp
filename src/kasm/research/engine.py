@@ -976,6 +976,8 @@ class DocumentProcessor(Protocol):
         refresh: bool = False,
     ) -> DocumentWorkResult: ...
 
+    def hydrate(self, result: DocumentWorkResult) -> DocumentWorkResult: ...
+
 
 class ResearchFinalizer(Protocol):
     def build(self, context: FinalizationContext) -> ResearchSnapshot: ...
@@ -2739,7 +2741,9 @@ class ResearchEngine:
             for work_id in required_ids
         ):
             return None
-        outcomes = tuple(outcome_by_id[work_id] for work_id in required_ids)
+        outcomes = self._hydrate_document_outcomes(
+            tuple(outcome_by_id[work_id] for work_id in required_ids)
+        )
         document_gaps = tuple(
             CoverageGap(
                 next(
@@ -2778,6 +2782,23 @@ class ResearchEngine:
                     coverage=stored.coverage,
                 )
         return stored
+
+    def _hydrate_document_outcomes(
+        self, outcomes: tuple[DocumentOutcome, ...]
+    ) -> tuple[DocumentOutcome, ...]:
+        def hydrate(outcome: DocumentOutcome) -> DocumentOutcome:
+            result = outcome.result
+            if result is None or result.document is not None:
+                return outcome
+            return replace(outcome, result=self.document_worker.hydrate(result))
+
+        if len(outcomes) < 2 or self.partition_read_concurrency == 1:
+            return tuple(hydrate(outcome) for outcome in outcomes)
+        with ThreadPoolExecutor(
+            max_workers=min(self.partition_read_concurrency, len(outcomes)),
+            thread_name_prefix="kbd-document-hydrate",
+        ) as executor:
+            return tuple(executor.map(hydrate, outcomes))
 
     def _process_page_task(self, task: ResearchTask, payload: Mapping[str, Any]) -> ApiPage:
         phase = MetadataPhase(str(payload.get(_PHASE) or ""))
@@ -4801,6 +4822,8 @@ def _page_aware_transcripts(
         if outcome.status is not DocumentOutcomeStatus.SUCCEEDED or outcome.result is None:
             continue
         document = outcome.result.document
+        if document is None:
+            raise ValueError("successful document outcome was not hydrated")
         if document.kind is not OfficialDocumentKind.MINUTES:
             continue
         decision = meeting_by_url.get(document.official_url)

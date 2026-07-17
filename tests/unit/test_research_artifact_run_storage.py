@@ -702,6 +702,11 @@ def _seed_through_metadata(store: ArtifactResearchRunStore, state: FixtureState)
     store.put_metadata(research_id, state.metadata)
 
 
+def _compact_outcome(outcome: DocumentOutcome) -> DocumentOutcome:
+    assert outcome.result is not None
+    return replace(outcome, result=replace(outcome.result, document=None))
+
+
 def test_every_run_stage_survives_restart_and_preserves_120k_text(tmp_path: Path) -> None:
     state = _fixture()
     first = _store(tmp_path, state)
@@ -735,9 +740,18 @@ def test_every_run_stage_survives_restart_and_preserves_120k_text(tmp_path: Path
     assert restarted.get_metadata(research_id) == stored_metadata
     assert stored_metadata.discovery == stored_discovery
     restored_outcome = restarted.document_outcomes(research_id)[0]
-    assert restored_outcome == outcome
+    assert restored_outcome == _compact_outcome(outcome)
     assert restored_outcome.result is not None
-    assert restored_outcome.result.document.full_text == text
+    assert restored_outcome.result.document is None
+    terminal_refs = tuple(
+        ref
+        for ref in FilesystemResearchArtifactStore(tmp_path).list(
+            research_id, ArtifactKind.OUTCOME
+        )
+        if ref.logical_key == f"run/document-terminal/{state.work_item.work_id}"
+    )
+    assert len(terminal_refs) == 1
+    assert terminal_refs[0].byte_size < 10_000
     restored_evidence = restarted.get_overflow_evidence_record(
         research_id,
         snapshot.evidence[0].id,
@@ -1795,14 +1809,14 @@ def test_retryable_outcomes_are_append_only_then_terminal_becomes_current(
     assert store.put_document_outcome(research_id, first_retry) == first_retry
     assert store.put_document_outcome(research_id, second_retry) == second_retry
     assert store.get_document_outcome(research_id, state.work_item.work_id) is None
-    assert store.put_document_outcome(research_id, terminal) == terminal
-    assert store.get_document_outcome(research_id, state.work_item.work_id) == terminal
+    compact_terminal = _compact_outcome(terminal)
+    assert store.put_document_outcome(research_id, terminal) == compact_terminal
+    assert store.get_document_outcome(research_id, state.work_item.work_id) == compact_terminal
 
-    assert store.document_outcomes(research_id) == (terminal,)
+    assert store.document_outcomes(research_id) == (compact_terminal,)
     history = store.document_outcome_history(research_id)
     assert len(history) == 3
-    assert set(history) == {first_retry, second_retry, terminal}
-    assert terminal.result is not None and terminal.result.document.full_text == text
+    assert set(history) == {first_retry, second_retry, compact_terminal}
     assert (
         len(FilesystemResearchArtifactStore(tmp_path).list(research_id, ArtifactKind.OUTCOME)) == 3
     )
@@ -1866,7 +1880,7 @@ def test_planned_terminal_outcomes_use_fixed_reads_and_ignore_retry_history(
     assert store.document_outcomes_for(
         research_id,
         (second_item.work_id, state.work_item.work_id),
-    ) == (failed, succeeded)
+    ) == (failed, _compact_outcome(succeeded))
     assert artifacts.list_calls == 0
     assert sorted(artifacts.logical_reads) == sorted(
         (

@@ -249,11 +249,14 @@ def _bills(
 def _meetings(
     context: FinalizationContext,
 ) -> tuple[tuple[Meeting, ...], tuple[tuple[str, Mapping[str, Any]], ...]]:
-    successful_documents = {
-        outcome.result.document.official_url: outcome.result.document
-        for outcome in context.outcomes
-        if _outcome_status(outcome) == "succeeded" and outcome.result is not None
-    }
+    successful_documents: dict[str, ParsedOfficialDocument] = {}
+    for outcome in context.outcomes:
+        if _outcome_status(outcome) != "succeeded" or outcome.result is None:
+            continue
+        document = outcome.result.document
+        if document is None:
+            raise ValueError("successful document outcome was not hydrated")
+        successful_documents[document.official_url] = document
     meetings: list[Meeting] = []
     rows: list[tuple[str, Mapping[str, Any]]] = []
     for decision in sorted(
@@ -345,6 +348,8 @@ def _documents(
         except KeyError as exc:
             raise ValueError("successful document is absent from its manifest") from exc
         document = outcome.result.document
+        if document is None:
+            raise ValueError("successful document outcome was not hydrated")
         if document.kind is not item.kind or document.official_url != item.official_url:
             raise ValueError("successful document does not match its manifest item")
         previous = seen.get(outcome.work_id)

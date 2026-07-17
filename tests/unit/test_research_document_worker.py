@@ -5,6 +5,7 @@ import io
 import urllib.error
 import urllib.parse
 import zipfile
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -179,16 +180,25 @@ def test_same_source_hash_and_parser_version_is_an_idempotent_cache_hit(
 
     document_worker = worker(tmp_path, opener=opener, page_extractor=extractor)
     put_raw_calls = 0
+    get_raw_calls = 0
     original_put_raw = document_worker.store.put_raw
+    original_get_raw = document_worker.store.get_raw
 
     def counted_put_raw(raw: Any) -> Any:
         nonlocal put_raw_calls
         put_raw_calls += 1
         return original_put_raw(raw)
 
+    def counted_get_raw(source_hash: str) -> Any:
+        nonlocal get_raw_calls
+        get_raw_calls += 1
+        return original_get_raw(source_hash)
+
     monkeypatch.setattr(document_worker.store, "put_raw", counted_put_raw)
+    monkeypatch.setattr(document_worker.store, "get_raw", counted_get_raw)
 
     first = document_worker.process(OfficialDocumentKind.MINUTES, MINUTES_URL)
+    first_get_raw_calls = get_raw_calls
     second = document_worker.process(OfficialDocumentKind.MINUTES, MINUTES_URL)
     refreshed = document_worker.process(
         OfficialDocumentKind.MINUTES, MINUTES_URL, refresh=True
@@ -201,6 +211,10 @@ def test_same_source_hash_and_parser_version_is_an_idempotent_cache_hit(
     assert first.text_hash == second.text_hash == refreshed.text_hash
     assert opener_calls == 2
     assert parser_calls == 1
+    # A warm parsed cache verifies the source through metadata/stat only. It
+    # never transfers the preserved PDF body again.
+    assert get_raw_calls == first_get_raw_calls
+    assert document_worker.hydrate(replace(second, document=None)) == second
     # The URL-cache hit is already immutable and validated. Only the first and
     # explicit refresh downloads need a raw-store write.
     assert put_raw_calls == 2

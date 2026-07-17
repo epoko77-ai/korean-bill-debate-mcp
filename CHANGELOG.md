@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.1.0] - 2026-07-16
+## [1.1.0] - 2026-07-15
 
 ### Added
 
@@ -52,13 +52,19 @@
 - Run broad, non-exact discovery, deferred metadata, and official-text hydration as fixed,
   bounded sixteen-item coordinator shards on an isolated bulk lane. One global completion barrier
   per phase verifies its complete immutable metadata plan before advancing, and finalization still
-  waits for every compact document receipt. The public gateway publishes one retryable dispatcher
+  requires every write-once terminal document outcome. The public gateway publishes one retryable dispatcher
   instead of synchronously opening every discovery shard. Exact-bill work keeps its sequential
   readiness-gated windows.
 - Stop polling every full-text document outcome while hydration is incomplete. Receipt-gated chains
-  carry their verified boundary into finalization instead of re-reading the full receipt set, then
-  read the large outcomes once, return immediately after an already-built snapshot, and avoid
-  redundant raw-Blob rewrites on parsed-document cache hits.
+  carry their verified boundary into finalization instead of re-reading the full receipt set. Hosted
+  run outcomes now keep a verified compact reference instead of duplicating the complete parsed PDF
+  text per investigation; finalization restores those global parsed objects in bounded parallel reads.
+  This preserves every source page and character while removing multi-megabyte per-run PUTs and
+  repeated full-text status polling.
+- Resolve a warm official-document cache through immutable pointer metadata plus Blob HEAD size,
+  without transferring the preserved PDF body before reading its parsed result. Concurrent cold-cache
+  parsers now accept an equivalent immutable winner even when their observation timestamps differ,
+  while any difference in source identity, parser version, page text, or warnings still fails closed.
 - Publish new immutable Vercel Blob result shards with one atomic put-if-absent request. Duplicate,
   conflicting, and ambiguous committed writes still read back and verify the exact bytes, while a
   first-pass broad snapshot no longer pays a preliminary GET for every index and text shard.
@@ -68,9 +74,9 @@
   `kbd-research`, 32 fully isolated broad-work slots on `kbd-research-bulk`, and 8
   exact/interactive coordinator and barrier slots on `kbd-research-control`. Broad coordinators,
   barriers, metadata, and PDF work cannot consume either exact queue's admission budget. The
-  recovery cron checks the matching consumer group for all three deployment-pinned topics. This
-  measured rebalance keeps six concurrent exact investigations within their 300-second terminal
-  budget while giving two complete 120-document broad runs one fewer PDF-processing wave.
+  recovery cron checks the matching consumer group for all three deployment-pinned topics. These
+  are admission ceilings rather than reserved project compute; production acceptance is measured
+  separately with six exact and two complete broad investigations.
 - Keep the public `/mcp` endpoint and previously issued `/mcp/t/...` capability URLs unchanged;
   the three-lane Queue split is internal and does not require Claude.ai or ChatGPT users to
   reconnect.

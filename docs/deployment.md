@@ -118,6 +118,11 @@ raising this value trades more private-Blob pressure for lower terminal assembly
 Broad document windows verify their own leaf receipts. Their global finalizer reads every immutable
 terminal outcome exactly once and retries without publishing if any sibling window is unfinished;
 it does not repeat a second all-document generic-receipt scan.
+Hosted terminal outcomes are compact references. The finalizer hydrates their globally preserved
+parsed documents with the same bounded partition-read concurrency and fails closed on any identity,
+hash, page-count, character-count, or object-key mismatch. Warm document workers use private Blob
+HEAD plus immutable pointer metadata to avoid downloading cached raw PDF bytes before a parsed-cache
+hit.
 
 Do not set `KBD_RESEARCH_CORPUS_REVISION` merely to make the health field true. Set it only to a
 published, complete revision whose readiness marker and referenced objects have been verified. It

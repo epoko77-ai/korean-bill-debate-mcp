@@ -1355,6 +1355,7 @@ class ArtifactResearchRunStore:
 
     def put_document_outcome(self, research_id: str, outcome: DocumentOutcome) -> DocumentOutcome:
         gateway = self._require_active(research_id)
+        outcome = _compact_document_outcome(outcome)
         work_item = self.get_document_item(research_id, outcome.work_id)
         if work_item is None:
             raise ValueError("document outcome is absent from the stored manifest")
@@ -1366,7 +1367,7 @@ class ArtifactResearchRunStore:
 
         current_terminal = self._terminal_outcome(research_id, outcome.work_id)
         if current_terminal is not None:
-            if current_terminal != outcome:
+            if _compact_document_outcome(current_terminal) != outcome:
                 raise ResearchRunConflictError("terminal document outcome cannot be replaced")
             return current_terminal
 
@@ -2710,6 +2711,16 @@ def _status_partition_key(partition_id: str) -> str:
 def _hot_binding_hash(boundary_hash: str, logical_key: str, value: Any) -> str:
     value_hash = canonical_hash(_encode(value))
     return hashlib.sha256(f"{boundary_hash}\0{logical_key}\0{value_hash}".encode()).hexdigest()
+
+
+def _compact_document_outcome(outcome: DocumentOutcome) -> DocumentOutcome:
+    """Persist immutable document identity once, not full parsed text per run."""
+
+    result = outcome.result
+    if result is None or result.document is None:
+        return outcome
+    compact = replace(result, document=None)
+    return replace(outcome, result=compact)
 
 
 def _hot_entity(

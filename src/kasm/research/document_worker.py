@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from http.client import IncompleteRead
@@ -33,6 +33,7 @@ from kasm.adapters.korea.documents import (
 
 from .documents import (
     OfficialDocumentKind,
+    OfficialDocumentSource,
     OfficialDocumentStore,
     ParsedOfficialDocument,
     RawOfficialDocument,
@@ -131,7 +132,26 @@ class DocumentWorkResult:
     cache_hit: bool
     raw_object_key: str
     parsed_object_key: str
-    document: ParsedOfficialDocument
+    document: ParsedOfficialDocument | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.byte_count < 1
+            or self.page_count < 1
+            or self.character_count < 0
+            or not self.parser_version.strip()
+        ):
+            raise ValueError("document work accounting is invalid")
+        if self.document is not None and (
+            self.document.kind is not self.kind
+            or self.document.official_url != self.official_url
+            or self.document.source_hash != self.source_hash
+            or self.document.parser_version != self.parser_version
+            or self.document.text_hash != self.text_hash
+            or len(self.document.segments) != self.page_count
+            or len(self.document.full_text) != self.character_count
+        ):
+            raise ValueError("document work result does not match its parsed document")
 
     def to_dict(self) -> dict[str, str | int | bool]:
         return {
@@ -189,15 +209,28 @@ class OfficialDocumentWorker:
         """Process one document, reusing a matching immutable parse when possible."""
 
         _validate_kind_url(kind, official_url)
-        raw = None if refresh else self.store.latest_raw_for_url(official_url)
-        downloaded = raw is None
-        if raw is None:
+        source = None if refresh else self.store.latest_source_for_url(official_url)
+        if source is not None:
+            if source.kind is not kind:
+                raise PermanentDocumentError(
+                    "cached official document kind does not match the requested kind",
+                    code="cached_kind_mismatch",
+                )
+            cached = self.store.get_parsed(source.source_hash, self.parser_version)
+            if cached is not None:
+                if cached.kind is not kind or cached.official_url != official_url:
+                    raise PermanentDocumentError(
+                        "cached parsed document identity does not match the job",
+                        code="cached_identity_mismatch",
+                    )
+                return _cached_result(source, cached)
+            raw = self.store.get_raw(source.source_hash)
+            if raw is None:
+                raise RuntimeError("cached official document source is missing")
+            downloaded = False
+        else:
             raw = self._download(kind, official_url)
-        elif raw.kind is not kind:
-            raise PermanentDocumentError(
-                "cached official document kind does not match the requested kind",
-                code="cached_kind_mismatch",
-            )
+            downloaded = True
         if downloaded:
             # A freshly downloaded PDF is preserved before cache lookup and
             # parsing. A URL-cache hit already passed this immutable store's
@@ -215,6 +248,19 @@ class OfficialDocumentWorker:
         parsed = self._parse(raw)
         self.store.put_parsed(parsed)
         return _result(raw, parsed, cache_hit=False)
+
+    def hydrate(self, result: DocumentWorkResult) -> DocumentWorkResult:
+        """Restore and verify a compact run result from the global parsed cache."""
+
+        if result.document is not None:
+            return result
+        parsed = self.store.get_parsed(result.source_hash, result.parser_version)
+        if parsed is None:
+            raise RuntimeError("parsed official document referenced by run result is missing")
+        hydrated = replace(result, document=parsed)
+        if hydrated.parsed_object_key != parsed.object_key:
+            raise RuntimeError("parsed official document object key does not match run result")
+        return hydrated
 
     def _download(
         self, kind: OfficialDocumentKind, official_url: str
@@ -445,6 +491,26 @@ def _result(
         text_hash=parsed.text_hash,
         cache_hit=cache_hit,
         raw_object_key=raw.object_key,
+        parsed_object_key=parsed.object_key,
+        document=parsed,
+    )
+
+
+def _cached_result(
+    source: OfficialDocumentSource,
+    parsed: ParsedOfficialDocument,
+) -> DocumentWorkResult:
+    return DocumentWorkResult(
+        kind=source.kind,
+        official_url=source.official_url,
+        parser_version=parsed.parser_version,
+        byte_count=source.byte_count,
+        page_count=len(parsed.segments),
+        character_count=len(parsed.full_text),
+        source_hash=source.source_hash,
+        text_hash=parsed.text_hash,
+        cache_hit=True,
+        raw_object_key=source.object_key,
         parsed_object_key=parsed.object_key,
         document=parsed,
     )
