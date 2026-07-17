@@ -2634,7 +2634,8 @@ class ResearchEngine:
             return None
         manifest = self._required_document_manifest(task.research_id)
         job = self._required_job(task.research_id)
-        if not receipts_verified and not self._document_receipts_complete(
+        bulk_job = self._is_bulk_job(job)
+        if not bulk_job and not receipts_verified and not self._document_receipts_complete(
             job,
             manifest.items,
         ):
@@ -2645,9 +2646,13 @@ class ResearchEngine:
             )
             return None
         required_ids = tuple(item.work_id for item in manifest.items)
-        # Full outcomes can contain hundreds of thousands of official-text
-        # characters. Read them only once all compact task receipts prove every
-        # hydration worker has reached its durable terminal boundary.
+        # Exact/interactive windows use compact receipts before loading large
+        # outcomes. Broad fixed-window barriers each check their own leaf
+        # receipts; the terminal range may open finalization while a sibling is
+        # still running, so the complete write-once terminal-outcome set below
+        # remains the global authority. Reading every generic receipt first
+        # would duplicate that all-document check. A missing sibling outcome
+        # keeps the snapshot unavailable and republishes this barrier unchanged.
         outcomes = self.runs.document_outcomes_for(task.research_id, required_ids)
         if len(outcomes) != len(required_ids):
             self._publish_document_finalize_barrier(

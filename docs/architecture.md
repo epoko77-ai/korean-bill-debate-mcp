@@ -136,6 +136,10 @@ can still publish its truthful incomplete orientation map before full discovery 
 Terminal barriers check immutable source partitions in bounded parallel batches and preserve an
 early stop after the first incomplete batch. Once ready, raw partitions are likewise read in plan
 order with bounded parallel I/O before the unchanged deterministic collector validates them.
+Each broad document-window barrier proves its own compact leaf receipts. The terminal range may
+open finalization while a sibling is still running, so the global finalizer validates the complete
+set of stronger write-once terminal outcomes directly; one missing outcome still blocks publication
+and retries instead of producing a partial snapshot.
 This internal split does not change the stable public `/mcp` endpoint or previously issued
 `/mcp/t/...` capability URLs.
 The workspace still uses the earlier single-request alpha boundary and does not inherit background

@@ -115,6 +115,9 @@ discovery barrier, preventing an all-partition scan per completed worker.
 `KBD_RESEARCH_PARTITION_READ_CONCURRENCY=8` separately bounds independent partition-marker and
 partition-page reads. Incomplete barriers stop after the first batch containing a missing marker;
 raising this value trades more private-Blob pressure for lower terminal assembly latency.
+Broad document windows verify their own leaf receipts. Their global finalizer reads every immutable
+terminal outcome exactly once and retries without publishing if any sibling window is unfinished;
+it does not repeat a second all-document generic-receipt scan.
 
 Do not set `KBD_RESEARCH_CORPUS_REVISION` merely to make the health field true. Set it only to a
 published, complete revision whose readiness marker and referenced objects have been verified. It

@@ -84,6 +84,9 @@
   Raise bounded immutable-page read concurrency from 8 to 16 and check/assemble independent source
   partitions in batches of 8. This does not increase Open Assembly API request concurrency, alter
   deterministic ordering, or omit any source record.
+- Avoid a second global read of every generic document-task receipt after broad fixed-window
+  barriers have already verified their own ranges. Finalization still reads and validates every
+  write-once terminal outcome; any missing document keeps the snapshot unavailable and retryable.
 
 ### Known limitations
 

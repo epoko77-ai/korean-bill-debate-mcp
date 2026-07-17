@@ -815,7 +815,9 @@ def test_bulk_discovery_dispatch_recovers_a_partial_fixed_shard_publish(
     )
 
 
-def test_bulk_lane_publishes_fixed_document_shards_without_claiming_global_receipts() -> None:
+def test_bulk_lane_publishes_fixed_document_shards_without_claiming_global_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bill = {
         "BILL_NO": "2219564",
         "BILL_NAME": "인공지능 산업 진흥법 일부개정법률안",
@@ -896,9 +898,20 @@ def test_bulk_lane_publishes_fixed_document_shards_without_claiming_global_recei
         )
     )
     first_finalize = task_with(queue, work_kind="document_finalize_barrier", attempt=1)
+    original_receipt_check = value._document_receipts_complete
+
+    def unexpected_global_receipt_scan(*_args: Any, **_kwargs: Any) -> bool:
+        raise AssertionError("broad finalization repeated the global leaf-receipt scan")
+
+    monkeypatch.setattr(
+        value,
+        "_document_receipts_complete",
+        unexpected_global_receipt_scan,
+    )
     assert value.process_finalize_task(first_finalize) is None
     assert runs.get_snapshot(first_finalize.research_id) is None
 
+    monkeypatch.setattr(value, "_document_receipts_complete", original_receipt_check)
     value.process_metadata_task(fanouts[0])
     last_ids = {task.work_id for task in last_documents}
     first_documents = [
@@ -917,6 +930,11 @@ def test_bulk_lane_publishes_fixed_document_shards_without_claiming_global_recei
             stop=8,
             attempt=1,
         )
+    )
+    monkeypatch.setattr(
+        value,
+        "_document_receipts_complete",
+        unexpected_global_receipt_scan,
     )
     completed = value.process_finalize_task(
         task_with(queue, work_kind="document_finalize_barrier", attempt=2)
