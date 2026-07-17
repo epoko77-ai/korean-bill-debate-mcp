@@ -36,15 +36,15 @@ def test_hosted_runtime_is_composed_lazily_without_network_or_user_key(monkeypat
     assert isinstance(runtime.engine.queue, VercelResearchTaskQueue)
     assert runtime.engine.queue.topic == "kbd-research"
     assert runtime.engine.queue.control_topic == "kbd-research-control"
+    assert runtime.engine.queue.bulk_topic == "kbd-research-bulk"
+    assert runtime.engine.bulk_parallel_fanout is True
 
 
 def test_hosted_runtime_allows_explicit_smaller_metadata_pages(monkeypatch) -> None:
     monkeypatch.setenv("KBD_RESEARCH_CREDENTIAL_SECRET", Fernet.generate_key().decode())
     monkeypatch.setenv("KBD_RESEARCH_PAGE_SIZE", "250")
 
-    runtime = create_hosted_research_runtime(
-        assembly_api_key_provider=lambda: "user-key"
-    )
+    runtime = create_hosted_research_runtime(assembly_api_key_provider=lambda: "user-key")
 
     assert runtime.engine.partition_planner.page_size == 250
 
@@ -52,13 +52,13 @@ def test_hosted_runtime_allows_explicit_smaller_metadata_pages(monkeypatch) -> N
 def test_hosted_runtime_allows_explicit_control_queue_topic(monkeypatch) -> None:
     monkeypatch.setenv("KBD_RESEARCH_CREDENTIAL_SECRET", Fernet.generate_key().decode())
     monkeypatch.setenv("KBD_RESEARCH_CONTROL_QUEUE_TOPIC", "kbd-priority")
+    monkeypatch.setenv("KBD_RESEARCH_BULK_QUEUE_TOPIC", "kbd-background")
 
-    runtime = create_hosted_research_runtime(
-        assembly_api_key_provider=lambda: "user-key"
-    )
+    runtime = create_hosted_research_runtime(assembly_api_key_provider=lambda: "user-key")
 
     assert isinstance(runtime.engine.queue, VercelResearchTaskQueue)
     assert runtime.engine.queue.control_topic == "kbd-priority"
+    assert runtime.engine.queue.bulk_topic == "kbd-background"
 
 
 def test_hosted_runtime_requires_an_encryption_secret(monkeypatch) -> None:
@@ -75,9 +75,7 @@ def test_hosted_runtime_composes_revision_bound_blob_corpus_from_environment(
     monkeypatch.setenv("KBD_RESEARCH_CORPUS_REVISION", "a" * 64)
     monkeypatch.setenv("KBD_RESEARCH_CORPUS_PREFIX", "private/kbd-corpus")
 
-    runtime = create_hosted_research_runtime(
-        assembly_api_key_provider=lambda: "user-key"
-    )
+    runtime = create_hosted_research_runtime(assembly_api_key_provider=lambda: "user-key")
 
     provider = runtime.engine.corpus_recall_provider
     assert isinstance(provider, RevisionCorpusRecallProvider)

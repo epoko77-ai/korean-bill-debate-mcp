@@ -49,11 +49,12 @@
   ambiguous delivery backoff from ten minutes to 30 seconds. Redeliveries check the durable
   task-completion receipt before repeating work; normal and terminal retries are now capped at 60
   seconds instead of creating multi-minute blind spots.
-- Gate broad-search discovery, follow-up pages, bill status, document discovery, and official-text
-  hydration in durable sixteen-item windows. Each next window opens only after the current window's
-  immutable readiness markers or compact task receipts are complete. This removes the observed
-  up-front top-level route flood while preserving the complete planned source and document set;
-  follow-up page streams remain independently bounded per source partition.
+- Run broad, non-exact discovery, deferred metadata, and official-text hydration as fixed,
+  bounded sixteen-item coordinator shards on an isolated bulk lane. One global completion barrier
+  per phase verifies its complete immutable metadata plan before advancing, and finalization still
+  waits for every compact document receipt. The public gateway publishes one retryable dispatcher
+  instead of synchronously opening every discovery shard. Exact-bill work keeps its sequential
+  readiness-gated windows.
 - Stop polling every full-text document outcome while hydration is incomplete. Receipt-gated chains
   carry their verified boundary into finalization instead of re-reading the full receipt set, then
   read the large outcomes once, return immediately after an already-built snapshot, and avoid
@@ -63,18 +64,18 @@
   first-pass broad snapshot no longer pays a preliminary GET for every index and text shard.
 - Include a validated research ID and a bounded, credential-free last-progress snapshot in failed
   production-matrix results so a stalled live job can be traced without exposing its user API key.
-- Raise the production Queue ceiling from 8 to 64 in-flight messages and use readiness-gated,
-  sixteen-item hosted fan-out windows. Broad runs retain bounded coordinator publication instead
-  of inserting every planned route ahead of later exact-bill and interactive connector requests.
-- Split lightweight fan-out coordinators, readiness barriers, and finalization barriers into the
-  deployment-pinned `kbd-research-control` topic while keeping API, document, and PDF leaf work on
-  `kbd-research`. Each topic has its own push consumer and the recovery cron checks both matching
-  consumer groups, so a large leaf backlog no longer places the message that opens its next bounded
-  window behind that same backlog.
+- Partition the 64-message production Queue ceiling into 32 exact/interactive leaf slots on
+  `kbd-research`, 24 fully isolated broad-work slots on `kbd-research-bulk`, and 8
+  exact/interactive coordinator and barrier slots on `kbd-research-control`. Broad coordinators,
+  barriers, metadata, and PDF work cannot consume either exact queue's admission budget. The
+  recovery cron checks the matching consumer group for all three deployment-pinned topics.
+- Keep the public `/mcp` endpoint and previously issued `/mcp/t/...` capability URLs unchanged;
+  the three-lane Queue split is internal and does not require Claude.ai or ChatGPT users to
+  reconnect.
 - Ship the shared Queue callback as an explicit deployable JavaScript module instead of leaving a
   TypeScript extension in Vercel's emitted runtime import. CI keeps that module byte-for-byte aligned
-  with its strict TypeScript source, and the pre-deployment bundle smoke imports both generated Queue
-  handlers to catch missing shared modules before production traffic reaches them.
+  with its strict TypeScript source, and the pre-deployment bundle smoke imports all three generated
+  Queue handlers to catch missing shared modules before production traffic reaches them.
 - Update the Claude.ai and ChatGPT web-connection guides to the current official plan availability,
   menu paths, OAuth approval flow, per-chat activation step, and public `/mcp` endpoint.
 

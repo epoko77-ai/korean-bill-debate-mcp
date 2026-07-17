@@ -20,8 +20,8 @@ _REGION = re.compile(r"^[a-z][a-z0-9-]{1,15}$")
 _MAX_TASK_BYTES = 64 * 1024
 
 # These tasks coordinate bounded windows or prove that a phase can advance.
-# Keeping them off the high-volume leaf queue prevents a completed window from
-# waiting behind the very leaves whose successor it needs to schedule.
+# Interactive instances use the control topic; broad instances intentionally
+# remain on their fully isolated bulk topic.
 CONTROL_WORK_KINDS = frozenset(
     {
         "deferred_fanout",
@@ -29,6 +29,7 @@ CONTROL_WORK_KINDS = frozenset(
         "document_finalize_barrier",
         "document_fanout",
         "document_window_barrier",
+        "metadata_fanout_dispatch",
         "metadata_window_barrier",
         "page_fanout",
         "page_window_barrier",
@@ -181,6 +182,7 @@ class VercelResearchTaskQueue:
         *,
         topic: str = "kbd-research",
         control_topic: str | None = None,
+        bulk_topic: str | None = None,
         consumer: str = "kbd-workers",
         region: str | None = None,
         oidc_token_provider: Callable[[], str] | None = None,
@@ -189,23 +191,22 @@ class VercelResearchTaskQueue:
         transport: _Transport | None = None,
     ) -> None:
         selected_region = region or os.getenv("VERCEL_REGION") or "iad1"
-        if (
-            not _QUEUE_NAME.fullmatch(topic)
-            or (
-                control_topic is not None
-                and not _QUEUE_NAME.fullmatch(control_topic)
-            )
-            or not _QUEUE_NAME.fullmatch(consumer)
+        configured_topics = tuple(
+            value for value in (topic, control_topic, bulk_topic) if value is not None
+        )
+        if any(not _QUEUE_NAME.fullmatch(value) for value in configured_topics) or not (
+            _QUEUE_NAME.fullmatch(consumer)
         ):
             raise ValueError("queue topic and consumer names contain invalid characters")
-        if control_topic == topic:
-            raise ValueError("control queue topic must be distinct from the leaf topic")
+        if len(configured_topics) != len(set(configured_topics)):
+            raise ValueError("queue topics must be mutually distinct")
         if not _REGION.fullmatch(selected_region):
             raise ValueError("invalid Vercel queue region")
         if timeout <= 0:
             raise ValueError("queue timeout must be positive")
         self.topic = topic
         self.control_topic = control_topic
+        self.bulk_topic = bulk_topic
         self.consumer = consumer
         self.region = selected_region
         self._oidc_token_provider = oidc_token_provider or _default_oidc_token
@@ -257,9 +258,15 @@ class VercelResearchTaskQueue:
         return message_id
 
     def _publish_topic(self, task: ResearchTask) -> str:
-        work_kind = dict(task.payload).get("work_kind")
-        if self.control_topic is not None and work_kind in CONTROL_WORK_KINDS:
-            return self.control_topic
+        payload = dict(task.payload)
+        work_kind = payload.get("work_kind")
+        # Broad coordinators and barriers stay with their isolated bulk leaves.
+        # Exact/interactive control work keeps the dedicated control topic, so
+        # a wave of broad dispatches cannot delay an exact result boundary.
+        if payload.get("queue_lane") == "bulk" and self.bulk_topic is not None:
+            return self.bulk_topic
+        if work_kind in CONTROL_WORK_KINDS:
+            return self.control_topic or self.topic
         return self.topic
 
     def receive(
@@ -332,9 +339,7 @@ class VercelResearchTaskQueue:
                 f"{urllib.parse.quote(self.consumer, safe='')}/lease/"
                 f"{urllib.parse.quote(receipt_handle, safe='')}"
             ),
-            body=_canonical_json(
-                {"visibilityTimeoutSeconds": visibility_timeout_seconds}
-            ),
+            body=_canonical_json({"visibilityTimeoutSeconds": visibility_timeout_seconds}),
             headers={"Content-Type": "application/json"},
             expected={200, 204},
         )

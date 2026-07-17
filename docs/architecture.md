@@ -5,7 +5,8 @@
 ```text
 Hosted durable MCP
   → OAuth or legacy personal token → request-scoped Open Assembly key
-  → start_research → control queue + leaf queue → isolated metadata/document workers
+  → start_research → exact leaf (32) + bulk leaf (24) + control (8)
+  → isolated metadata/document workers
   → immutable job, coverage, overview, evidence-index, and source-text artifacts
   → status → complete map → core/selected text → optional exhaustive traversal
 
@@ -115,10 +116,22 @@ synthesis. The Assembly key never enters the LLM request, and the LLM key never 
 client. The browser does not persist either key in cookies or web storage.
 
 The durable queue, immutable run artifacts, and isolated document workers now exist for hosted MCP.
-Coordinator and barrier tasks use a deployment-pinned control topic, while official API page,
-document-discovery, and PDF hydration tasks use the higher-volume leaf topic. The separation keeps a
-completed window's successor out of its own leaf backlog; both paths retain the same at-least-once,
-idempotency, completion-receipt, retry, and same-deployment dispatch rules.
+Exact-bill and interactive leaf tasks use the deployment-pinned `kbd-research` topic with a
+32-message ceiling. Broad, non-exact leaves use `kbd-research-bulk` with a 24-message ceiling, while
+broad coordinators and barriers remain on that same fully isolated bulk topic. Exact/interactive
+fan-out coordinators and readiness/finalization barriers use `kbd-research-control` with an
+8-message ceiling. The configured trigger ceilings total 64. They isolate Queue admission; they do
+not claim a separate project-wide compute reservation.
+
+Broad ingress publishes one durable dispatcher, which then opens fixed, bounded discovery shards on
+the bulk lane; deferred routing follows the same fixed-shard model. One global completion barrier
+per phase verifies every immutable readiness marker before the workflow advances. Broad document
+hydration likewise makes bounded fixed shards runnable while finalization still requires every
+compact completion receipt. Exact-bill work remains sequentially readiness-gated, so bulk traffic
+cannot consume either exact queue budget. All three paths retain the
+same at-least-once, idempotency, completion-receipt, retry, and same-deployment dispatch rules.
+This internal split does not change the stable public `/mcp` endpoint or previously issued
+`/mcp/t/...` capability URLs.
 The workspace still uses the earlier single-request alpha boundary and does not inherit background
 retries or durable progress. Distributed ingress limits, cancellation, legacy artifact migration,
 and production corpus/deployment validation remain before platform stability. See [the workspace

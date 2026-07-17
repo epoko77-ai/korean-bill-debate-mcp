@@ -22,7 +22,19 @@
           "topic": "kbd-research",
           "retryAfterSeconds": 15,
           "initialDelaySeconds": 0,
-          "maxConcurrency": 64
+          "maxConcurrency": 32
+        }
+      ]
+    },
+    "api/queues/kbd-research-bulk.ts": {
+      "maxDuration": 300,
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "kbd-research-bulk",
+          "retryAfterSeconds": 15,
+          "initialDelaySeconds": 0,
+          "maxConcurrency": 24
         }
       ]
     },
@@ -34,7 +46,7 @@
           "topic": "kbd-research-control",
           "retryAfterSeconds": 15,
           "initialDelaySeconds": 0,
-          "maxConcurrency": 16
+          "maxConcurrency": 8
         }
       ]
     },

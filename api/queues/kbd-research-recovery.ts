@@ -18,12 +18,14 @@ import {
 
 const DEFAULT_TOPIC = "kbd-research";
 const DEFAULT_CONTROL_TOPIC = "kbd-research-control";
+const DEFAULT_BULK_TOPIC = "kbd-research-bulk";
 // Vercel derives this consumer group from api/queues/kbd-research.ts. Polling
 // the same group leases only messages that the primary push consumer has not
 // already claimed; a second group would replay every task as another copy.
 const DEFAULT_CONSUMER = "api_Squeues_Skbd-research_Dts";
 const DEFAULT_CONTROL_CONSUMER =
   "api_Squeues_Skbd-research-control_Dts";
+const DEFAULT_BULK_CONSUMER = "api_Squeues_Skbd-research-bulk_Dts";
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_MAX_TASKS = 16;
 const RECOVERY_DISPATCH_TIMEOUT_MS = 210_000;
@@ -111,14 +113,20 @@ function configuredRoutes(): readonly RecoveryRoute[] {
     DEFAULT_CONTROL_TOPIC,
   );
   const leafTopic = configuredName("KBD_RESEARCH_QUEUE_TOPIC", DEFAULT_TOPIC);
-  if (controlTopic === leafTopic) {
+  const bulkTopic = configuredName(
+    "KBD_RESEARCH_BULK_QUEUE_TOPIC",
+    DEFAULT_BULK_TOPIC,
+  );
+  if (new Set([controlTopic, leafTopic, bulkTopic]).size !== 3) {
     throw new Error("research recovery topics must be distinct");
   }
   // Check control work first. Rotating the starting route across concurrent
-  // slots prevents either topic from monopolizing recovery capacity.
+  // slots prevents any topic from monopolizing recovery capacity. Exact leaf
+  // work remains ahead of broad bulk work within each slot.
   return [
     { topic: controlTopic, consumer: DEFAULT_CONTROL_CONSUMER },
     { topic: leafTopic, consumer: DEFAULT_CONSUMER },
+    { topic: bulkTopic, consumer: DEFAULT_BULK_CONSUMER },
   ];
 }
 

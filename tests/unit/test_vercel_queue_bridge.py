@@ -44,12 +44,21 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
             "topic": "kbd-research",
             "retryAfterSeconds": 15,
             "initialDelaySeconds": 0,
-            "maxConcurrency": 64,
+            "maxConcurrency": 32,
         }
     ]
-    control_queue_function = config["functions"][
-        "api/queues/kbd-research-control.ts"
+    bulk_queue_function = config["functions"]["api/queues/kbd-research-bulk.ts"]
+    assert bulk_queue_function["maxDuration"] == 300
+    assert bulk_queue_function["experimentalTriggers"] == [
+        {
+            "type": "queue/v2beta",
+            "topic": "kbd-research-bulk",
+            "retryAfterSeconds": 15,
+            "initialDelaySeconds": 0,
+            "maxConcurrency": 24,
+        }
     ]
+    control_queue_function = config["functions"]["api/queues/kbd-research-control.ts"]
     assert control_queue_function["maxDuration"] == 300
     assert control_queue_function["experimentalTriggers"] == [
         {
@@ -57,7 +66,7 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
             "topic": "kbd-research-control",
             "retryAfterSeconds": 15,
             "initialDelaySeconds": 0,
-            "maxConcurrency": 16,
+            "maxConcurrency": 8,
         }
     ]
     assert config["functions"]["api/queues/kbd-research-recovery.ts"] == {
@@ -78,30 +87,33 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
             "source": "/_internal/research/dispatch",
             "destination": "/api/research_dispatch",
         },
-        {"source": "/(.*)", "destination": "/api/index"}
+        {"source": "/(.*)", "destination": "/api/index"},
     ]
 
 
 def test_queue_bridge_never_reads_failure_body_or_logs_task() -> None:
     root = Path(__file__).resolve().parents[2]
     entry = (root / "api/queues/kbd-research.ts").read_text()
+    bulk_entry = (root / "api/queues/kbd-research-bulk.ts").read_text()
     control_entry = (root / "api/queues/kbd-research-control.ts").read_text()
     callback = (root / "serverless/kbd-research-queue-callback.ts").read_text()
     shared = (root / "serverless/kbd-research-shared.mjs").read_text()
-    source = entry + control_entry + callback + shared
+    source = entry + bulk_entry + control_entry + callback + shared
 
-    assert 'handleCallback<unknown>' in callback
-    assert 'handleNodeCallback<unknown>' in callback
+    assert "handleCallback<unknown>" in callback
+    assert "handleNodeCallback<unknown>" in callback
     assert "export default nodeQueueRoute" in callback
-    assert 'currentDeploymentOrigin(request)' in callback
-    assert './kbd-research-shared.mjs' in callback
-    assert '../../serverless/kbd-research-queue-callback.js' in entry
-    assert '../../serverless/kbd-research-queue-callback.js' in control_entry
-    assert '../../serverless/kbd-research-queue-callback.ts' not in entry
-    assert '../../serverless/kbd-research-queue-callback.ts' not in control_entry
-    assert 'new URL(INTERNAL_PATH, deploymentOrigin)' in source
-    assert 'response.body?.cancel()' in source
-    assert 'const error = `research dispatch failed (${response.status})`' in source
+    assert "currentDeploymentOrigin(request)" in callback
+    assert "./kbd-research-shared.mjs" in callback
+    assert "../../serverless/kbd-research-queue-callback.js" in entry
+    assert "../../serverless/kbd-research-queue-callback.js" in bulk_entry
+    assert "../../serverless/kbd-research-queue-callback.js" in control_entry
+    assert "../../serverless/kbd-research-queue-callback.ts" not in entry
+    assert "../../serverless/kbd-research-queue-callback.ts" not in bulk_entry
+    assert "../../serverless/kbd-research-queue-callback.ts" not in control_entry
+    assert "new URL(INTERNAL_PATH, deploymentOrigin)" in source
+    assert "response.body?.cancel()" in source
+    assert "const error = `research dispatch failed (${response.status})`" in source
     assert "metadata.deliveryCount" in source
     assert '"x-kbd-delivery-count"' in source
     assert "MAX_PERMANENT_DELIVERY_ATTEMPTS = 3" in source

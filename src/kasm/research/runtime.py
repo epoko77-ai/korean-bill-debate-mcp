@@ -75,6 +75,10 @@ def create_hosted_research_runtime(
             "KBD_RESEARCH_CONTROL_QUEUE_TOPIC",
             "kbd-research-control",
         ),
+        bulk_topic=os.getenv(
+            "KBD_RESEARCH_BULK_QUEUE_TOPIC",
+            "kbd-research-bulk",
+        ),
         region=os.getenv("KBD_RESEARCH_QUEUE_REGION") or None,
         timeout=float(os.getenv("KBD_RESEARCH_QUEUE_TIMEOUT_SECONDS", "10")),
     )
@@ -123,23 +127,17 @@ def create_hosted_research_runtime(
         credentials=ResearchCredentialCodec(credential_secret),
         page_client_factory=page_client,
         resolver=MetadataCandidateResolver(),
-        bill_documents=OfficialBillDocumentDiscoverer(
-            BillDocumentsClient(timeout=api_timeout)
-        ),
+        bill_documents=OfficialBillDocumentDiscoverer(BillDocumentsClient(timeout=api_timeout)),
         document_worker=OfficialDocumentWorker(
             documents,
             parser_version=parser_version,
             timeout=float(os.getenv("KBD_RESEARCH_DOCUMENT_TIMEOUT_SECONDS", "30")),
-            max_bytes=int(
-                os.getenv("KBD_RESEARCH_DOCUMENT_MAX_BYTES", str(50 * 1024 * 1024))
-            ),
+            max_bytes=int(os.getenv("KBD_RESEARCH_DOCUMENT_MAX_BYTES", str(50 * 1024 * 1024))),
         ),
         finalizer=ConnectedResearchFinalizer(build_sha=build_sha),
         runs=StatusSnapshotResearchRunStore(
             artifacts,
-            page_read_concurrency=int(
-                os.getenv("KBD_RESEARCH_PAGE_READ_CONCURRENCY", "8")
-            ),
+            page_read_concurrency=int(os.getenv("KBD_RESEARCH_PAGE_READ_CONCURRENCY", "8")),
         ),
         status_page_size=int(os.getenv("KBD_RESEARCH_STATUS_PAGE_SIZE", "100")),
         direct_fanout_limit=int(os.getenv("KBD_RESEARCH_DIRECT_FANOUT_LIMIT", "7")),
@@ -148,9 +146,8 @@ def create_hosted_research_runtime(
         # receipts, leaving capacity for exact searches under the 64-message
         # production consumer ceiling.
         fanout_chunk_size=int(os.getenv("KBD_RESEARCH_FANOUT_CHUNK_SIZE", "16")),
-        fanout_delay_seconds=int(
-            os.getenv("KBD_RESEARCH_FANOUT_DELAY_SECONDS", "0")
-        ),
+        fanout_delay_seconds=int(os.getenv("KBD_RESEARCH_FANOUT_DELAY_SECONDS", "0")),
+        bulk_parallel_fanout=True,
         corpus_recall_provider=resolved_corpus_provider,
     )
     backend = DurableResearchBackend(

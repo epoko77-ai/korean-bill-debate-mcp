@@ -21,6 +21,7 @@ def _task(
     *,
     capability: str | None = None,
     work_kind: str | None = None,
+    queue_lane: str | None = None,
 ) -> ResearchTask:
     payload: tuple[tuple[str, str | int], ...] = (
         ("assembly_term", 22),
@@ -28,6 +29,8 @@ def _task(
     )
     if work_kind is not None:
         payload += (("work_kind", work_kind),)
+    if queue_lane is not None:
+        payload += (("queue_lane", queue_lane),)
     return ResearchTask(
         research_id="research_123",
         stage=ResearchTaskStage.COLLECT_METADATA,
@@ -85,7 +88,7 @@ def test_publish_uses_oidc_and_idempotency_without_leaking_token() -> None:
     assert b"secret-oidc" not in (request.data or b"")
 
 
-def test_publish_routes_only_coordinators_and_barriers_to_control_topic() -> None:
+def test_publish_routes_only_interactive_coordinators_and_barriers_to_control_topic() -> None:
     requests: list[urllib.request.Request] = []
 
     def transport(request: urllib.request.Request, _timeout: float) -> _HttpResponse:
@@ -95,13 +98,14 @@ def test_publish_routes_only_coordinators_and_barriers_to_control_topic() -> Non
     queue = VercelResearchTaskQueue(
         topic="kbd-research",
         control_topic="kbd-research-control",
+        bulk_topic="kbd-research-bulk",
         oidc_token_provider=lambda: "oidc",
         deployment_id_provider=lambda: "dpl_current",
         transport=transport,
     )
 
     for work_kind in sorted(CONTROL_WORK_KINDS):
-        task = _task(work_kind=work_kind)
+        task = _task(work_kind=work_kind, queue_lane="interactive")
         queue.publish(task)
         request = requests[-1]
         assert request.full_url.endswith("/topic/kbd-research-control")
@@ -116,14 +120,76 @@ def test_publish_routes_only_coordinators_and_barriers_to_control_topic() -> Non
     assert requests[-1].full_url.endswith("/topic/kbd-research")
 
 
-def test_control_topic_must_be_valid_and_distinct() -> None:
+def test_publish_routes_every_explicit_bulk_task_to_bulk_topic() -> None:
+    requests: list[urllib.request.Request] = []
+    queue = VercelResearchTaskQueue(
+        topic="kbd-research",
+        control_topic="kbd-research-control",
+        bulk_topic="kbd-research-bulk",
+        oidc_token_provider=lambda: "oidc",
+        deployment_id_provider=lambda: "dpl_current",
+        transport=lambda request, _timeout: (
+            requests.append(request) or _HttpResponse(201, {}, b'{"messageId":"msg_1"}')
+        ),
+    )
+
+    bulk_task = _task(work_kind="metadata_page", queue_lane="bulk")
+    queue.publish(bulk_task)
+    assert requests[-1].full_url.endswith("/topic/kbd-research-bulk")
+    assert requests[-1].get_header("Vqs-idempotency-key") == bulk_task.idempotency_key
+    assert requests[-1].get_header("Vqs-deployment-id") == "dpl_current"
+
+    bulk_control = _task(work_kind="phase_barrier", queue_lane="bulk")
+    queue.publish(bulk_control)
+    assert requests[-1].full_url.endswith("/topic/kbd-research-bulk")
+
+    queue.publish(_task(work_kind="document", queue_lane="interactive"))
+    assert requests[-1].full_url.endswith("/topic/kbd-research")
+
+    queue.publish(_task(work_kind="bill_documents", queue_lane="unknown"))
+    assert requests[-1].full_url.endswith("/topic/kbd-research")
+
+
+@pytest.mark.parametrize(
+    ("topic", "control_topic", "bulk_topic"),
+    [
+        ("kbd-research", "kbd-research", "kbd-research-bulk"),
+        ("kbd-research", "kbd-research-control", "kbd-research"),
+        ("kbd-research", "kbd-research-control", "kbd-research-control"),
+    ],
+)
+def test_queue_topics_must_be_valid_and_mutually_distinct(
+    topic: str,
+    control_topic: str,
+    bulk_topic: str,
+) -> None:
     with pytest.raises(ValueError, match="distinct"):
         VercelResearchTaskQueue(
-            topic="kbd-research",
-            control_topic="kbd-research",
+            topic=topic,
+            control_topic=control_topic,
+            bulk_topic=bulk_topic,
         )
+
+
+@pytest.mark.parametrize(
+    ("topic", "control_topic", "bulk_topic"),
+    [
+        ("invalid/topic", None, None),
+        ("kbd-research", "", None),
+        ("kbd-research", None, "topic with spaces"),
+    ],
+)
+def test_every_configured_queue_topic_must_be_valid(
+    topic: str,
+    control_topic: str | None,
+    bulk_topic: str | None,
+) -> None:
     with pytest.raises(ValueError, match="invalid"):
-        VercelResearchTaskQueue(control_topic="invalid/topic")
+        VercelResearchTaskQueue(
+            topic=topic,
+            control_topic=control_topic,
+            bulk_topic=bulk_topic,
+        )
 
 
 def test_queue_omits_deployment_partition_only_when_not_configured() -> None:
@@ -165,9 +231,7 @@ def test_receive_decodes_ndjson_and_acknowledges_opaque_receipt() -> None:
     )
     received = queue.receive(max_messages=3, visibility_timeout_seconds=600)
 
-    assert received == (
-        LeasedResearchTask("msg_1", "receipt/opaque+value", 2, _task()),
-    )
+    assert received == (LeasedResearchTask("msg_1", "receipt/opaque+value", 2, _task()),)
     queue.acknowledge(received[0].receipt_handle)
     assert calls[1][0] == "DELETE"
     assert calls[1][1].endswith("/lease/receipt%2Fopaque%2Bvalue")

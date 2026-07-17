@@ -28,6 +28,9 @@ const queueModule = await import("../../api/queues/kbd-research.ts");
 const controlQueueModule = await import(
   "../../api/queues/kbd-research-control.ts"
 );
+const bulkQueueModule = await import(
+  "../../api/queues/kbd-research-bulk.ts"
+);
 const { POST } = queueModule;
 const NODE_HANDLER = queueModule.default;
 const {
@@ -85,9 +88,11 @@ test("deployable queue callback stays synchronized with its TypeScript source", 
   }
 });
 
-test("leaf and control triggers share the exact callback implementation", () => {
+test("all queue triggers share the exact callback implementation", () => {
   assert.equal(controlQueueModule.POST, queueModule.POST);
   assert.equal(controlQueueModule.default, queueModule.default);
+  assert.equal(bulkQueueModule.POST, queueModule.POST);
+  assert.equal(bulkQueueModule.default, queueModule.default);
 });
 
 const TASK = {

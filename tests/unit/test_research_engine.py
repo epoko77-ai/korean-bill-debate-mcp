@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -500,6 +501,7 @@ def engine(
     document_worker: Worker | None = None,
     run_store: InMemoryResearchRunStore | None = None,
     fanout_chunk_size: int = 8,
+    bulk_parallel_fanout: bool = False,
 ) -> tuple[
     ResearchEngine,
     Queue,
@@ -532,6 +534,7 @@ def engine(
         finalizer=finalizer,
         runs=runs,
         fanout_chunk_size=fanout_chunk_size,
+        bulk_parallel_fanout=bulk_parallel_fanout,
     )
     return value, queue, client, jobs, runs, finalizer
 
@@ -655,6 +658,393 @@ def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
     public = repr(receipt.to_dict())
     assert "private-user-key" not in public
     assert Credentials.capability not in public
+
+
+def test_bulk_lane_keeps_exact_bill_tasks_interactive() -> None:
+    value, queue, _client, _jobs, _runs, _finalizer = engine(
+        exact_responder,
+        bulk_parallel_fanout=True,
+    )
+
+    value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="private-user-key",
+        as_of=AS_OF,
+    )
+
+    assert queue.tasks
+    assert {dict(task.payload).get("queue_lane") for task in queue.tasks} == {"interactive"}
+
+
+def test_hosted_engine_rejects_missing_or_crossed_queue_lanes() -> None:
+    exact_value, exact_queue, _client, _jobs, _runs, _finalizer = engine(
+        exact_responder,
+        bulk_parallel_fanout=True,
+    )
+    exact_value.gateway(
+        "2219564 보완수사권",
+        assembly_api_key="key",
+        as_of=AS_OF,
+    )
+    exact_task = exact_queue.tasks[0]
+    missing_lane = replace(
+        exact_task,
+        payload=tuple((name, value) for name, value in exact_task.payload if name != "queue_lane"),
+    )
+    with pytest.raises(ValueError, match="queue lane"):
+        exact_value.process_metadata_task(missing_lane)
+
+    broad_value, broad_queue, _client, _jobs, _runs, _finalizer = engine(
+        exact_responder,
+        bulk_parallel_fanout=True,
+    )
+    broad_value.gateway(
+        "2025년부터 현재까지 인공지능 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+    )
+    broad_task = broad_queue.tasks[0]
+    crossed_lane = replace(
+        broad_task,
+        payload=tuple(
+            (name, "interactive" if name == "queue_lane" else value)
+            for name, value in broad_task.payload
+        ),
+    )
+    with pytest.raises(ValueError, match="queue lane"):
+        broad_value.process_metadata_task(crossed_lane)
+
+
+def test_bulk_lane_opens_all_fixed_discovery_shards_with_one_global_barrier() -> None:
+    value, queue, client, _jobs, _runs, _finalizer = engine(
+        exact_responder,
+        fanout_chunk_size=16,
+        bulk_parallel_fanout=True,
+    )
+
+    receipt = value.gateway(
+        "2025년부터 현재까지 인공지능 입법",
+        assembly_api_key="private-user-key",
+        as_of=AS_OF,
+    )
+
+    assert client.calls == []
+    assert len(queue.tasks) == 1
+    dispatch = task_with(queue, work_kind="metadata_fanout_dispatch")
+    assert dict(dispatch.payload)["fanout_work_kind"] == "discovery_fanout"
+    assert dict(dispatch.payload)["expected_total"] == receipt.metadata_task_count
+    value.process_metadata_task(dispatch)
+    coordinators = [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
+    ]
+    assert len(coordinators) == math.ceil(receipt.metadata_task_count / value.fanout_chunk_size)
+    assert [(dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators] == [
+        (start, min(receipt.metadata_task_count, start + value.fanout_chunk_size))
+        for start in range(0, receipt.metadata_task_count, value.fanout_chunk_size)
+    ]
+    assert not [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "metadata_window_barrier"
+    ]
+    barriers = [
+        task
+        for task in queue.tasks
+        if dict(task.payload).get("work_kind") == "phase_barrier"
+        and dict(task.payload).get("phase") == "discovery"
+    ]
+    assert len(barriers) == 1
+    assert all(dict(task.payload).get("queue_lane") == "bulk" for task in queue.tasks)
+
+
+def test_bulk_discovery_dispatch_recovers_a_partial_fixed_shard_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value, queue, _client, _jobs, _runs, _finalizer = engine(
+        exact_responder,
+        fanout_chunk_size=16,
+        bulk_parallel_fanout=True,
+    )
+    receipt = value.gateway(
+        "2025년부터 현재까지 인공지능 입법",
+        assembly_api_key="private-user-key",
+        as_of=AS_OF,
+    )
+    dispatch = task_with(queue, work_kind="metadata_fanout_dispatch")
+    original_publish = queue.publish
+    coordinator_attempts = 0
+
+    def fail_second_coordinator(
+        task: ResearchTask,
+        *,
+        retention_seconds: int = 86_400,
+        delay_seconds: int = 0,
+    ) -> str:
+        nonlocal coordinator_attempts
+        if dict(task.payload).get("work_kind") == "discovery_fanout":
+            coordinator_attempts += 1
+            if coordinator_attempts == 2:
+                raise RuntimeError("injected fixed-shard publish failure")
+        return original_publish(
+            task,
+            retention_seconds=retention_seconds,
+            delay_seconds=delay_seconds,
+        )
+
+    monkeypatch.setattr(queue, "publish", fail_second_coordinator)
+    with pytest.raises(RuntimeError, match="fixed-shard publish failure"):
+        value.process_metadata_task(dispatch)
+    monkeypatch.setattr(queue, "publish", original_publish)
+
+    value.process_metadata_task(dispatch)
+
+    coordinators = [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
+    ]
+    assert [(dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators] == [
+        (start, min(receipt.metadata_task_count, start + value.fanout_chunk_size))
+        for start in range(0, receipt.metadata_task_count, value.fanout_chunk_size)
+    ]
+    assert (
+        sum(
+            dict(task.payload).get("work_kind") == "phase_barrier"
+            and dict(task.payload).get("phase") == "discovery"
+            for task in queue.tasks
+        )
+        == 1
+    )
+
+
+def test_bulk_lane_publishes_fixed_document_shards_without_claiming_global_receipts() -> None:
+    bill = {
+        "BILL_NO": "2219564",
+        "BILL_NAME": "인공지능 산업 진흥법 일부개정법률안",
+        "summary": "인공지능 산업을 지원한다.",
+        "PROPOSE_DT": "2026-06-01",
+    }
+
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        if dataset == BILL_STATUS_DATASET:
+            return page(
+                dataset,
+                number,
+                page_size,
+                1,
+                [{"BILL_NO": str(parameters["BILL_NO"]), "PROC_RESULT": "위원회 심사"}],
+            )
+        return page(dataset, number, page_size, 1, [bill])
+
+    value, queue, _client, _jobs, runs, finalizer = engine(
+        responder,
+        partition_planner=ReducedPartitionPlanner(),
+        bill_documents=ManyBillDocuments(),
+        fanout_chunk_size=8,
+        bulk_parallel_fanout=True,
+    )
+    value.gateway(
+        "최근 인공지능 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="discovery", page=1)
+    )
+    process_phase_barrier(value, queue, "discovery")
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="bill_status", page=1)
+    )
+    value.process_metadata_task(task_with(queue, work_kind="bill_documents"))
+    process_phase_barrier(value, queue, "bill_status")
+
+    fanouts = [
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "document_fanout"
+    ]
+    assert [(dict(task.payload)["start"], dict(task.payload)["stop"]) for task in fanouts] == [
+        (0, 8),
+        (8, 10),
+    ]
+    assert all(dict(task.payload).get("queue_lane") == "bulk" for task in fanouts)
+    assert all("receipt_gated" not in dict(task.payload) for task in fanouts)
+
+    # Finish the terminal range first. Its local barrier may open finalization,
+    # but the global receipt check must not assemble a partial snapshot.
+    value.process_metadata_task(fanouts[1])
+    last_documents = [
+        task for task in queue.tasks if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT
+    ]
+    assert len(last_documents) == 2
+    for task in last_documents:
+        process_document(value, task)
+    value.process_metadata_task(
+        task_with(
+            queue,
+            work_kind="document_window_barrier",
+            start=8,
+            stop=10,
+            attempt=1,
+        )
+    )
+    first_finalize = task_with(queue, work_kind="document_finalize_barrier", attempt=1)
+    assert value.process_finalize_task(first_finalize) is None
+    assert runs.get_snapshot(first_finalize.research_id) is None
+
+    value.process_metadata_task(fanouts[0])
+    last_ids = {task.work_id for task in last_documents}
+    first_documents = [
+        task
+        for task in queue.tasks
+        if task.stage is ResearchTaskStage.HYDRATE_DOCUMENT and task.work_id not in last_ids
+    ]
+    assert len(first_documents) == 8
+    for task in first_documents:
+        process_document(value, task)
+    value.process_metadata_task(
+        task_with(
+            queue,
+            work_kind="document_window_barrier",
+            start=0,
+            stop=8,
+            attempt=1,
+        )
+    )
+    completed = value.process_finalize_task(
+        task_with(queue, work_kind="document_finalize_barrier", attempt=2)
+    )
+    assert completed is not None
+    assert completed.research_id == first_finalize.research_id
+    assert len(finalizer.contexts) == 1
+
+
+def test_bulk_lane_opens_all_fixed_deferred_shards_with_one_global_barrier() -> None:
+    bills = [
+        {
+            "BILL_NO": f"{2210000 + index:07d}",
+            "BILL_NAME": f"인공지능 산업 진흥 제{index}호 법안",
+            "PROPOSE_DT": "2026-06-01",
+        }
+        for index in range(20)
+    ]
+
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        if dataset == BILL_STATUS_DATASET:
+            bill_number = str(parameters["BILL_NO"])
+            return page(
+                dataset,
+                number,
+                page_size,
+                1,
+                [{"BILL_NO": bill_number, "PROC_RESULT": "위원회 심사"}],
+            )
+        return page(dataset, number, page_size, len(bills), bills)
+
+    value, queue, _client, _jobs, runs, _finalizer = engine(
+        responder,
+        partition_planner=ReducedPartitionPlanner(),
+        fanout_chunk_size=16,
+        bulk_parallel_fanout=True,
+    )
+    receipt = value.gateway(
+        "최근 인공지능 입법",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(
+            EvidenceType.BILLS,
+            EvidenceType.BILL_STATUS,
+            EvidenceType.REVIEW_REPORTS,
+        ),
+    )
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="discovery", page=1)
+    )
+    process_phase_barrier(value, queue, "discovery")
+
+    coordinators = [
+        task
+        for task in queue.tasks
+        if task.research_id == receipt.research_id
+        and dict(task.payload).get("work_kind") == "deferred_fanout"
+    ]
+    assert [(dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators] == [
+        (0, 16),
+        (16, 32),
+        (32, 40),
+    ]
+    assert all(dict(task.payload).get("expected_total") == 40 for task in coordinators)
+    assert all(dict(task.payload).get("queue_lane") == "bulk" for task in coordinators)
+    assert not [
+        task
+        for task in queue.tasks
+        if task.research_id == receipt.research_id
+        and dict(task.payload).get("work_kind") == "metadata_window_barrier"
+        and dict(task.payload).get("phase") == "bill_status"
+    ]
+    barriers = [
+        task
+        for task in queue.tasks
+        if task.research_id == receipt.research_id
+        and dict(task.payload).get("work_kind") == "phase_barrier"
+        and dict(task.payload).get("phase") == "bill_status"
+    ]
+    assert len(barriers) == 1
+    assert dict(barriers[0].payload).get("queue_lane") == "bulk"
+
+    # A global barrier may run before any shard. It must poll, then accept
+    # out-of-order shard completion without opening successor windows.
+    value.process_metadata_task(barriers[0])
+    assert runs.get_document_manifest(receipt.research_id) is None
+    for coordinator in reversed(coordinators):
+        value.process_metadata_task(coordinator)
+    children = [
+        task
+        for task in queue.tasks
+        if task.research_id == receipt.research_id
+        and (
+            (
+                dict(task.payload).get("work_kind") == "metadata_page"
+                and dict(task.payload).get("phase") == "bill_status"
+            )
+            or dict(task.payload).get("work_kind") == "bill_documents"
+        )
+    ]
+    assert len(children) == 40
+    assert all(dict(task.payload).get("queue_lane") == "bulk" for task in children)
+    for child in reversed(children):
+        value.process_metadata_task(child)
+
+    completion_barrier = task_with(
+        queue,
+        work_kind="phase_barrier",
+        phase="bill_status",
+        attempt=2,
+    )
+    value.process_metadata_task(completion_barrier)
+    assert runs.get_document_manifest(receipt.research_id) is not None
+    assert not [
+        task
+        for task in queue.tasks
+        if task.research_id == receipt.research_id
+        and dict(task.payload).get("work_kind") == "metadata_window_barrier"
+    ]
+    published_count = len(queue.tasks)
+    value.process_metadata_task(completion_barrier)
+    assert len(queue.tasks) == published_count
 
 
 def test_exact_identifier_gateway_replaces_56_way_scan_with_seven_bounded_tasks() -> None:
@@ -960,9 +1350,7 @@ def test_broad_gateway_opens_one_fixed_coordinator_wave_at_a_time(
     fixed_attempts = record_queue_publications(monkeypatch, queue)
     value.process_metadata_task(first)
     assert fixed_attempts
-    assert all(
-        dict(task.payload).get("work_kind") == "metadata_page" for task in fixed_attempts
-    )
+    assert all(dict(task.payload).get("work_kind") == "metadata_page" for task in fixed_attempts)
     first_children = [
         task
         for task in queue.tasks
@@ -994,12 +1382,12 @@ def test_broad_gateway_opens_one_fixed_coordinator_wave_at_a_time(
     coordinators = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "discovery_fanout"
     ]
-    assert [
-        (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators
-    ] == [(0, 16), (16, 32)]
+    assert [(dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators] == [
+        (0, 16),
+        (16, 32),
+    ]
     assert all(
-        dict(task.payload)["expected_total"] == receipt.metadata_task_count
-        for task in coordinators
+        dict(task.payload)["expected_total"] == receipt.metadata_task_count for task in coordinators
     )
     unique_publications = len(queue.tasks)
     value.process_metadata_task(completed_first_barrier)
@@ -1387,9 +1775,10 @@ def test_large_page_expansion_opens_one_bounded_page_wave_at_a_time(
     coordinators = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "page_fanout"
     ]
-    assert [
-        (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators
-    ] == [(0, 8), (8, 14)]
+    assert [(dict(task.payload)["start"], dict(task.payload)["stop"]) for task in coordinators] == [
+        (0, 8),
+        (8, 14),
+    ]
     second_barrier = task_with(
         queue,
         work_kind="page_window_barrier",
@@ -1588,8 +1977,7 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     status_page_twos = [
         task
         for task in queue.tasks
-        if dict(task.payload).get("phase") == "bill_status"
-        and dict(task.payload).get("page") == 2
+        if dict(task.payload).get("phase") == "bill_status" and dict(task.payload).get("page") == 2
     ]
     assert len(status_page_twos) == value.fanout_chunk_size
     for task in status_page_twos:
@@ -1607,9 +1995,7 @@ def test_dynamic_two_page_discovery_waits_on_markers_then_assembles_once(
     fanout_tasks = [
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
-    assert [
-        (dict(task.payload)["start"], dict(task.payload)["stop"]) for task in fanout_tasks
-    ] == [
+    assert [(dict(task.payload)["start"], dict(task.payload)["stop"]) for task in fanout_tasks] == [
         (0, value.fanout_chunk_size),
         (value.fanout_chunk_size, value.fanout_chunk_size * 2),
     ]
@@ -1726,9 +2112,7 @@ def test_discovery_recovery_enqueues_deferred_work_before_status_checkpoint_heal
     assert len(deferred.status_partitions) == 20
     assert len(deferred.document_bill_numbers) == 20
     assert not [
-        task
-        for task in queue.tasks
-        if dict(task.payload).get("work_kind") == "deferred_fanout"
+        task for task in queue.tasks if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
 
     monkeypatch.setattr(queue, "publish", original_publish)
@@ -1764,16 +2148,11 @@ def test_discovery_recovery_enqueues_deferred_work_before_status_checkpoint_heal
     value.process_metadata_task(discovery_barrier)
 
     assert (
-        sum(
-            dict(task.payload).get("work_kind") == "deferred_fanout"
-            for task in queue.tasks
-        )
-        == 1
+        sum(dict(task.payload).get("work_kind") == "deferred_fanout" for task in queue.tasks) == 1
     )
     assert (
         sum(
-            dict(task.payload).get("work_kind") == "metadata_window_barrier"
-            for task in queue.tasks
+            dict(task.payload).get("work_kind") == "metadata_window_barrier" for task in queue.tasks
         )
         == 1
     )
@@ -1858,17 +2237,13 @@ def test_deferred_wave_waits_across_status_and_bill_document_boundary(
     second_children = tuple(attempts)
     assert len(second_children) == 16
     assert not [
-        task
-        for task in second_children
-        if dict(task.payload).get("work_kind") == "deferred_fanout"
+        task for task in second_children if dict(task.payload).get("work_kind") == "deferred_fanout"
     ]
     second_status = [
         task for task in second_children if dict(task.payload).get("phase") == "bill_status"
     ]
     second_documents = [
-        task
-        for task in second_children
-        if dict(task.payload).get("work_kind") == "bill_documents"
+        task for task in second_children if dict(task.payload).get("work_kind") == "bill_documents"
     ]
     assert len(second_status) == 4
     assert len(second_documents) == 12
@@ -2007,10 +2382,15 @@ def test_legacy_upfront_deferred_shards_allow_credentialless_phase_barrier() -> 
     assert retry.credential_capability is None
 
 
+@pytest.mark.parametrize("bulk_parallel_fanout", [False, True])
 def test_exact_status_document_pipeline_completes_and_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
+    bulk_parallel_fanout: bool,
 ) -> None:
-    value, queue, _client, jobs, runs, finalizer = engine(exact_responder)
+    value, queue, _client, jobs, runs, finalizer = engine(
+        exact_responder,
+        bulk_parallel_fanout=bulk_parallel_fanout,
+    )
     receipt = value.gateway(
         "2026-01-01부터 2026-07-13까지 2219564 보완수사권",
         assembly_api_key="key",
@@ -2070,6 +2450,8 @@ def test_exact_status_document_pipeline_completes_and_is_idempotent(
     assert derived.overview_available is True
     assert derived.documents_expected == 1
     assert derived.documents_complete == 1
+    if bulk_parallel_fanout:
+        assert {dict(task.payload).get("queue_lane") for task in queue.tasks} == {"interactive"}
 
 
 def test_hot_workers_and_document_fanout_never_read_global_manifests(
@@ -2121,8 +2503,7 @@ def test_hot_workers_and_document_fanout_never_read_global_manifests(
     assert all(dict(task.payload)["expected_total"] == 10 for task in initial_fanouts)
     assert all(dict(task.payload)["receipt_gated"] is True for task in initial_fanouts)
     assert not any(
-        dict(task.payload).get("work_kind") == "document_finalize_barrier"
-        for task in queue.tasks
+        dict(task.payload).get("work_kind") == "document_finalize_barrier" for task in queue.tasks
     )
 
     original_publish = queue.publish
@@ -2153,8 +2534,7 @@ def test_hot_workers_and_document_fanout_never_read_global_manifests(
         task for task in queue.tasks if dict(task.payload).get("work_kind") == "document_fanout"
     ]
     assert not any(
-        dict(task.payload).get("work_kind") == "document_finalize_barrier"
-        for task in queue.tasks
+        dict(task.payload).get("work_kind") == "document_finalize_barrier" for task in queue.tasks
     )
     monkeypatch.setattr(queue, "publish", original_publish)
 

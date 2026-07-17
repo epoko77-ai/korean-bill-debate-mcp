@@ -10,6 +10,7 @@ process.env.VERCEL_URL = "kbd-current-deployment.vercel.app";
 process.env.VERCEL_REGION = "icn1";
 process.env.KBD_RESEARCH_QUEUE_TOPIC = "kbd-research";
 process.env.KBD_RESEARCH_CONTROL_QUEUE_TOPIC = "kbd-research-control";
+process.env.KBD_RESEARCH_BULK_QUEUE_TOPIC = "kbd-research-bulk";
 const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
 const TEST_OIDC_TOKEN = `${encode({ alg: "RS256", typ: "JWT" })}.${encode({
   exp: 4_102_444_800,
@@ -183,6 +184,46 @@ test("recovery polls the control topic with its push consumer group", async () =
   }
 });
 
+test("recovery polls the bulk topic with its push consumer group", async () => {
+  const now = Date.parse("2026-07-14T12:00:00Z");
+  const receiver = new FakeReceiver([
+    {
+      topic: "kbd-research-bulk",
+      message: {
+        ...TASK,
+        work_id: "bulk-metadata-page-1",
+      },
+      metadata: metadata(new Date(now), {
+        topicName: "kbd-research-bulk",
+        consumerGroup: "api_Squeues_Skbd-research-bulk_Dts",
+      }),
+    },
+  ]);
+  const fake = installInternalFetch();
+  try {
+    const result = await runRecovery({
+      receiver,
+      oidcToken: TEST_OIDC_TOKEN,
+      deploymentOrigin: "https://kbd-current-deployment.vercel.app",
+      now: () => now,
+      concurrency: 1,
+      maxTasks: 1,
+    });
+    assert.equal(result.processed, 1);
+    assert.deepEqual(
+      receiver.calls.map((call) => call.topic),
+      ["kbd-research-control", "kbd-research", "kbd-research-bulk"],
+    );
+    const bulkCall = receiver.calls.at(-1);
+    assert.equal(
+      bulkCall.consumer,
+      "api_Squeues_Skbd-research-bulk_Dts",
+    );
+  } finally {
+    fake.restore();
+  }
+});
+
 test("recovery uses the receipt-check marker and same-deployment identity", async () => {
   const now = Date.parse("2026-07-14T12:00:00Z");
   const receiver = new FakeReceiver([
@@ -305,7 +346,7 @@ test("plain api default export polls with deployment pin and bounded concurrency
     assert.equal(result.status, 200);
     assert.equal(result.body.ok, true);
     assert.equal(result.body.attempted, 0);
-    assert.equal(calls.length, 8);
+    assert.equal(calls.length, 12);
     assert.ok(
       calls.every(
         (call) =>
@@ -320,6 +361,12 @@ test("plain api default export polls with deployment pin and bounded concurrency
     assert.equal(
       calls.filter((call) =>
         call.url.includes("/topic/kbd-research-control/")
+      ).length,
+      4,
+    );
+    assert.equal(
+      calls.filter((call) =>
+        call.url.includes("/topic/kbd-research-bulk/")
       ).length,
       4,
     );

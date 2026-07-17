@@ -19,14 +19,42 @@ const functionBundles = [
   {
     directory: "kbd-research.func",
     expectedHandler: "api/queues/kbd-research.js",
+    expectedTrigger: {
+      type: "queue/v2beta",
+      topic: "kbd-research",
+      retryAfterSeconds: 15,
+      initialDelaySeconds: 0,
+      maxConcurrency: 32,
+      consumer: "api_Squeues_Skbd-research_Dts",
+    },
   },
   {
     directory: "kbd-research-control.func",
     expectedHandler: "api/queues/kbd-research-control.js",
+    expectedTrigger: {
+      type: "queue/v2beta",
+      topic: "kbd-research-control",
+      retryAfterSeconds: 15,
+      initialDelaySeconds: 0,
+      maxConcurrency: 8,
+      consumer: "api_Squeues_Skbd-research-control_Dts",
+    },
+  },
+  {
+    directory: "kbd-research-bulk.func",
+    expectedHandler: "api/queues/kbd-research-bulk.js",
+    expectedTrigger: {
+      type: "queue/v2beta",
+      topic: "kbd-research-bulk",
+      retryAfterSeconds: 15,
+      initialDelaySeconds: 0,
+      maxConcurrency: 24,
+      consumer: "api_Squeues_Skbd-research-bulk_Dts",
+    },
   },
 ];
 
-for (const { directory, expectedHandler } of functionBundles) {
+for (const { directory, expectedHandler, expectedTrigger } of functionBundles) {
   const bundleRoot = join(functionsRoot, directory);
   const configPath = join(bundleRoot, ".vc-config.json");
   assert.ok(
@@ -36,6 +64,7 @@ for (const { directory, expectedHandler } of functionBundles) {
 
   const config = JSON.parse(readFileSync(configPath, "utf8"));
   assert.equal(config.handler, expectedHandler);
+  assert.deepEqual(config.experimentalTriggers, [expectedTrigger]);
 
   const handlerPath = join(bundleRoot, config.handler);
   const callbackPath = join(

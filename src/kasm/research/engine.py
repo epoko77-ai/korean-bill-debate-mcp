@@ -91,6 +91,11 @@ _STOP = "stop"
 _CHAIN_NEXT = "chain_next"
 _RECEIPT_GATED = "receipt_gated"
 _RECEIPTS_VERIFIED = "receipts_verified"
+_QUEUE_LANE = "queue_lane"
+_BULK_LANE = "bulk"
+_INTERACTIVE_LANE = "interactive"
+_METADATA_FANOUT_DISPATCH = "metadata_fanout_dispatch"
+_FANOUT_WORK_KIND = "fanout_work_kind"
 
 ROUTING_SHARD_SIZE: Final = 4
 
@@ -1508,9 +1513,7 @@ class InMemoryResearchRunStore:
         tasks: Sequence[ResearchTask],
     ) -> tuple[TaskCompletionReceipt, ...]:
         return tuple(
-            receipt
-            for task in tasks
-            if (receipt := self.get_task_completion(task)) is not None
+            receipt for task in tasks if (receipt := self.get_task_completion(task)) is not None
         )
 
     def put_document_outcome(self, research_id: str, outcome: DocumentOutcome) -> DocumentOutcome:
@@ -1809,6 +1812,7 @@ class ResearchEngine:
         direct_fanout_limit: int = 7,
         fanout_chunk_size: int = 8,
         fanout_delay_seconds: int = 0,
+        bulk_parallel_fanout: bool = False,
         corpus_recall_provider: CorpusRecallProvider | None = None,
     ) -> None:
         if not index_revision.strip():
@@ -1848,6 +1852,7 @@ class ResearchEngine:
         self.direct_fanout_limit = direct_fanout_limit
         self.fanout_chunk_size = fanout_chunk_size
         self.fanout_delay_seconds = fanout_delay_seconds
+        self.bulk_parallel_fanout = bulk_parallel_fanout
 
     def gateway(
         self,
@@ -1906,25 +1911,29 @@ class ResearchEngine:
                         capability,
                     )
             else:
-                # Open one bounded wave. Its dedicated barrier resets polling
-                # backoff for every successor and removes the prior up-front
-                # top-level shard flood from the shared FIFO queue.
-                self._publish_initial_fanout_window(
-                    job,
-                    _DISCOVERY_FANOUT,
-                    len(discovery),
-                    credential_capability=capability,
-                )
-                self._publish_metadata_window_barrier(
-                    job,
-                    MetadataPhase.DISCOVERY,
-                    start=0,
-                    stop=min(len(discovery), self.fanout_chunk_size),
-                    expected_total=len(discovery),
-                    attempt=1,
-                    credential_capability=capability,
-                    delay_seconds=self._barrier_delay_seconds(1),
-                )
+                # Interactive exact-bill work opens one wave at a time. Broad
+                # work has an isolated, concurrency-bounded leaf topic, so all
+                # of its fixed coordinator shards can be made runnable without
+                # placing those leaves ahead of exact requests.
+                if self._is_bulk_job(job):
+                    # Keep ingress constant-time and retryable. The durable
+                    # dispatcher opens every fixed bulk shard after the HTTP
+                    # request has returned.
+                    self._publish_metadata_fanout_dispatch(
+                        job,
+                        _DISCOVERY_FANOUT,
+                        MetadataPhase.DISCOVERY,
+                        len(discovery),
+                        credential_capability=capability,
+                    )
+                else:
+                    self._publish_metadata_fanout_windows(
+                        job,
+                        _DISCOVERY_FANOUT,
+                        MetadataPhase.DISCOVERY,
+                        len(discovery),
+                        credential_capability=capability,
+                    )
             if len(discovery) <= self.direct_fanout_limit:
                 self._publish_phase_barrier(
                     job,
@@ -2054,6 +2063,9 @@ class ResearchEngine:
         if work_kind == _DOCUMENT_FANOUT:
             self._process_document_fanout(task, payload)
             return None
+        if work_kind == _METADATA_FANOUT_DISPATCH:
+            self._process_metadata_fanout_dispatch(task, payload)
+            return None
         if work_kind == _METADATA_WINDOW_BARRIER:
             self._process_metadata_window_barrier(task, payload)
             return None
@@ -2168,6 +2180,26 @@ class ResearchEngine:
             receipt_gated=receipt_gated,
             attempt=1,
             delay_seconds=self._barrier_delay_seconds(1),
+        )
+
+    def _process_metadata_fanout_dispatch(
+        self,
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+    ) -> None:
+        phase, fanout_work_kind, expected_total = self._validate_metadata_fanout_dispatch(
+            task,
+            payload,
+        )
+        job = self._required_job(task.research_id)
+        if not self._is_bulk_job(job):
+            raise ValueError("metadata fan-out dispatch requires a broad research job")
+        self._publish_metadata_fanout_windows(
+            job,
+            fanout_work_kind,
+            phase,
+            expected_total,
+            credential_capability=task.credential_capability,
         )
 
     def _process_metadata_window_barrier(
@@ -3054,21 +3086,12 @@ class ResearchEngine:
         if deferred_count > self.direct_fanout_limit:
             if deferred.status_partitions and credential_capability is None:
                 raise ValueError("status fan-out requires a credential capability")
-            self._publish_initial_fanout_window(
+            self._publish_metadata_fanout_windows(
                 job,
                 _DEFERRED_FANOUT,
+                MetadataPhase.BILL_STATUS,
                 deferred_count,
                 credential_capability=credential_capability,
-            )
-            self._publish_metadata_window_barrier(
-                job,
-                MetadataPhase.BILL_STATUS,
-                start=0,
-                stop=min(deferred_count, self.fanout_chunk_size),
-                expected_total=deferred_count,
-                attempt=1,
-                credential_capability=credential_capability,
-                delay_seconds=self._barrier_delay_seconds(1),
             )
         else:
             if deferred.status_partitions:
@@ -3284,17 +3307,31 @@ class ResearchEngine:
     def _publish_document_manifest(self, research_id: str, manifest: DocumentWorkManifest) -> None:
         job = self._required_job(research_id)
         if len(manifest.items) > self.direct_fanout_limit:
-            # One resumable coordinator opens at most one bounded hydration
-            # window at a time. Each processed window chains its successor, and
-            # the last window alone publishes the finalize barrier.
-            self._publish_fanout(
-                job,
-                _DOCUMENT_FANOUT,
-                0,
-                len(manifest.items),
-                expected_total=len(manifest.items),
-                receipt_gated=True,
-            )
+            if self._is_bulk_job(job):
+                # Fixed coordinator shards place their leaves on the isolated
+                # bulk topic. The bulk consumer, rather than a serial window
+                # chain, bounds PDF concurrency. The finalizer still requires
+                # every compact receipt before reading all outcomes once.
+                for start in range(0, len(manifest.items), self.fanout_chunk_size):
+                    stop = min(len(manifest.items), start + self.fanout_chunk_size)
+                    self._publish_fanout(
+                        job,
+                        _DOCUMENT_FANOUT,
+                        start,
+                        stop,
+                        expected_total=len(manifest.items),
+                    )
+            else:
+                # One resumable coordinator opens at most one bounded hydration
+                # window at a time for interactive work.
+                self._publish_fanout(
+                    job,
+                    _DOCUMENT_FANOUT,
+                    0,
+                    len(manifest.items),
+                    expected_total=len(manifest.items),
+                    receipt_gated=True,
+                )
         else:
             self._publish_document_items(research_id, manifest.items)
             self._publish_document_finalize_barrier(
@@ -3309,20 +3346,35 @@ class ResearchEngine:
             task = self._document_task(job, item)
             self.queue.publish(task, retention_seconds=self.task_retention_seconds)
 
-    @staticmethod
-    def _document_task(job: ResearchJob, item: DocumentWorkItem) -> ResearchTask:
+    def _document_task(self, job: ResearchJob, item: DocumentWorkItem) -> ResearchTask:
         return ResearchTask(
             research_id=job.id,
             stage=ResearchTaskStage.HYDRATE_DOCUMENT,
             work_id=item.work_id,
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=(
-                (_WORK_KIND, "document"),
-                (_DOCUMENT_KIND, item.kind.value),
-                (_OFFICIAL_URL, item.official_url),
+            payload=self._lane_payload(
+                job,
+                (
+                    (_WORK_KIND, "document"),
+                    (_DOCUMENT_KIND, item.kind.value),
+                    (_OFFICIAL_URL, item.official_url),
+                ),
             ),
         )
+
+    def _is_bulk_job(self, job: ResearchJob) -> bool:
+        return self.bulk_parallel_fanout and not job.contract.bill_numbers
+
+    def _lane_payload(
+        self,
+        job: ResearchJob,
+        payload: tuple[tuple[str, str | int | float | bool | None], ...],
+    ) -> tuple[tuple[str, str | int | float | bool | None], ...]:
+        if not self.bulk_parallel_fanout:
+            return payload
+        lane = _BULK_LANE if self._is_bulk_job(job) else _INTERACTIVE_LANE
+        return (*payload, (_QUEUE_LANE, lane))
 
     def _document_receipts_complete(
         self,
@@ -3366,7 +3418,7 @@ class ResearchEngine:
             work_id=identity,
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=barrier_payload,
+            payload=self._lane_payload(job, barrier_payload),
         )
         self.queue.publish(
             task,
@@ -3387,8 +3439,7 @@ class ResearchEngine:
         delay_seconds: int = 0,
     ) -> None:
         identity = (
-            f"{_METADATA_WINDOW_BARRIER}:{phase.value}:{start}:{stop}:"
-            f"{expected_total}:{attempt}"
+            f"{_METADATA_WINDOW_BARRIER}:{phase.value}:{start}:{stop}:{expected_total}:{attempt}"
         )
         task = ResearchTask(
             research_id=job.id,
@@ -3396,13 +3447,16 @@ class ResearchEngine:
             work_id=identity,
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=(
-                (_WORK_KIND, _METADATA_WINDOW_BARRIER),
-                (_PHASE, phase.value),
-                (_START, start),
-                (_STOP, stop),
-                (_EXPECTED_TOTAL, expected_total),
-                (_ATTEMPT, attempt),
+            payload=self._lane_payload(
+                job,
+                (
+                    (_WORK_KIND, _METADATA_WINDOW_BARRIER),
+                    (_PHASE, phase.value),
+                    (_START, start),
+                    (_STOP, stop),
+                    (_EXPECTED_TOTAL, expected_total),
+                    (_ATTEMPT, attempt),
+                ),
             ),
             credential_capability=credential_capability,
         )
@@ -3421,7 +3475,10 @@ class ResearchEngine:
             work_id=f"bill-documents:{bill_number}",
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=((_WORK_KIND, _BILL_DOCUMENTS), (_BILL_NO, bill_number)),
+            payload=self._lane_payload(
+                job,
+                ((_WORK_KIND, _BILL_DOCUMENTS), (_BILL_NO, bill_number)),
+            ),
         )
         self.queue.publish(task, retention_seconds=self.task_retention_seconds)
 
@@ -3440,10 +3497,13 @@ class ResearchEngine:
             work_id=f"{_PHASE_BARRIER}:{phase.value}:{attempt}",
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=(
-                (_WORK_KIND, _PHASE_BARRIER),
-                (_PHASE, phase.value),
-                (_ATTEMPT, attempt),
+            payload=self._lane_payload(
+                job,
+                (
+                    (_WORK_KIND, _PHASE_BARRIER),
+                    (_PHASE, phase.value),
+                    (_ATTEMPT, attempt),
+                ),
             ),
             credential_capability=credential_capability,
         )
@@ -3476,7 +3536,7 @@ class ResearchEngine:
             work_id=work_id,
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=barrier_payload,
+            payload=self._lane_payload(job, barrier_payload),
         )
         self.queue.publish(
             task,
@@ -3489,6 +3549,97 @@ class ResearchEngine:
             raise ValueError("research barrier attempt must be positive")
         base = max(1, self.fanout_delay_seconds)
         return min(10, base * attempt)
+
+    def _publish_metadata_fanout_dispatch(
+        self,
+        job: ResearchJob,
+        fanout_work_kind: str,
+        phase: MetadataPhase,
+        expected_total: int,
+        *,
+        credential_capability: str | None,
+    ) -> None:
+        if fanout_work_kind not in {_DISCOVERY_FANOUT, _DEFERRED_FANOUT}:
+            raise ValueError("metadata fan-out dispatch kind is invalid")
+        if expected_total <= self.direct_fanout_limit:
+            raise ValueError("metadata fan-out dispatch requires a non-trivial plan")
+        task = ResearchTask(
+            research_id=job.id,
+            stage=ResearchTaskStage.COLLECT_METADATA,
+            work_id=(
+                f"{_METADATA_FANOUT_DISPATCH}:{phase.value}:{fanout_work_kind}:{expected_total}"
+            ),
+            query_fingerprint=job.query_fingerprint,
+            index_revision=job.index_revision,
+            payload=self._lane_payload(
+                job,
+                (
+                    (_WORK_KIND, _METADATA_FANOUT_DISPATCH),
+                    (_PHASE, phase.value),
+                    (_FANOUT_WORK_KIND, fanout_work_kind),
+                    (_EXPECTED_TOTAL, expected_total),
+                ),
+            ),
+            credential_capability=credential_capability,
+        )
+        self.queue.publish(task, retention_seconds=self.task_retention_seconds)
+
+    def _publish_metadata_fanout_windows(
+        self,
+        job: ResearchJob,
+        work_kind: str,
+        phase: MetadataPhase,
+        total: int,
+        *,
+        credential_capability: str | None,
+    ) -> None:
+        """Open sequential exact work or fixed isolated bulk shards.
+
+        The bulk topic has its own consumer ceiling, so making every fixed
+        coordinator shard runnable improves wall time without allowing a broad
+        backlog to sit in front of exact-bill work. The terminal phase barrier
+        still verifies the complete immutable plan before advancing.
+        """
+
+        if not self._is_bulk_job(job):
+            self._publish_initial_fanout_window(
+                job,
+                work_kind,
+                total,
+                credential_capability=credential_capability,
+            )
+            self._publish_metadata_window_barrier(
+                job,
+                phase,
+                start=0,
+                stop=min(total, self.fanout_chunk_size),
+                expected_total=total,
+                attempt=1,
+                credential_capability=credential_capability,
+                delay_seconds=self._barrier_delay_seconds(1),
+            )
+            return
+
+        for start in range(0, total, self.fanout_chunk_size):
+            stop = min(total, start + self.fanout_chunk_size)
+            self._publish_fanout(
+                job,
+                work_kind,
+                start,
+                stop,
+                expected_total=total,
+                credential_capability=credential_capability,
+            )
+        # One global phase barrier verifies every fixed shard, including bill
+        # document routes, before assembly. Per-window barriers would publish
+        # duplicate successor shards that are already runnable in this lane.
+        self._publish_phase_barrier(
+            job,
+            phase,
+            attempt=1,
+            credential_capability=credential_capability,
+            delay_seconds=self._barrier_delay_seconds(1),
+        )
 
     def _publish_initial_fanout_window(
         self,
@@ -3536,7 +3687,7 @@ class ResearchEngine:
             work_id=f"{work_kind}:{start}:{stop}",
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=payload,
+            payload=self._lane_payload(job, payload),
             credential_capability=credential_capability,
         )
         self.queue.publish(
@@ -3622,13 +3773,16 @@ class ResearchEngine:
             work_id=work_id,
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=(
-                (_WORK_KIND, _PAGE_FANOUT),
-                (_PHASE, phase.value),
-                (_PARTITION_ID, partition.partition_id),
-                (_EXPECTED_TOTAL, expected_total),
-                (_START, start),
-                (_STOP, stop),
+            payload=self._lane_payload(
+                job,
+                (
+                    (_WORK_KIND, _PAGE_FANOUT),
+                    (_PHASE, phase.value),
+                    (_PARTITION_ID, partition.partition_id),
+                    (_EXPECTED_TOTAL, expected_total),
+                    (_START, start),
+                    (_STOP, stop),
+                ),
             ),
             credential_capability=capability,
         )
@@ -3661,14 +3815,17 @@ class ResearchEngine:
             work_id=work_id,
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=(
-                (_WORK_KIND, _PAGE_WINDOW_BARRIER),
-                (_PHASE, phase.value),
-                (_PARTITION_ID, partition.partition_id),
-                (_EXPECTED_TOTAL, expected_total),
-                (_START, start),
-                (_STOP, stop),
-                (_ATTEMPT, attempt),
+            payload=self._lane_payload(
+                job,
+                (
+                    (_WORK_KIND, _PAGE_WINDOW_BARRIER),
+                    (_PHASE, phase.value),
+                    (_PARTITION_ID, partition.partition_id),
+                    (_EXPECTED_TOTAL, expected_total),
+                    (_START, start),
+                    (_STOP, stop),
+                    (_ATTEMPT, attempt),
+                ),
             ),
             credential_capability=credential_capability,
         )
@@ -3689,6 +3846,31 @@ class ResearchEngine:
         if stop > total:
             raise ValueError("research fan-out range is outside its immutable plan")
         return start, stop
+
+    def _validate_metadata_fanout_dispatch(
+        self,
+        task: ResearchTask,
+        payload: Mapping[str, Any],
+    ) -> tuple[MetadataPhase, str, int]:
+        phase = MetadataPhase(str(payload.get(_PHASE) or ""))
+        fanout_work_kind = str(payload.get(_FANOUT_WORK_KIND) or "")
+        expected_total = int(payload.get(_EXPECTED_TOTAL, -1))
+        expected_kind = {
+            MetadataPhase.DISCOVERY: _DISCOVERY_FANOUT,
+            MetadataPhase.BILL_STATUS: _DEFERRED_FANOUT,
+        }[phase]
+        if (
+            payload.get(_WORK_KIND) != _METADATA_FANOUT_DISPATCH
+            or fanout_work_kind != expected_kind
+            or expected_total <= self.direct_fanout_limit
+        ):
+            raise ValueError("metadata fan-out dispatch payload is invalid")
+        expected_work_id = (
+            f"{_METADATA_FANOUT_DISPATCH}:{phase.value}:{fanout_work_kind}:{expected_total}"
+        )
+        if task.work_id != expected_work_id:
+            raise ValueError("metadata fan-out dispatch identity does not match")
+        return phase, fanout_work_kind, expected_total
 
     @staticmethod
     def _validate_fanout_identity(
@@ -3768,8 +3950,7 @@ class ResearchEngine:
         ):
             raise ValueError("metadata window barrier payload is invalid")
         expected = (
-            f"{_METADATA_WINDOW_BARRIER}:{phase.value}:{start}:{stop}:"
-            f"{expected_total}:{attempt}"
+            f"{_METADATA_WINDOW_BARRIER}:{phase.value}:{start}:{stop}:{expected_total}:{attempt}"
         )
         if task.work_id != expected:
             raise ValueError("metadata window barrier task identity does not match")
@@ -3970,12 +4151,15 @@ class ResearchEngine:
             work_id=work.work_id,
             query_fingerprint=job.query_fingerprint,
             index_revision=job.index_revision,
-            payload=(
-                (_WORK_KIND, _METADATA_PAGE),
-                (_PHASE, phase.value),
-                (_PARTITION_ID, partition.partition_id),
-                (_PAGE, work.page),
-                (_EXPECTED_TOTAL, work.expected_total),
+            payload=self._lane_payload(
+                job,
+                (
+                    (_WORK_KIND, _METADATA_PAGE),
+                    (_PHASE, phase.value),
+                    (_PARTITION_ID, partition.partition_id),
+                    (_PAGE, work.page),
+                    (_EXPECTED_TOTAL, work.expected_total),
+                ),
             ),
             credential_capability=capability,
         )
@@ -4019,6 +4203,10 @@ class ResearchEngine:
             or task.index_revision != job.index_revision
         ):
             raise ValueError("research task does not match its persisted job")
+        if self.bulk_parallel_fanout:
+            expected_lane = _BULK_LANE if self._is_bulk_job(job) else _INTERACTIVE_LANE
+            if dict(task.payload).get(_QUEUE_LANE) != expected_lane:
+                raise ValueError("research task queue lane does not match its persisted job")
         if (
             datetime.now(UTC) >= job.expires_at
             and self.runs.get_snapshot_summary(task.research_id) is None
