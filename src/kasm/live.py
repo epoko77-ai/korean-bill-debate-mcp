@@ -367,6 +367,18 @@ class LiveAssemblyServices:
         )
         initial_months = set(months)
         requested_months = _requested_months(query, date_from, date_to)
+        proposal_scope = _proposal_date_scope(query)
+        if proposal_scope is not None and date_from is None and date_to is None:
+            # A phrase such as "2026년 발의된" scopes the bills by proposal
+            # date.  Its related deliberations can only run through the
+            # current day; do not describe or retain future meeting months.
+            effective_end = min(proposal_scope[1], self._now().date())
+            requested_months = sorted(
+                _month_span(proposal_scope[0].strftime("%Y-%m"), effective_end)
+            )
+            months = set(requested_months)
+            date_from = proposal_scope[0].isoformat()
+            date_to = effective_end.isoformat()
         explicit_temporal_scope = bool(requested_months)
         bill_committees = {
             value
@@ -800,7 +812,10 @@ class LiveAssemblyServices:
             )
         )
         scope.update(_temporal_window(queried_months))
-        for date_query in _meeting_date_queries(queried_months):
+        for date_query in _meeting_date_queries(
+            queried_months,
+            as_of=self._now().date(),
+        ):
             for source in (MeetingSource.COMMITTEE, MeetingSource.PLENARY):
                 parameters: dict[str, str | int] = {
                     "DAE_NUM": term,
@@ -823,6 +838,7 @@ class LiveAssemblyServices:
         )
         api_calls += 1
         rows.extend(subcommittee_rows)
+        rows = _filter_meeting_rows_by_scope(rows, scope, queried_months)
         candidates = distinct_minutes_rows(tuple(rows))
         candidates.sort(key=lambda row: _meeting_relevance(row, query, committee), reverse=True)
         meeting_repository = MeetingRepository(self.database)
@@ -1296,8 +1312,17 @@ def _filter_issue_by_proposal_scope(
     payload["quality"] = issue_quality(payload)
 
 
-def _meeting_date_queries(months: Iterable[str]) -> list[str]:
-    """Collapse a complete calendar year to one supported CONF_DATE query."""
+def _meeting_date_queries(
+    months: Iterable[str],
+    *,
+    as_of: date | None = None,
+) -> list[str]:
+    """Collapse a safe calendar span to one supported ``CONF_DATE`` query.
+
+    A full historical year is exact.  January through the current month is
+    also safe to fetch with a year query when rows are subsequently bounded by
+    their actual meeting date.
+    """
 
     by_year: dict[str, set[int]] = {}
     for value in sorted(dict.fromkeys(months)):
@@ -1308,13 +1333,51 @@ def _meeting_date_queries(months: Iterable[str]) -> list[str]:
     queries: list[str] = []
     full_year = set(range(1, 13))
     for year, month_numbers in sorted(by_year.items()):
-        if month_numbers == full_year:
+        elapsed_current_year = (
+            as_of is not None
+            and int(year) == as_of.year
+            and month_numbers == set(range(1, as_of.month + 1))
+        )
+        if month_numbers == full_year or elapsed_current_year:
             queries.append(year)
         else:
             queries.extend(
                 f"{year}-{month:02d}" for month in sorted(month_numbers)
             )
     return queries
+
+
+def _filter_meeting_rows_by_scope(
+    rows: Iterable[dict[str, Any]],
+    temporal_scope: dict[str, Any],
+    queried_months: Iterable[str],
+) -> list[dict[str, Any]]:
+    """Keep committee, plenary and subcommittee rows inside one exact window."""
+
+    months = sorted(dict.fromkeys(queried_months))
+    if not months:
+        return []
+    start = _date_value(str(temporal_scope.get("requested_date_from") or ""))
+    end = _date_value(str(temporal_scope.get("requested_date_to") or ""))
+    start = start or date.fromisoformat(f"{months[0]}-01")
+    end = end or _month_end_date(months[-1])
+    bounded: list[dict[str, Any]] = []
+    for row in rows:
+        raw = _value(row, "CONF_DATE", "CONF_DT")
+        meeting_date = _meeting_date_value(raw)
+        if meeting_date is not None and start <= meeting_date <= end:
+            bounded.append(row)
+    return bounded
+
+
+def _meeting_date_value(value: str | None) -> date | None:
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) < 8:
+        return None
+    try:
+        return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+    except ValueError:
+        return None
 
 
 def _month_span(start_month: str, end_date: date) -> set[str]:

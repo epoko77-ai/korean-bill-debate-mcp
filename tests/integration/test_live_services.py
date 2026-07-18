@@ -643,6 +643,7 @@ def test_minutes_refresh_returns_a_continuation_offset(tmp_path) -> None:
     rows = tuple(
         {
             **base_row,
+            "CONF_DATE": "2026-07-01",
             "PDF_LINK_URL": f"https://record.assembly.go.kr/fake-{index}.pdf",
         }
         for index in range(5)
@@ -694,7 +695,10 @@ def test_minutes_failure_can_never_be_reported_as_complete(tmp_path) -> None:
     payload = json.loads(
         (ROOT / "tests/fixtures/open_assembly/committee.json").read_text(encoding="utf-8")
     )
-    base_row = payload["ncwgseseafwbuheph"][1]["row"][0]
+    base_row = {
+        **payload["ncwgseseafwbuheph"][1]["row"][0],
+        "CONF_DATE": "2026-07-01",
+    }
     database = Database(tmp_path / "failed-minutes.sqlite3")
     database.initialize()
     service = LiveAssemblyServices(

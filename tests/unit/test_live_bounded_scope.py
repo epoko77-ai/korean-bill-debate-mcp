@@ -10,6 +10,7 @@ from kasm.live import (
     LiveAssemblyServices,
     _bill_queries,
     _filter_bills_by_proposal_scope,
+    _filter_meeting_rows_by_scope,
     _meeting_date_queries,
     _proposal_date_scope,
 )
@@ -97,6 +98,30 @@ def test_exact_question_has_hard_proposal_scope_and_one_year_meeting_query() -> 
         "2026-02",
         "2026-03",
     ]
+    assert _meeting_date_queries(
+        [f"2026-{month:02d}" for month in range(1, 8)],
+        as_of=date(2026, 7, 18),
+    ) == ["2026"]
+
+
+def test_meeting_rows_are_hard_filtered_to_effective_scope() -> None:
+    rows = [
+        {"CONF_DATE": "2025-12-31"},
+        {"CONF_DT": "2026-01-01"},
+        {"CONF_DATE": "2026-07-18"},
+        {"CONF_DT": "2026-07-19"},
+        {"CONF_DATE": "2026-12-01"},
+        {"TITLE": "missing date"},
+    ]
+
+    assert _filter_meeting_rows_by_scope(
+        rows,
+        {
+            "requested_date_from": "2026-01-01",
+            "requested_date_to": "2026-07-18",
+        },
+        [f"2026-{month:02d}" for month in range(1, 8)],
+    ) == rows[1:3]
 
 
 def test_proposal_scope_rejects_2025_and_missing_proposal_dates() -> None:
@@ -171,6 +196,36 @@ def test_live_metadata_calls_are_bounded_to_three_bill_and_three_meeting_queries
         for _dataset, parameters in meeting_calls
         if "CONF_DATE" in parameters
     } == {"2026"}
+
+
+def test_proposal_year_meeting_scope_stops_at_today(tmp_path) -> None:
+    service = LiveAssemblyServices(
+        Database(tmp_path / "proposal-meeting-scope.sqlite3"),
+        client=object(),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+        now=lambda: datetime(2026, 7, 18, tzinfo=UTC),
+    )
+    service._refresh_bills = lambda **_kwargs: []  # type: ignore[method-assign]
+    captured: dict[str, Any] = {}
+    service._refresh_meetings = (  # type: ignore[method-assign]
+        lambda **kwargs: captured.update(kwargs)
+    )
+
+    service._hydrate_issue(QUERY, {"limit": 5})
+
+    elapsed_months = [f"2026-{month:02d}" for month in range(1, 8)]
+    assert captured["months"] == elapsed_months
+    assert captured["temporal_scope"] == {
+        "mode": "explicit",
+        "explicit": True,
+        "requested_date_from": "2026-01-01",
+        "requested_date_to": "2026-07-18",
+        "requested_months": elapsed_months,
+        "queried_months": elapsed_months,
+        "window_start_month": "2026-01",
+        "window_end_month": "2026-07",
+        "window_month_count": 7,
+    }
 
 
 def test_bounded_issue_filters_cache_by_year_ranks_five_and_skips_bill_pdfs(
