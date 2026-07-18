@@ -13,6 +13,7 @@ from kasm.research.contracts import (
     ResearchContract,
 )
 from kasm.research.overview_transport import (
+    MAX_OVERVIEW_DELIBERATION_URLS,
     MAX_OVERVIEW_GROUPS_PER_SHARD,
     OverviewGroupShardDescriptor,
     OverviewTransportBundle,
@@ -295,10 +296,111 @@ def test_group_display_route_uses_only_records_already_exactly_bound_to_group() 
     bill = groups[("bill", "2212345")]
     assert bill.display_label == "정확한 법안 표시명"
     assert bill.primary_official_url == bill_url
+    assert bill.official_bill_url == bill_url
+    assert bill.official_deliberation_urls == ()
+    assert bill.official_deliberation_url_count == 0
     document = groups[("document", "work-only")]
     assert document.display_label == "2219999 전혀 다른 번호가 들어간 문서 제목"
     assert ("bill", "2219999") not in groups
     assert document.to_dict().get("evidence_ids") is None
+
+
+def test_five_bill_catalog_exposes_bill_and_deliberation_urls_per_bill() -> None:
+    records: list[EvidenceRecord] = []
+    expected: dict[str, tuple[str, str]] = {}
+    for number in range(5):
+        bill_no = f"22{number + 12000:05d}"
+        bill_url = (
+            "https://likms.assembly.go.kr/bill/billDetail.do?"
+            f"billId=PRC_SOURCE_{number}"
+        )
+        meeting_url = (
+            "https://record.assembly.go.kr/assembly/viewer/minutes/"
+            f"download/pdf.do?id={53000 + number}"
+        )
+        expected[bill_no] = (bill_url, meeting_url)
+        records.extend(
+            (
+                _record(
+                    f"bill-source-{number}",
+                    EvidenceType.BILLS,
+                    f"2026-01-{number + 1:02d}|10|bill",
+                    metadata=(("bill_no", bill_no),),
+                    title=f"{bill_no} 인공지능 법안",
+                    official_url=bill_url,
+                ),
+                _record(
+                    f"deliberation-source-{number}",
+                    EvidenceType.SUBCOMMITTEE_MINUTES,
+                    f"2026-03-{number + 1:02d}|50|minutes",
+                    metadata=(
+                        ("bill_no", bill_no),
+                        ("meeting_id", f"meeting-{number}"),
+                    ),
+                    title=f"{bill_no} 법안심사소위원회 논의",
+                    official_url=meeting_url,
+                ),
+            )
+        )
+
+    bundle = build_overview_transport(_snapshot(tuple(records)))
+    bills = {
+        group.entity_id: group
+        for shard in bundle.shards
+        for group in shard.groups
+        if group.entity_type.value == "bill"
+    }
+
+    assert len(bills) == 5
+    for bill_no, (bill_url, meeting_url) in expected.items():
+        payload = bills[bill_no].to_dict()
+        assert payload["official_bill_url"] == bill_url
+        assert payload["official_deliberation_urls"] == [meeting_url]
+        assert payload["official_deliberation_url_count"] == 1
+        assert payload["official_deliberation_urls_complete"] is True
+        assert payload["official_deliberation_urls_delivery"] is None
+
+
+def test_bill_deliberation_urls_stay_bounded_and_route_overflow() -> None:
+    bill_no = "2212345"
+    bill = _record(
+        "bounded-bill-source",
+        EvidenceType.BILLS,
+        "2026-01-01|10|bill",
+        metadata=(("bill_no", bill_no),),
+        official_url=(
+            "https://likms.assembly.go.kr/bill/billDetail.do?billId=PRC_BOUNDED"
+        ),
+    )
+    deliberations = tuple(
+        _record(
+            f"bounded-deliberation-{number:02d}",
+            EvidenceType.SUBCOMMITTEE_MINUTES,
+            f"2026-03-01|50|minutes|{number:02d}",
+            metadata=(("bill_no", bill_no),),
+            official_url=(
+                "https://record.assembly.go.kr/assembly/viewer/minutes/"
+                f"download/pdf.do?id={54000 + number}"
+            ),
+        )
+        for number in range(MAX_OVERVIEW_DELIBERATION_URLS + 5)
+    )
+
+    bundle = build_overview_transport(_snapshot((bill, *deliberations)))
+    group = next(
+        group
+        for shard in bundle.shards
+        for group in shard.groups
+        if group.entity_type.value == "bill"
+    )
+    payload = group.to_dict()
+
+    assert len(payload["official_deliberation_urls"]) == MAX_OVERVIEW_DELIBERATION_URLS
+    assert payload["official_deliberation_url_count"] == (
+        MAX_OVERVIEW_DELIBERATION_URLS + 5
+    )
+    assert payload["official_deliberation_urls_complete"] is False
+    assert payload["official_deliberation_urls_delivery"] == "evidence_result_pages"
 
 
 def test_shard_identity_detects_changed_descriptor_and_build_is_deterministic() -> None:

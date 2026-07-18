@@ -131,6 +131,7 @@ def test_speech_and_catalog_tools(configured_tools):
 class FakeResearchBackend:
     def __init__(self) -> None:
         self.start_call: tuple[str, dict[str, Any]] | None = None
+        self.bounded_call: tuple[str, dict[str, Any]] | None = None
         self.status: dict[str, Any] = {
             "research_id": "research_1",
             "status": "running",
@@ -292,11 +293,27 @@ class FakeResearchBackend:
 def research_tools() -> tuple[KasmTools, FakeResearchBackend]:
     backend = FakeResearchBackend()
     search = FakeSearch()
+
+    class FakeCatalog(FakeRepository):
+        def explore_issue(self, query: str, **options: Any) -> dict[str, Any]:
+            backend.bounded_call = (query, options)
+            return {
+                "bills": [],
+                "speeches": [],
+                "discussion_threads": [],
+                "research_pagination": {
+                    "complete": True,
+                    "window_complete": True,
+                    "overall_complete": False,
+                },
+            }
+
     return (
         KasmTools(
             ServiceContext(
                 search=search,
                 repository=FakeRepository(),
+                catalog=FakeCatalog(),
                 research=backend,
             )
         ),
@@ -329,25 +346,63 @@ def test_start_research_returns_receipt_and_preserves_natural_language_scope() -
     assert receipt["next_action"]["tool"] == "get_research_status"
 
 
-def test_explore_issue_uses_durable_workflow_without_legacy_truncation() -> None:
+def test_start_research_cannot_turn_explicit_five_item_request_into_exhaustive_job() -> None:
+    tools, backend = research_tools()
+    query = (
+        "2026년 발의된 인공지능 관련 법안 중 중요도가 높은 법안을 5개 정도 "
+        "정리하고 소위원회, 상임위원회 논의를 정리해줘"
+    )
+
+    result = tools.start_research(query)
+
+    assert backend.start_call is None
+    assert backend.bounded_call is not None
+    assert backend.bounded_call[1]["limit"] == 5
+    assert result["research_mode"] == "bounded_live"
+    assert result["compatibility"]["entrypoint"] == "start_research"
+    assert result["compatibility"]["rerouted_to"] == "explore_issue"
+    assert result["compatibility"]["reason"] == "explicit_bounded_result_count"
+
+
+def test_explore_issue_uses_bounded_live_workflow_and_honors_limit() -> None:
     tools, backend = research_tools()
 
     receipt = tools.explore_issue("최근 AI 입법", limit=1, minutes_offset=99)
 
+    assert backend.start_call is None
+    assert backend.bounded_call is not None
+    assert backend.bounded_call[1] == {"limit": 1, "minutes_offset": 99}
+    assert receipt["compatibility"] == {
+        "entrypoint": "explore_issue",
+        "workflow": "bounded_live",
+        "requested_limit": 1,
+        "exhaustive": False,
+    }
+    assert receipt["requested_limit"] == 1
+    assert receipt["research_mode"] == "bounded_live"
+
+
+def test_explore_issue_routes_explicit_exhaustive_request_to_durable_workflow() -> None:
+    tools, backend = research_tools()
+
+    receipt = tools.explore_issue("인공지능 관련 법안을 전건 빠짐없이 조사해줘", limit=5)
+
     assert backend.start_call is not None
+    assert backend.bounded_call is None
     assert receipt["next_action"]["tool"] == "get_research_status"
     assert receipt["compatibility"] == {
         "entrypoint": "explore_issue",
         "workflow": "durable_research",
+        "reason": "explicit_exhaustive_request",
         "limit_does_not_truncate_research": True,
-        "minutes_offset_ignored": 99,
+        "minutes_offset_ignored": 0,
     }
 
 
 def test_omitted_structured_scope_never_overrides_natural_language_scope() -> None:
     tools, backend = research_tools()
 
-    tools.explore_issue("제21대 법사위의 플랫폼 노동 관련 논의를 조사해줘")
+    tools.explore_issue("제21대 법사위의 플랫폼 노동 관련 논의를 전건 조사해줘")
 
     assert backend.start_call is not None
     assert backend.start_call[1]["assembly_term"] is None
@@ -371,8 +426,8 @@ def test_research_status_drives_poll_then_page_without_claiming_completion() -> 
     partial = tools.get_research_status("research_1")
     assert partial["next_action"]["tool"] == "get_research_overview"
     assert partial["comprehensive_answer_allowed"] is False
-    assert partial["overview_preview"]["phase"] == "final"
-    assert partial["overview_preview"]["catalog"]["page"]["complete"] is True
+    assert partial["overview_inlined"] is False
+    assert "overview_preview" not in partial
 
 
 def test_research_overview_routes_core_before_optional_full_inventory() -> None:
@@ -387,6 +442,17 @@ def test_research_overview_routes_core_before_optional_full_inventory() -> None:
         "research_id": "research_1",
         "evidence_id": "e1",
         "scope": "core",
+    }
+    assert overview["answer_source_requirements"] == {
+        "per_bill_official_bill_url_required": True,
+        "per_discussion_claim_official_deliberation_url_required": True,
+        "bill_url_field": "catalog.groups[].official_bill_url",
+        "deliberation_url_field": "catalog.groups[].official_deliberation_urls",
+        "missing_discussion_policy": (
+            "If no official deliberation URL is present for a selected bill, say that "
+            "no committee/subcommittee discussion was found in the checked scope; do not "
+            "invent or generalize a discussion."
+        ),
     }
     assert overview["comprehensive_answer_allowed"] is False
 

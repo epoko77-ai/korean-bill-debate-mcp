@@ -45,16 +45,19 @@ def create_server(
             "한국 국회의 공식 기록을 조사하는 MCP입니다. 한국어 요청을 우선 정확히 "
             "해석하되 영어 요청도 지원합니다. 제1대부터 제22대까지 명시한 대수·날짜 범위와 "
             "대표발의자·공동발의자·전체 발의자 이름을 공식 필드로 구분합니다. "
-            "광범위한 질문은 start_research 또는 "
-            "explore_issue를 한 번만 호출하고, 모든 응답의 next_action을 그대로 따르세요. "
+            "상위 N건, '5개 정도', 중요 법안 요약과 일반적인 범위 제한 질문은 반드시 "
+            "explore_issue(limit=N)를 사용하세요. start_research는 전건·전수·빠짐없이·역대 "
+            "또는 여러 국회 대수를 포괄한다고 명시한 조사에만 사용하세요. "
+            "모든 응답의 next_action을 그대로 따르세요. "
             "같은 조사가 running이라고 새 research를 만들지 마세요. complete/partial 뒤에는 "
             "get_research_overview로 핵심과 전체 자료 지도를 먼저 확인하세요. 빠른 결과는 "
             "누락을 뜻하지 않으며 catalog의 next_offset을 끝까지 사용해야 합니다. 필요한 "
             "자료만 선택해 get_evidence_document로 열고, 사용자가 전건 조사를 요구했을 때만 "
             "get_research_page(exhaustive=true)와 scope=all을 끝까지 사용하세요. "
-            "coverage.complete와 page.complete가 모두 true이기 전에는 종합 조사가 끝났다고 "
-            "말하지 마세요. 일부 top-N만 임의 선택하거나 근거 유형을 생략하거나 원문을 "
-            "잘라서는 안 됩니다. 필요한 전체 원문은 get_evidence_document로 열고 공식 URL, "
+            "coverage.complete와 page.complete가 모두 true이기 전에는 전건 조사가 끝났다고 "
+            "말하지 마세요. 제한형 답변은 요청한 N건과 조회 범위를 명시하고, 근거 없는 "
+            "완전성 주장을 해서는 안 됩니다. 필요한 전체 원문은 get_evidence_document로 "
+            "열고 공식 URL, "
             "해시, 페이지/구간 locator를 인용하세요. 영문 답변에서는 한국어 원문을 충실히 "
             "번역하고 번역 인용임을 밝히세요. unfamiliar proper noun에는 korean_query로 짧은 "
             "한국어 검색 힌트를 줄 수 있지만 원래 질문의 의도를 바꾸면 안 됩니다. Durable "
@@ -97,11 +100,11 @@ def create_server(
         openWorldHint=True,
     )
     for method in legacy_methods:
-        limiter = (
-            research_limiter
-            if services.research is not None and method.__name__ == "explore_issue"
-            else legacy_limiter
-        )
+        # Ordinary explore_issue calls are blocking bounded live reads again;
+        # serialize them with the other request-scoped cache/API operations.
+        # Explicit exhaustive calls enqueue quickly but sharing this limiter is
+        # preferable to allowing overlapping SQLite/cache mutation.
+        limiter = legacy_limiter
         annotations = (
             research_start_annotations
             if method.__name__ == "explore_issue"

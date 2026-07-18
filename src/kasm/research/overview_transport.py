@@ -34,6 +34,7 @@ from .results import (
 
 MAX_OVERVIEW_GROUPS_PER_SHARD = 100
 MAX_OVERVIEW_LABEL_CHARACTERS = 300
+MAX_OVERVIEW_DELIBERATION_URLS = 20
 
 _CATALOG_TYPES = (
     OverviewEntityType.BILL,
@@ -76,6 +77,17 @@ _GROUP_RECORD_PRIORITY: dict[OverviewEntityType, tuple[EvidenceType, ...]] = {
         EvidenceType.BILL_STATUS,
     ),
 }
+
+_BILL_DELIBERATION_SOURCE_TYPES = frozenset(
+    {
+        EvidenceType.REVIEW_REPORTS,
+        EvidenceType.SUBCOMMITTEE_MINUTES,
+        EvidenceType.AGENDAS,
+        EvidenceType.SPEECHES,
+        EvidenceType.GOVERNMENT_RESPONSES,
+        EvidenceType.SPEECH_CONTEXT,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +209,9 @@ class OverviewGroupDescriptor:
     display_label: str
     display_label_complete: bool
     primary_official_url: str
+    official_bill_url: str | None
+    official_deliberation_urls: tuple[str, ...]
+    official_deliberation_url_count: int
     evidence_count: int
     evidence_type_counts: tuple[EvidenceTypeCount, ...]
     date_from: date | None
@@ -208,6 +223,24 @@ class OverviewGroupDescriptor:
             raise ValueError("speech groups do not belong in the top-level catalog")
         if not self.entity_id or not self.display_label or not self.primary_official_url:
             raise ValueError("overview group descriptor identity is required")
+        if self.entity_type is OverviewEntityType.BILL:
+            if not self.official_bill_url:
+                raise ValueError("bill overview group requires its official bill URL")
+            if self.primary_official_url != self.official_bill_url:
+                raise ValueError("bill overview primary URL must be its official bill URL")
+        elif self.official_bill_url is not None or self.official_deliberation_urls:
+            raise ValueError("only bill overview groups may carry bill source routes")
+        if tuple(sorted(set(self.official_deliberation_urls))) != (
+            self.official_deliberation_urls
+        ):
+            raise ValueError("bill deliberation URLs must be unique and ordered")
+        if not (
+            len(self.official_deliberation_urls)
+            <= self.official_deliberation_url_count
+        ):
+            raise ValueError("bill deliberation URL accounting is invalid")
+        if len(self.official_deliberation_urls) > MAX_OVERVIEW_DELIBERATION_URLS:
+            raise ValueError("bill overview group has too many inline deliberation URLs")
         if self.evidence_count < 1 or self.undated_count < 0:
             raise ValueError("overview group descriptor counts are invalid")
         if self.undated_count > self.evidence_count:
@@ -230,6 +263,19 @@ class OverviewGroupDescriptor:
             "display_label": self.display_label,
             "display_label_complete": self.display_label_complete,
             "primary_official_url": self.primary_official_url,
+            "official_bill_url": self.official_bill_url,
+            "official_deliberation_urls": list(self.official_deliberation_urls),
+            "official_deliberation_url_count": self.official_deliberation_url_count,
+            "official_deliberation_urls_complete": (
+                len(self.official_deliberation_urls)
+                == self.official_deliberation_url_count
+            ),
+            "official_deliberation_urls_delivery": (
+                None
+                if len(self.official_deliberation_urls)
+                == self.official_deliberation_url_count
+                else "evidence_result_pages"
+            ),
             "evidence_count": self.evidence_count,
             "evidence_type_counts": [
                 item.to_dict() for item in self.evidence_type_counts
@@ -742,12 +788,41 @@ def _group_descriptor(
         ),
     )
     label, label_complete = _bounded_label(primary.title, group.entity_id)
+    official_bill_url: str | None = None
+    official_deliberation_urls: tuple[str, ...] = ()
+    official_deliberation_url_count = 0
+    if group.entity_type is OverviewEntityType.BILL:
+        bill_sources = tuple(
+            record
+            for record in records
+            if record.evidence_type is EvidenceType.BILLS
+            and dict(record.metadata).get("bill_no") == group.entity_id
+        )
+        if len(bill_sources) != 1:
+            raise ValueError("bill overview group requires one exact official bill source")
+        official_bill_url = bill_sources[0].citation.official_url
+        all_deliberation_urls = tuple(
+            sorted(
+                {
+                    record.citation.official_url
+                    for record in records
+                    if record.evidence_type in _BILL_DELIBERATION_SOURCE_TYPES
+                }
+            )
+        )
+        official_deliberation_url_count = len(all_deliberation_urls)
+        official_deliberation_urls = all_deliberation_urls[
+            :MAX_OVERVIEW_DELIBERATION_URLS
+        ]
     return OverviewGroupDescriptor(
         entity_type=group.entity_type,
         entity_id=group.entity_id,
         display_label=label,
         display_label_complete=label_complete,
         primary_official_url=primary.citation.official_url,
+        official_bill_url=official_bill_url,
+        official_deliberation_urls=official_deliberation_urls,
+        official_deliberation_url_count=official_deliberation_url_count,
         evidence_count=group.evidence_count,
         evidence_type_counts=group.evidence_type_counts,
         date_from=group.date_from,
@@ -777,6 +852,7 @@ def _payload_hash(payload: Any) -> str:
 
 
 __all__ = [
+    "MAX_OVERVIEW_DELIBERATION_URLS",
     "MAX_OVERVIEW_GROUPS_PER_SHARD",
     "MAX_OVERVIEW_LABEL_CHARACTERS",
     "OverviewCatalogPage",

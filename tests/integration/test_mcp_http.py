@@ -192,6 +192,9 @@ async def exercise_durable_research_tool_surface() -> None:
             "required", []
         )
         assert "committees" not in tools_by_name["explore_issue"].inputSchema.get("required", [])
+        assert "exhaustive" in tools_by_name["explore_issue"].inputSchema["properties"]
+        assert "상위 N건" in (tools_by_name["explore_issue"].description or "")
+        assert "전건" in (tools_by_name["start_research"].description or "")
         assert "cursor" in tools_by_name["get_research_page"].inputSchema["properties"]
         assert "offset" in tools_by_name["get_research_overview"].inputSchema["properties"]
         assert "cursor" in tools_by_name["get_evidence_document"].inputSchema["properties"]
@@ -204,6 +207,29 @@ async def exercise_durable_research_tool_surface() -> None:
         assert receipt.structuredContent is not None
         assert receipt.structuredContent["research_id"] == "research_http"
         assert receipt.structuredContent["next_action"]["tool"] == "get_research_status"
+
+        bounded = await session.call_tool(
+            "explore_issue",
+            {
+                "query": (
+                    "2026년 발의된 인공지능 관련 법안 중 중요도가 높은 법안을 "
+                    "5개 정도 정리해줘"
+                ),
+                "limit": 5,
+            },
+        )
+        assert not bounded.isError
+        assert bounded.structuredContent is not None
+        assert bounded.structuredContent["research_mode"] == "bounded_live"
+        assert bounded.structuredContent["requested_limit"] == 5
+
+        exhaustive = await session.call_tool(
+            "explore_issue",
+            {"query": "인공지능 관련 법안을 전건 빠짐없이 조사해줘", "limit": 5},
+        )
+        assert not exhaustive.isError
+        assert exhaustive.structuredContent is not None
+        assert exhaustive.structuredContent["research_id"] == "research_http"
 
 
 def test_durable_research_tools_are_advertised_only_when_backend_is_configured() -> None:

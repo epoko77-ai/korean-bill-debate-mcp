@@ -24,6 +24,7 @@ from kasm.adapters.korea.pipeline import OpenAssemblyPipeline, distinct_minutes_
 from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
 from kasm.app import LocalServices, infer_bill_title_query, infer_issue_committee
 from kasm.core.models import BillDocument
+from kasm.core.quality import issue_quality
 from kasm.mcp.tools import ServiceContext, extract_bill_numbers
 from kasm.research.assembly_terms import (
     assembly_term as official_assembly_term,
@@ -32,6 +33,7 @@ from kasm.research.assembly_terms import (
     assembly_terms_intersecting,
 )
 from kasm.search.lexical import query_terms
+from kasm.search.terminology import LEGAL_TERMINOLOGY
 from kasm.storage.database import Database
 from kasm.storage.repositories import BillDocumentRepository, MeetingRepository
 
@@ -39,21 +41,58 @@ _DATE_MONTH = re.compile(
     r"(?P<year>(?:19|20)\d{2})[.\-/년 ]+\s*(?P<month>1[0-2]|0?[1-9])"
 )
 _DATE_YEAR = re.compile(r"(?<!\d)(?P<year>(?:19|20)\d{2})(?!\d)")
+_PROPOSAL_YEAR = re.compile(
+    r"(?<!\d)(?P<year>(?:19|20)\d{2})\s*년(?:도)?(?:에)?\s*발의"
+)
+_ENGLISH_PROPOSAL_YEAR = re.compile(
+    r"\b(?:proposed|introduced)\s+in\s+(?P<year>(?:19|20)\d{2})\b",
+    re.IGNORECASE,
+)
+_NUMBERED_SCOPE_TERM = re.compile(r"^\d+(?:년|월|일|개|건|대|차)?$")
 _HISTORY_TERMS = ("과거부터", "처음부터", "현재까지", "지금까지", "전체 경과", "시계열")
 _STOPWORDS = {
+    "내용",
+    "내용을",
     "대한",
     "관련",
+    "발의",
+    "발의된",
+    "발의한",
+    "법안을",
     "논의",
     "의견",
     "정부",
     "법안",
+    "상임위원회",
+    "소위원회",
+    "회의록",
+    "입법",
     "정책",
+    "정도",
+    "이에",
+    "중요도",
+    "중요도가",
+    "높은",
     "현재",
     "상태",
     "최근",
+    "정리하고",
+    "정리해줘",
     "보여줘",
     "알려줘",
 }
+_INSTRUCTION_PREFIXES = (
+    "정리",
+    "요약",
+    "설명",
+    "알려",
+    "보여",
+    "확인",
+    "찾아",
+    "발의",
+    "중요",
+)
+_BOUNDED_PROPOSAL_DISCOVERY_LIMIT = 50
 
 
 class LiveAssemblyServices:
@@ -91,28 +130,37 @@ class LiveAssemblyServices:
     def search_bills(self, query: str, **filters: Any) -> list[dict[str, Any]]:
         term = self._selected_assembly_term(query, filters)
         include_documents = bool(filters.pop("include_documents", True))
+        requested_limit = max(1, int(filters.get("limit", 10)))
+        proposal_scope = _proposal_date_scope(query)
+        if proposal_scope is not None:
+            filters["limit"] = max(
+                requested_limit,
+                _BOUNDED_PROPOSAL_DISCOVERY_LIMIT,
+            )
         filters["assembly_term"] = term
         self._refresh_bills(
             query=query,
             assembly_term=term,
             include_documents=False,
         )
-        # Candidate search stays compact.  Full report text is loaded only for
-        # explicitly selected bills below, where delivery is lossless.
-        results = self.local.search_bills(
-            query,
-            include_documents=False,
-            **filters,
-        )
-        if not results:
-            for candidate in _bill_queries(query)[1:]:
-                results = self.local.search_bills(
-                    candidate,
-                    include_documents=False,
-                    **filters,
-                )
-                if results:
-                    break
+        # Natural-language instructions are not bill titles. Query the compact,
+        # topic-bearing candidates individually and merge them before applying
+        # the requested top-N bound.
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in _bill_queries(query):
+            found = self.local.search_bills(
+                candidate,
+                include_documents=False,
+                **filters,
+            )
+            for bill in _filter_bills_by_proposal_scope(found, proposal_scope):
+                identity = str(bill.get("bill_no") or bill.get("id") or "")
+                if not identity or identity in seen:
+                    continue
+                seen.add(identity)
+                results.append(bill)
+        results = results[:requested_limit]
         if include_documents:
             results = self._hydrate_selected_bills(results, assembly_term=term)
         return results
@@ -219,16 +267,38 @@ class LiveAssemblyServices:
                 "assembly_term": assembly_term,
             },
         )
+        proposal_scope = _proposal_date_scope(query)
+        local_limit = (
+            max(limit, _BOUNDED_PROPOSAL_DISCOVERY_LIMIT)
+            if proposal_scope is not None
+            else limit
+        )
+        local_date_from = date_from
+        local_date_to = date_to
+        if proposal_scope is not None and date_from is None and date_to is None:
+            local_date_from = proposal_scope[0].isoformat()
+            local_date_to = min(
+                proposal_scope[1],
+                self._now().date(),
+            ).isoformat()
         result = self.local.explore_issue(
             query,
-            limit,
-            date_from=date_from,
-            date_to=date_to,
+            local_limit,
+            date_from=local_date_from,
+            date_to=local_date_to,
             assembly_term=term,
         )
-        result["bills"] = self._hydrate_selected_bills(
-            [bill for bill in result.get("bills", []) if isinstance(bill, dict)],
-            assembly_term=term,
+        if proposal_scope is not None:
+            _filter_issue_by_proposal_scope(
+                result,
+                proposal_scope,
+                requested_limit=limit,
+            )
+        # A broad issue overview must not serially discover and download every
+        # selected bill's review PDFs. The bill metadata and official URL remain
+        # available here; get_bill_status performs lossless targeted hydration.
+        result["bills"] = _bounded_bill_payloads(
+            [bill for bill in result.get("bills", []) if isinstance(bill, dict)]
         )
         self._merge_selected_bill_inventory(result["bills"])
         result["data_mode"] = "live_open_assembly_with_local_cache"
@@ -402,6 +472,10 @@ class LiveAssemblyServices:
                 rows.extend(fetched_rows)
                 hashes.extend(source_hashes)
         rows = _unique_rows(rows, "BILL_NO")
+        rows = _filter_bills_by_proposal_scope(
+            rows,
+            _proposal_date_scope(query),
+        )
         if rows:
             source_hash = hashlib.sha256("".join(hashes).encode()).hexdigest()
             ingest_bill_rows(self.database, rows, source_hash=source_hash)
@@ -726,11 +800,11 @@ class LiveAssemblyServices:
             )
         )
         scope.update(_temporal_window(queried_months))
-        for month in queried_months:
+        for date_query in _meeting_date_queries(queried_months):
             for source in (MeetingSource.COMMITTEE, MeetingSource.PLENARY):
                 parameters: dict[str, str | int] = {
                     "DAE_NUM": term,
-                    "CONF_DATE": month,
+                    "CONF_DATE": date_query,
                 }
                 if committee and source is MeetingSource.COMMITTEE:
                     parameters["COMM_NAME"] = committee
@@ -890,13 +964,357 @@ def create_live_services(
 
 def _bill_queries(query: str) -> list[str]:
     inferred = infer_bill_title_query(query)
-    terms = [term for term in query_terms(query) if term not in _STOPWORDS and len(term) >= 2]
-    candidates = [
-        query.strip(),
-        *([inferred] if inferred else []),
-        *sorted(terms, key=len, reverse=True),
+    try:
+        reviewed = []
+        for expansion in LEGAL_TERMINOLOGY.expand(query).expansions:
+            reviewed.append(expansion.term)
+            # Official bill titles legitimately mix the Korean concept and its
+            # common Latin-script alias (for example, "AI 바이오헬스").
+            if expansion.term == "인공지능":
+                reviewed.append("AI")
+    except ValueError:
+        reviewed = []
+    terms = [
+        term
+        for term in query_terms(query)
+        if _is_bill_query_term(term)
     ]
-    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+    candidates = [
+        *([inferred] if inferred else []),
+        *reviewed,
+        *terms,
+    ]
+    compact = list(
+        dict.fromkeys(candidate.strip() for candidate in candidates if candidate.strip())
+    )
+    # Unknown concise titles still need one literal query. Long natural-language
+    # instructions never do: sending the full sentence as BILL_NAME only adds a
+    # guaranteed-empty official API round trip.
+    return compact or ([query.strip()] if query.strip() else [])
+
+
+def _is_bill_query_term(term: str) -> bool:
+    value = term.strip()
+    if len(value) < 2 or value in _STOPWORDS:
+        return False
+    if _NUMBERED_SCOPE_TERM.fullmatch(value):
+        return False
+    return not any(value.startswith(prefix) for prefix in _INSTRUCTION_PREFIXES)
+
+
+def _proposal_date_scope(query: str) -> tuple[date, date] | None:
+    """Return a hard proposal-date range only for explicit proposal-year grammar."""
+
+    years = {
+        int(match.group("year"))
+        for pattern in (_PROPOSAL_YEAR, _ENGLISH_PROPOSAL_YEAR)
+        for match in pattern.finditer(query)
+    }
+    # A single-year bounded filter is intentionally conservative. Multi-year
+    # proposal ranges belong to the durable planner instead of being guessed.
+    if len(years) != 1:
+        return None
+    year = next(iter(years))
+    return date(year, 1, 1), date(year, 12, 31)
+
+
+def _bill_proposal_date(row: dict[str, Any]) -> date | None:
+    raw = _value(row, "PROPOSE_DT", "proposed_at")
+    if raw is None:
+        return None
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) < 8:
+        return None
+    try:
+        return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+    except ValueError:
+        return None
+
+
+def _filter_bills_by_proposal_scope(
+    bills: Iterable[dict[str, Any]],
+    scope: tuple[date, date] | None,
+) -> list[dict[str, Any]]:
+    values = list(bills)
+    if scope is None:
+        return values
+    date_from, date_to = scope
+    return [
+        bill
+        for bill in values
+        if (proposed_at := _bill_proposal_date(bill)) is not None
+        and date_from <= proposed_at <= date_to
+    ]
+
+
+def _bounded_bill_payloads(bills: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep broad overviews compact while routing report text to targeted lookup."""
+
+    compact: list[dict[str, Any]] = []
+    for value in bills:
+        bill = dict(value)
+        bill["documents"] = []
+        bill["documents_included"] = False
+        bill["documents_complete"] = False
+        bill["document_coverage"] = {
+            "complete": False,
+            "discovered": None,
+            "loaded": 0,
+            "gap_reason": "targeted_get_bill_status_required",
+        }
+        compact.append(bill)
+    return compact
+
+
+def _rank_bills_by_observed_importance(
+    bills: Iterable[dict[str, Any]],
+    links: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rank a bounded candidate set using disclosed legislative activity signals."""
+
+    speech_ids_by_bill: dict[str, set[str]] = {}
+    for link in links:
+        bill_id = str(link.get("bill_id") or "")
+        speech_id = str(link.get("speech_id") or "")
+        if bill_id and speech_id:
+            speech_ids_by_bill.setdefault(bill_id, set()).add(speech_id)
+
+    ranked: list[dict[str, Any]] = []
+    for value in bills:
+        bill = dict(value)
+        relevance = bill.get("selection_relevance")
+        topical_score = (
+            int(relevance.get("score") or 0)
+            if isinstance(relevance, dict)
+            else 0
+        )
+        discussion_count = len(
+            speech_ids_by_bill.get(str(bill.get("id") or ""), set())
+        )
+        processed = bool(
+            bill.get("processed_at")
+            or (
+                str(bill.get("process_result") or "").strip()
+                and str(bill.get("process_result") or "").strip() != "계류"
+            )
+        )
+        committee_assigned = bool(str(bill.get("committee") or "").strip())
+        progress_score = 12 if processed else 2 if committee_assigned else 0
+        discussion_score = min(20, discussion_count * 5)
+        score = topical_score + progress_score + discussion_score
+        bill["importance"] = {
+            "method": "bounded_observed_legislative_signals_v1",
+            "score": score,
+            "signals": {
+                "topical_relevance_score": topical_score,
+                "linked_discussion_count": discussion_count,
+                "discussion_score": discussion_score,
+                "processed": processed,
+                "committee_assigned": committee_assigned,
+                "legislative_progress_score": progress_score,
+            },
+            "complete_scope_known": False,
+            "caveat": (
+                "중요도는 현재 제한형 조회에서 관측된 주제 적합도·회의록 연결 수·"
+                "입법 진행 신호를 합산한 비교 지표이며 정책적 중요성의 절대평가가 아닙니다."
+            ),
+        }
+        ranked.append(bill)
+    ranked.sort(
+        key=lambda bill: (
+            -int((bill.get("importance") or {}).get("score") or 0),
+            -int(
+                ((bill.get("importance") or {}).get("signals") or {}).get(
+                    "linked_discussion_count"
+                )
+                or 0
+            ),
+            -(_bill_proposal_date(bill) or date.min).toordinal(),
+            str(bill.get("bill_no") or ""),
+        )
+    )
+    for rank, bill in enumerate(ranked, 1):
+        importance = bill.get("importance")
+        if isinstance(importance, dict):
+            importance["rank"] = rank
+    return ranked
+
+
+def _filter_issue_by_proposal_scope(
+    payload: dict[str, Any],
+    scope: tuple[date, date],
+    *,
+    requested_limit: int,
+) -> None:
+    """Apply proposal-year semantics to selected bills and every bill inventory view."""
+
+    scoped_bills = _filter_bills_by_proposal_scope(
+        (
+            bill
+            for bill in payload.get("bills", [])
+            if isinstance(bill, dict)
+        ),
+        scope,
+    )
+    observed_links = [
+        link for link in payload.get("links", []) if isinstance(link, dict)
+    ]
+    ranked_bills = _rank_bills_by_observed_importance(
+        scoped_bills,
+        observed_links,
+    )
+    selected = ranked_bills[:requested_limit]
+    payload["bills"] = selected
+    payload["importance_selection"] = {
+        "method": "bounded_observed_legislative_signals_v1",
+        "requested_count": requested_limit,
+        "ranked_candidate_count": len(ranked_bills),
+        "signals": [
+            "topical_relevance_score",
+            "linked_discussion_count",
+            "legislative_progress",
+        ],
+        "complete_scope_known": False,
+        "instruction": (
+            "이 순위는 제한형 후보군의 관측 신호 기준입니다. 전건 중요도 비교가 필요하면 "
+            "durable 전수조사를 사용하세요."
+        ),
+    }
+
+    speeches = [
+        speech
+        for speech in payload.get("speeches", [])
+        if isinstance(speech, dict)
+    ][:requested_limit]
+    payload["speeches"] = speeches
+    selected_speech_ids = {
+        str(speech.get("speech_id") or "") for speech in speeches
+    }
+    threads = [
+        thread
+        for thread in payload.get("discussion_threads", [])
+        if isinstance(thread, dict)
+        and selected_speech_ids.intersection(
+            str(value) for value in thread.get("matched_speech_ids", [])
+        )
+    ]
+    payload["discussion_threads"] = threads
+
+    raw_inventory = payload.get("scope_inventory")
+    inventory = raw_inventory if isinstance(raw_inventory, dict) else {}
+    raw_bill_candidates = inventory.get("bill_candidates")
+    bill_candidates = (
+        raw_bill_candidates if isinstance(raw_bill_candidates, dict) else {}
+    )
+    candidate_items = _filter_bills_by_proposal_scope(
+        (
+            item
+            for item in bill_candidates.get("items", [])
+            if isinstance(item, dict)
+        ),
+        scope,
+    )
+    selected_bill_ids = {str(bill.get("id") or "") for bill in selected}
+    selected_bill_numbers = {
+        str(bill.get("bill_no") or "") for bill in selected
+    }
+    importance_by_id = {
+        str(bill.get("id") or ""): bill.get("importance")
+        for bill in ranked_bills
+    }
+    importance_by_number = {
+        str(bill.get("bill_no") or ""): bill.get("importance")
+        for bill in ranked_bills
+    }
+    eligible_count = 0
+    for item in candidate_items:
+        relevance = item.get("selection_relevance")
+        if not isinstance(relevance, dict):
+            continue
+        if relevance.get("eligible_for_synthesis") is True:
+            eligible_count += 1
+        relevance["selected_for_synthesis"] = (
+            str(item.get("bill_id") or "") in selected_bill_ids
+            or str(item.get("bill_no") or "") in selected_bill_numbers
+        )
+        importance = importance_by_id.get(
+            str(item.get("bill_id") or "")
+        ) or importance_by_number.get(str(item.get("bill_no") or ""))
+        if importance is not None:
+            item["importance"] = importance
+    bill_candidates["items"] = candidate_items
+    bill_candidates["total"] = len(candidate_items)
+    inventory["bill_candidates"] = bill_candidates
+
+    allowed_bill_ids = {
+        str(item.get("bill_id") or "") for item in candidate_items
+    }
+    allowed_bill_numbers = {
+        str(item.get("bill_no") or "") for item in candidate_items
+    }
+
+    def allowed_link(link: Any) -> bool:
+        if not isinstance(link, dict):
+            return False
+        bill_id = str(link.get("bill_id") or "")
+        bill_no = str(link.get("bill_no") or "")
+        return bill_id in allowed_bill_ids or bill_no in allowed_bill_numbers
+
+    payload["links"] = [
+        link for link in payload.get("links", []) if allowed_link(link)
+    ]
+    raw_links = inventory.get("links")
+    links_inventory = raw_links if isinstance(raw_links, dict) else {}
+    link_items = [
+        link for link in links_inventory.get("items", []) if allowed_link(link)
+    ]
+    links_inventory["items"] = link_items
+    links_inventory["total"] = len(link_items)
+    inventory["links"] = links_inventory
+
+    selected_summary = inventory.get("selected_for_synthesis")
+    summary = selected_summary if isinstance(selected_summary, dict) else {}
+    summary.update(
+        {
+            "selection_limit": requested_limit,
+            "bill_count": len(selected),
+            "eligible_bill_count": eligible_count,
+            "bill_selection_complete": len(selected) == eligible_count,
+            "speech_count": len(speeches),
+            "discussion_thread_count": len(threads),
+        }
+    )
+    inventory["selected_for_synthesis"] = summary
+    payload["scope_inventory"] = inventory
+    payload["timeline"] = LocalServices._issue_timeline(selected, threads)
+    payload["proposal_date_scope"] = {
+        "basis": "proposal_date",
+        "date_from": scope[0].isoformat(),
+        "date_to": scope[1].isoformat(),
+        "hard_filter": True,
+    }
+    payload["quality"] = issue_quality(payload)
+
+
+def _meeting_date_queries(months: Iterable[str]) -> list[str]:
+    """Collapse a complete calendar year to one supported CONF_DATE query."""
+
+    by_year: dict[str, set[int]] = {}
+    for value in sorted(dict.fromkeys(months)):
+        match = re.fullmatch(r"((?:19|20)\d{2})-(1[0-2]|0[1-9])", value)
+        if match is None:
+            continue
+        by_year.setdefault(match.group(1), set()).add(int(match.group(2)))
+    queries: list[str] = []
+    full_year = set(range(1, 13))
+    for year, month_numbers in sorted(by_year.items()):
+        if month_numbers == full_year:
+            queries.append(year)
+        else:
+            queries.extend(
+                f"{year}-{month:02d}" for month in sorted(month_numbers)
+            )
+    return queries
 
 
 def _month_span(start_month: str, end_date: date) -> set[str]:
@@ -1283,7 +1701,10 @@ def _bill_external_id(row: dict[str, Any]) -> str | None:
 
 def _meeting_relevance(row: dict[str, Any], query: str, committee: str | None) -> tuple[int, str]:
     haystack = " ".join(str(value) for value in row.values()).casefold()
-    score = sum(term.casefold() in haystack for term in query_terms(query))
+    # Rank minutes by the same compact topic vocabulary used for bill
+    # discovery. Instruction words such as "정리해줘" or generic "법안" must
+    # not displace an AI-titled committee agenda.
+    score = sum(term.casefold() in haystack for term in _bill_queries(query))
     if committee and committee.casefold() in haystack:
         score += 5
     return score, _value(row, "CONF_DATE", "CONF_DT") or ""

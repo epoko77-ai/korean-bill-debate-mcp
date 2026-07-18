@@ -22,6 +22,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import StrEnum
 from functools import lru_cache
 from typing import Final
 
@@ -36,8 +37,12 @@ from kasm.search.terminology import (
 
 _BILL_NUMBER = re.compile(r"(?<!\d)\d{7}(?!\d)")
 _STATUTE = re.compile(r"[가-힣]{2,30}(?:기본)?법(?=$|[^가-힣])")
-_DATE = re.compile(
-    r"(?P<year>(?:19|20)\d{2})[-./년 ](?P<month>\d{1,2})[-./월 ](?P<day>\d{1,2})"
+_DATE = re.compile(r"(?P<year>(?:19|20)\d{2})[-./년 ](?P<month>\d{1,2})[-./월 ](?P<day>\d{1,2})")
+_PROPOSAL_DATE_QUERY = re.compile(
+    r"(?:(?:19|20)\d{2}\s*년|올해|금년)"
+    r"[^.!?\n]{0,16}(?:대표\s*|공동\s*)?발의"
+    r"|(?:발의일(?:자)?|발의\s*(?:연도|년도|시점))"
+    r"[^.!?\n]{0,16}(?:(?:19|20)\d{2}\s*년|올해|금년)"
 )
 _QUERY_WORD = re.compile(r"[0-9A-Za-z가-힣]+")
 _HANGUL = re.compile(r"[가-힣]")
@@ -217,16 +222,27 @@ _COMMITTEE_FIELDS: Final = (
     "CMIT_NM",
     "SB_CMIT_NM",
 )
-_DATE_FIELDS: Final = (
-    "date",
-    "meeting_date",
+_PROPOSAL_DATE_FIELDS: Final = (
     "proposed_date",
     "proposal_date",
     "propose_date",
-    "RGS_PROC_DT",
     "PROPOSE_DT",
+    "PROPOSE_DATE",
+)
+_DATE_FIELDS: Final = (
+    "date",
+    "meeting_date",
+    "RGS_PROC_DT",
+    *_PROPOSAL_DATE_FIELDS,
 )
 _ID_FIELDS: Final = ("id", "candidate_id", "bill_id", "meeting_id", "official_url")
+
+
+class BillDateBasis(StrEnum):
+    """Date field used to apply a bill's requested time range."""
+
+    ANY = "any"
+    PROPOSAL = "proposal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +261,7 @@ class RelevanceCriteria:
     proposer_names: tuple[str, ...] = ()
     date_from: date | None = None
     date_to: date | None = None
+    bill_date_basis: BillDateBasis = BillDateBasis.ANY
     minimum_score: int = DEFAULT_MINIMUM_SCORE
     terminology_version: str = TERMINOLOGY_VERSION
     terminology_expansions: tuple[TermExpansion, ...] = ()
@@ -256,6 +273,8 @@ class RelevanceCriteria:
             raise ValueError("bill numbers must contain exactly seven digits")
         if self.date_from and self.date_to and self.date_from > self.date_to:
             raise ValueError("date_from must be on or before date_to")
+        if not isinstance(self.bill_date_basis, BillDateBasis):
+            raise ValueError("bill_date_basis must be a BillDateBasis")
         if self.minimum_score < 1:
             raise ValueError("minimum_score must be positive")
         for names in (
@@ -263,9 +282,7 @@ class RelevanceCriteria:
             self.co_proposer_names,
             self.proposer_names,
         ):
-            if len(names) != len(set(names)) or any(
-                not valid_member_name(name) for name in names
-            ):
+            if len(names) != len(set(names)) or any(not valid_member_name(name) for name in names):
                 raise ValueError("proposer names must be unique Korean full names")
         if self.terminology_version != TERMINOLOGY_VERSION:
             raise ValueError("relevance criteria uses an unsupported terminology version")
@@ -290,6 +307,7 @@ class RelevanceCriteria:
         proposer_names: Sequence[str] = (),
         date_from: date | None = None,
         date_to: date | None = None,
+        bill_date_basis: BillDateBasis | None = None,
         minimum_score: int = DEFAULT_MINIMUM_SCORE,
     ) -> RelevanceCriteria:
         """Build criteria while conservatively extracting known query concepts."""
@@ -302,9 +320,7 @@ class RelevanceCriteria:
                 *extracted_proposers.representative_proposer_names,
             )
         )
-        co_names = _distinct(
-            (*co_proposer_names, *extracted_proposers.co_proposer_names)
-        )
+        co_names = _distinct((*co_proposer_names, *extracted_proposers.co_proposer_names))
         role_specific = {*representative_names, *co_names}
         any_names = _distinct(
             name
@@ -364,9 +380,7 @@ class RelevanceCriteria:
             # Korean literals as first-class issue terms so an unfamiliar
             # topic (for example 딥페이크, 플랫폼 노동, or 기후 적응) is not
             # rejected merely because it is absent from the curated registry.
-            issue_terms=_meaningful_terms(
-                (*issue_terms, *equivalent_issues, *literal_issues)
-            ),
+            issue_terms=_meaningful_terms((*issue_terms, *equivalent_issues, *literal_issues)),
             related_statute_terms=_meaningful_terms(related_statutes),
             related_issue_terms=_meaningful_terms(related_issues),
             committees=_distinct(committees),
@@ -375,6 +389,9 @@ class RelevanceCriteria:
             proposer_names=any_names,
             date_from=date_from,
             date_to=date_to,
+            bill_date_basis=(
+                bill_date_basis if bill_date_basis is not None else infer_bill_date_basis(query)
+            ),
             minimum_score=minimum_score,
             terminology_expansions=terminology.expansions,
         )
@@ -412,19 +429,12 @@ class _PreparedCriteria:
 
     @property
     def meaningful(self) -> bool:
-        return bool(
-            self.statutes
-            or self.issues
-            or self.related_statutes
-            or self.related_issues
-        )
+        return bool(self.statutes or self.issues or self.related_statutes or self.related_issues)
 
     @property
     def has_proposer_scope(self) -> bool:
         return bool(
-            self.representative_proposer_names
-            or self.co_proposer_names
-            or self.proposer_names
+            self.representative_proposer_names or self.co_proposer_names or self.proposer_names
         )
 
 
@@ -450,15 +460,29 @@ def evaluate_candidate(
     if criteria.committees and matched_committee is None:
         return _rejected(candidate, candidate_id, "committee_mismatch")
 
+    bill_candidate = _is_bill_candidate(candidate)
     has_date_scope = bool(criteria.date_from or criteria.date_to)
-    candidate_dates = _candidate_dates(candidate) if has_date_scope else ()
+    proposal_date_scope = bool(
+        has_date_scope and bill_candidate and criteria.bill_date_basis is BillDateBasis.PROPOSAL
+    )
+    candidate_dates = (
+        _candidate_dates(
+            candidate,
+            fields=(_PROPOSAL_DATE_FIELDS if proposal_date_scope else _DATE_FIELDS),
+        )
+        if has_date_scope
+        else ()
+    )
     matched_date = (
         _matching_date(candidate_dates, criteria.date_from, criteria.date_to)
         if has_date_scope
         else None
     )
     if has_date_scope and matched_date is None:
-        reason = "date_missing" if not candidate_dates else "date_out_of_range"
+        reason_prefix = "proposal_date" if proposal_date_scope else "date"
+        reason = (
+            f"{reason_prefix}_missing" if not candidate_dates else f"{reason_prefix}_out_of_range"
+        )
         return _rejected(candidate, candidate_id, reason)
 
     reasons: list[str] = []
@@ -471,9 +495,9 @@ def evaluate_candidate(
     if matched_committee is not None:
         reasons.append(f"committee_exact:{matched_committee}")
     if matched_date is not None and has_date_scope:
-        reasons.append(f"date_in_range:{matched_date.isoformat()}")
+        reason_prefix = "proposal_date" if proposal_date_scope else "date"
+        reasons.append(f"{reason_prefix}_in_range:{matched_date.isoformat()}")
 
-    bill_candidate = _is_bill_candidate(candidate)
     proposer_match_count = 0
     if prepared.has_proposer_scope and bill_candidate:
         proposer_reasons, proposer_rejection = _match_proposer_scope(
@@ -528,9 +552,7 @@ def evaluate_candidate(
         )
     elif requested_numbers:
         relevant = score >= 100
-    elif not prepared.meaningful and (
-        matched_committee is not None or matched_date is not None
-    ):
+    elif not prepared.meaningful and (matched_committee is not None or matched_date is not None):
         # A topic-free structured request such as "법사위의 올해 회의록" is
         # intentionally exhaustive inside its hard committee/date scope.
         score = criteria.minimum_score
@@ -548,10 +570,14 @@ def evaluate_candidate(
     else:
         relevant = score >= criteria.minimum_score
 
-    rejection = () if relevant else (
-        "proposer_topic_mismatch"
-        if prepared.has_proposer_scope and bill_candidate and prepared.meaningful
-        else "below_minimum_score",
+    rejection = (
+        ()
+        if relevant
+        else (
+            "proposer_topic_mismatch"
+            if prepared.has_proposer_scope and bill_candidate and prepared.meaningful
+            else "below_minimum_score",
+        )
     )
     return RelevanceResult(
         candidate=candidate,
@@ -619,9 +645,7 @@ def _result_sort_key(result: RelevanceResult) -> tuple[object, ...]:
     return (-result.score, -newest, number, result.candidate_id, title)
 
 
-def _rejected(
-    candidate: Mapping[str, object], candidate_id: str, reason: str
-) -> RelevanceResult:
+def _rejected(candidate: Mapping[str, object], candidate_id: str, reason: str) -> RelevanceResult:
     return RelevanceResult(
         candidate=candidate,
         candidate_id=candidate_id,
@@ -675,21 +699,13 @@ def _match_proposer_scope(
     criteria: _PreparedCriteria,
 ) -> tuple[tuple[str, ...], str | None]:
     official = _official_proposers(candidate)
-    representatives = {
-        name: (field, code) for name, field, code in official.representatives
-    }
-    co_proposers = {
-        name: (field, code) for name, field, code in official.co_proposers
-    }
+    representatives = {name: (field, code) for name, field, code in official.representatives}
+    co_proposers = {name: (field, code) for name, field, code in official.co_proposers}
     all_proposers = {
-        name: ("co_proposer", field, code)
-        for name, field, code in official.co_proposers
+        name: ("co_proposer", field, code) for name, field, code in official.co_proposers
     }
     all_proposers.update(
-        {
-            name: ("representative", field, code)
-            for name, field, code in official.representatives
-        }
+        {name: ("representative", field, code) for name, field, code in official.representatives}
     )
     reasons: list[str] = []
 
@@ -706,9 +722,7 @@ def _match_proposer_scope(
         reasons.append(_proposer_reason("representative", name, field, code))
 
     matched_co_proposers = tuple(
-        (name, co_proposers[name])
-        for name in criteria.co_proposer_names
-        if name in co_proposers
+        (name, co_proposers[name]) for name in criteria.co_proposer_names if name in co_proposers
     )
     if criteria.co_proposer_names and not matched_co_proposers:
         requested = "|".join(criteria.co_proposer_names)
@@ -718,9 +732,7 @@ def _match_proposer_scope(
         reasons.append(_proposer_reason("co_proposer", name, field, code))
 
     matched_proposers = tuple(
-        (name, all_proposers[name])
-        for name in criteria.proposer_names
-        if name in all_proposers
+        (name, all_proposers[name]) for name in criteria.proposer_names if name in all_proposers
     )
     if criteria.proposer_names and not matched_proposers:
         requested = "|".join(criteria.proposer_names)
@@ -757,10 +769,7 @@ def _proposer_entries(
         aligned_codes: tuple[str | None, ...] = (
             tuple(codes) if len(codes) == len(names) else (None,) * len(names)
         )
-        entries.extend(
-            (name, field, code)
-            for name, code in zip(names, aligned_codes, strict=True)
-        )
+        entries.extend((name, field, code) for name, code in zip(names, aligned_codes, strict=True))
     return tuple(dict.fromkeys(entries))
 
 
@@ -777,9 +786,7 @@ def _display_representative_entries(
 
 def _proposer_names(value: object) -> tuple[str, ...]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return _distinct(
-            name for item in value for name in _proposer_names(item)
-        )
+        return _distinct(name for item in value for name in _proposer_names(item))
     text = _string(value).strip()
     if not text:
         return ()
@@ -797,11 +804,7 @@ def _proposer_codes(value: object) -> tuple[str, ...]:
         raw_values = (_string(item).strip() for item in value)
     else:
         raw_values = (item.strip() for item in _PROPOSER_SPLIT.split(_string(value)))
-    return tuple(
-        dict.fromkeys(
-            item for item in raw_values if re.fullmatch(r"[0-9A-Za-z]+", item)
-        )
-    )
+    return tuple(dict.fromkeys(item for item in raw_values if re.fullmatch(r"[0-9A-Za-z]+", item)))
 
 
 def _proposer_reason(
@@ -835,9 +838,7 @@ def _candidate_bill_numbers(candidate: Mapping[str, object]) -> set[str]:
     return values
 
 
-def _matching_committee(
-    candidate: Mapping[str, object], requested: Sequence[str]
-) -> str | None:
+def _matching_committee(candidate: Mapping[str, object], requested: Sequence[str]) -> str | None:
     if not requested:
         return None
     candidates = tuple(
@@ -858,18 +859,24 @@ def _normalize_committee(value: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]", "", canonical.casefold())
 
 
-def _candidate_dates(candidate: Mapping[str, object]) -> tuple[date, ...]:
+def _candidate_dates(
+    candidate: Mapping[str, object],
+    *,
+    fields: Sequence[str] = _DATE_FIELDS,
+) -> tuple[date, ...]:
     values = {
-        parsed
-        for field in _DATE_FIELDS
-        if (parsed := _parse_date(candidate.get(field))) is not None
+        parsed for field in fields if (parsed := _parse_date(candidate.get(field))) is not None
     }
     return tuple(sorted(values))
 
 
-def _matching_date(
-    values: Sequence[date], lower: date | None, upper: date | None
-) -> date | None:
+def infer_bill_date_basis(query: str) -> BillDateBasis:
+    """Bind an explicitly proposal-scoped year to proposal metadata only."""
+
+    return BillDateBasis.PROPOSAL if _PROPOSAL_DATE_QUERY.search(query) else BillDateBasis.ANY
+
+
+def _matching_date(values: Sequence[date], lower: date | None, upper: date | None) -> date | None:
     matching = [
         value
         for value in values
@@ -902,9 +909,7 @@ def _parse_date(value: object) -> date | None:
             return None
 
 
-def _best_source(
-    term: str, texts: _CandidateText, weights: Mapping[str, int]
-) -> str | None:
+def _best_source(term: str, texts: _CandidateText, weights: Mapping[str, int]) -> str | None:
     matches = [
         source
         for source in ("title", "agenda", "body")
@@ -932,9 +937,7 @@ def _literal_issue_terms(
     separates the words.
     """
 
-    excluded_keys = {
-        _match_key(_normalize_text(value)) for value in excluded if value.strip()
-    }
+    excluded_keys = {_match_key(_normalize_text(value)) for value in excluded if value.strip()}
     tokens: list[str] = []
     for raw in _QUERY_WORD.findall(query):
         raw_key = _match_key(raw.casefold())
@@ -985,9 +988,7 @@ def _match_key(value: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]", "", value.casefold())
 
 
-def _nonoverlapping_related(
-    related: Sequence[str], exact: Sequence[str]
-) -> tuple[str, ...]:
+def _nonoverlapping_related(related: Sequence[str], exact: Sequence[str]) -> tuple[str, ...]:
     """Avoid counting a broad and nested related term as independent hits."""
 
     return tuple(
@@ -998,11 +999,7 @@ def _nonoverlapping_related(
 
 
 def _is_generic_term(term: str) -> bool:
-    if (
-        term in _GENERIC_TERMS
-        or term.isdigit()
-        or _PROPOSER_INSTRUCTION_TERM.fullmatch(term)
-    ):
+    if term in _GENERIC_TERMS or term.isdigit() or _PROPOSER_INSTRUCTION_TERM.fullmatch(term):
         return True
     for particle in _KOREAN_PARTICLES:
         if term.endswith(particle) and len(term) > len(particle):
@@ -1027,9 +1024,7 @@ def _candidate_id(candidate: Mapping[str, object]) -> str:
 
 
 def _field_text(candidate: Mapping[str, object], fields: Sequence[str]) -> str:
-    return " ".join(
-        value for field in fields if (value := _string(candidate.get(field)).strip())
-    )
+    return " ".join(value for field in fields if (value := _string(candidate.get(field)).strip()))
 
 
 def _string(value: object) -> str:
@@ -1045,10 +1040,12 @@ def _distinct(values: Iterable[str]) -> tuple[str, ...]:
 
 
 __all__ = [
+    "BillDateBasis",
     "DEFAULT_MINIMUM_SCORE",
     "RelevanceCriteria",
     "RelevanceResult",
     "evaluate_candidate",
+    "infer_bill_date_basis",
     "rank_candidates",
     "rank_relevance_results",
 ]

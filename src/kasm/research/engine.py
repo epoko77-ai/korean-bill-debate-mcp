@@ -48,7 +48,11 @@ from .page_collection import (
 from .partitioning import OfficialSourceKind, ResearchPartitionPlan, ResearchPartitionPlanner
 from .planner import ResearchContractPlanner, ResearchPlan
 from .queue import ResearchTask, ResearchTaskQueue, ResearchTaskStage
-from .relevance import RelevanceCriteria
+from .relevance import (
+    BillDateBasis,
+    RelevanceCriteria,
+    infer_bill_date_basis,
+)
 from .resolver import (
     CandidateDecision,
     MetadataCandidateResolver,
@@ -2954,14 +2958,7 @@ class ResearchEngine:
             date_to=gateway.partition_plan.effective_date_to,
             committees=gateway.research_plan.contract.committees,
         )
-        entity_plan = replace(
-            gateway.research_plan,
-            contract=replace(
-                gateway.research_plan.contract,
-                date_from=None,
-                date_to=None,
-            ),
-        )
+        entity_plan = _entity_resolution_plan(gateway.research_plan)
         resolution = self.resolver.resolve(entity_plan, filtered)
         preview = build_provisional_research_overview(
             DiscoveryStageState(
@@ -3015,18 +3012,7 @@ class ResearchEngine:
                 date_to=gateway.partition_plan.effective_date_to,
                 committees=gateway.research_plan.contract.committees,
             )
-            # Contract dates scope legislative events (meetings, speeches, status
-            # changes), not the lifetime of the bill entity.  An older proposal
-            # can be actively discussed in the requested period and must proceed
-            # through relevance, exact status, and document discovery.
-            entity_plan = replace(
-                gateway.research_plan,
-                contract=replace(
-                    gateway.research_plan.contract,
-                    date_from=None,
-                    date_to=None,
-                ),
-            )
+            entity_plan = _entity_resolution_plan(gateway.research_plan)
             resolution = self.resolver.resolve(entity_plan, filtered)
             corpus_recall = self._recall_from_corpus(
                 gateway.research_plan,
@@ -4487,6 +4473,7 @@ def _criteria_hash(criteria: RelevanceCriteria) -> str:
         "proposer_names": list(criteria.proposer_names),
         "date_from": criteria.date_from.isoformat() if criteria.date_from else None,
         "date_to": criteria.date_to.isoformat() if criteria.date_to else None,
+        "bill_date_basis": criteria.bill_date_basis.value,
         "minimum_score": criteria.minimum_score,
         "terminology_version": criteria.terminology_version,
         "terminology_expansions": [
@@ -4579,6 +4566,25 @@ def _strict_filter(
             coverage=collection.coverage,
         ),
         StrictFilterReport(bill_report, meeting_report),
+    )
+
+
+def _entity_resolution_plan(plan: ResearchPlan) -> ResearchPlan:
+    """Keep proposal dates only when the user scopes bills by their filing date."""
+
+    if infer_bill_date_basis(plan.contract.query) is BillDateBasis.PROPOSAL:
+        return plan
+    # Otherwise contract dates scope legislative events (meetings, speeches,
+    # status changes), not the lifetime of the bill entity.  An older proposal
+    # can be actively discussed in the requested period and must proceed through
+    # relevance, exact status, and document discovery.
+    return replace(
+        plan,
+        contract=replace(
+            plan.contract,
+            date_from=None,
+            date_to=None,
+        ),
     )
 
 

@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.1.1] - 2026-07-18
+
+### Changed
+
+- Route explicit top-N and “about five” questions to the bounded live Open Assembly path even when
+  an MCP client accidentally selects `start_research`; reserve durable research for explicit
+  exhaustive, multi-term, or structured unsupported scopes.
+- Reduce the representative 2026 AI question from noisy sentence-level bill searches to three
+  reviewed title queries and collapse a full calendar year of meeting metadata to three official
+  API calls. Broad overviews no longer download every selected bill's review PDF; targeted
+  `get_bill_status` still returns the lossless documents.
+- Publish the observed legislative-progress, topical-relevance, and linked-discussion signals used
+  for a bounded importance ranking, including its non-exhaustive caveat.
+
+### Fixed
+
+- Treat “2026년에 발의된” as a hard proposal-date filter. A 2025 bill can no longer pass because
+  its committee registration or processing date falls in 2026, and stale cached bills or speeches
+  outside the checked year are excluded from the bounded answer.
+- Keep status polling small instead of reinserting the same 100-item overview on every poll.
+- Expose an official bill URL and the available official deliberation URLs per bill, plus explicit
+  source requirements for synthesis and a missing-discussion disclosure rule.
+
 ## [1.1.0] - 2026-07-18
 
 ### Added

@@ -660,6 +660,57 @@ def test_gateway_is_network_free_and_returns_secret_free_receipt() -> None:
     assert Credentials.capability not in public
 
 
+def test_discovery_rejects_2025_bill_processed_in_2026_for_proposal_year_query() -> None:
+    rows = [
+        {
+            "BILL_NO": "2210001",
+            "BILL_NAME": "인공지능 활용 촉진법안",
+            "PROPOSE_DT": "2025-11-01",
+            "RGS_PROC_DT": "2026-03-09",
+        },
+        {
+            "BILL_NO": "2210002",
+            "BILL_NAME": "인공지능 안전법안",
+            "PROPOSE_DT": "2026-01-08",
+            "RGS_PROC_DT": "2025-12-31",
+        },
+    ]
+
+    def responder(
+        dataset: str,
+        number: int,
+        page_size: int,
+        _parameters: dict[str, str | int],
+    ) -> ApiPage:
+        assert number == 1
+        return page(dataset, number, page_size, len(rows), rows)
+
+    value, queue, _client, _jobs, runs, _finalizer = engine(
+        responder,
+        partition_planner=ReducedPartitionPlanner(),
+    )
+    receipt = value.gateway(
+        "2026년 발의된 인공지능 관련 법안",
+        assembly_api_key="key",
+        as_of=AS_OF,
+        evidence_types=(EvidenceType.BILLS,),
+    )
+
+    value.process_metadata_task(
+        task_with(queue, work_kind="metadata_page", phase="discovery", page=1)
+    )
+    process_phase_barrier(value, queue, "discovery")
+
+    discovery = runs.get_discovery(receipt.research_id)
+    assert discovery is not None
+    assert [item.candidate_id for item in discovery.resolution.bills.accepted] == ["bill:2210002"]
+    rejected = next(
+        item for item in discovery.resolution.bills.decisions if item.candidate_id == "bill:2210001"
+    )
+    assert rejected.rejection_reasons == ("proposal_date_out_of_range",)
+    assert discovery.resolution.to_dict()["criteria"]["bill_date_basis"] == "proposal"
+
+
 def test_bulk_lane_keeps_exact_bill_tasks_interactive() -> None:
     value, queue, _client, _jobs, _runs, _finalizer = engine(
         exact_responder,

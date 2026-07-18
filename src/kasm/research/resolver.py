@@ -81,9 +81,7 @@ class CandidateSetResolution:
             raise ValueError("accepted candidates must be unique resolved candidates")
         if any(not item.accepted for item in self.accepted):
             raise ValueError("accepted candidates must carry an accepted decision")
-        if set(accepted_ids) != {
-            item.candidate_id for item in self.decisions if item.accepted
-        }:
+        if set(accepted_ids) != {item.candidate_id for item in self.decisions if item.accepted}:
             raise ValueError("accepted candidates must include every accepted decision")
 
     @property
@@ -149,17 +147,14 @@ class MetadataResolution:
                 "related_statute_terms": list(self.criteria.related_statute_terms),
                 "related_issue_terms": list(self.criteria.related_issue_terms),
                 "committees": list(self.criteria.committees),
-                "representative_proposer_names": list(
-                    self.criteria.representative_proposer_names
-                ),
+                "representative_proposer_names": list(self.criteria.representative_proposer_names),
                 "co_proposer_names": list(self.criteria.co_proposer_names),
                 "proposer_names": list(self.criteria.proposer_names),
                 "date_from": (
                     self.criteria.date_from.isoformat() if self.criteria.date_from else None
                 ),
-                "date_to": (
-                    self.criteria.date_to.isoformat() if self.criteria.date_to else None
-                ),
+                "date_to": (self.criteria.date_to.isoformat() if self.criteria.date_to else None),
+                "bill_date_basis": self.criteria.bill_date_basis.value,
                 "minimum_score": self.criteria.minimum_score,
                 "terminology_version": self.criteria.terminology_version,
                 "expansion_reasons": list(self.criteria.expansion_reasons),
@@ -177,16 +172,12 @@ class MetadataCandidateResolver:
             raise ValueError("minimum_score must be positive")
         self.minimum_score = minimum_score
 
-    def resolve(
-        self, plan: ResearchPlan, collection: MetadataCollection
-    ) -> MetadataResolution:
+    def resolve(self, plan: ResearchPlan, collection: MetadataCollection) -> MetadataResolution:
         criteria = RelevanceCriteria.from_query(
             plan.contract.query,
             bill_numbers=plan.contract.bill_numbers,
             committees=plan.contract.committees,
-            representative_proposer_names=(
-                plan.contract.representative_proposer_names
-            ),
+            representative_proposer_names=(plan.contract.representative_proposer_names),
             co_proposer_names=plan.contract.co_proposer_names,
             proposer_names=plan.contract.proposer_names,
             date_from=plan.contract.date_from,
@@ -219,9 +210,7 @@ class MetadataCandidateResolver:
         )
 
     @staticmethod
-    def _require_exact_bills(
-        requested: Sequence[str], bills: Sequence[Mapping[str, Any]]
-    ) -> None:
+    def _require_exact_bills(requested: Sequence[str], bills: Sequence[Mapping[str, Any]]) -> None:
         available = {
             str(value).strip()
             for bill in bills
@@ -289,17 +278,13 @@ def _accept_exact_ids(
             candidate_id=decision.candidate_id,
             accepted=True,
             score=decision.score,
-            match_reasons=tuple(
-                dict.fromkeys((*decision.match_reasons, "corpus_exact_identity"))
-            ),
+            match_reasons=tuple(dict.fromkeys((*decision.match_reasons, "corpus_exact_identity"))),
             rejection_reasons=(),
             candidate=decision.candidate,
         )
     accepted_order = [item.candidate_id for item in resolution.accepted]
     accepted_order.extend(
-        candidate_id
-        for candidate_id in sorted(exact)
-        if candidate_id not in accepted_order
+        candidate_id for candidate_id in sorted(exact) if candidate_id not in accepted_order
     )
     decisions = tuple(updated[item.candidate_id] for item in resolution.decisions)
     accepted = tuple(updated[candidate_id] for candidate_id in accepted_order)
@@ -326,26 +311,19 @@ def _resolve_set(
     identifiers = tuple(candidate_id for candidate_id, _original, _scored in prepared)
     if len(identifiers) != len(set(identifiers)):
         raise ValueError(f"{kind.value} candidate ids must be unique")
-    original_by_id = {
-        candidate_id: original for candidate_id, original, _scored in prepared
-    }
+    original_by_id = {candidate_id: original for candidate_id, original, _scored in prepared}
     evaluated = tuple(
-        evaluate_candidate(scored, criteria)
-        for _candidate_id, _original, scored in prepared
+        evaluate_candidate(scored, criteria) for _candidate_id, _original, scored in prepared
     )
     if any(
         result.candidate_id != candidate_id
-        for (candidate_id, _original, _scored), result in zip(
-            prepared, evaluated, strict=True
-        )
+        for (candidate_id, _original, _scored), result in zip(prepared, evaluated, strict=True)
     ):
         raise ValueError("relevance result identity does not match its candidate")
 
     ranked = rank_relevance_results(evaluated)
     decision_by_id = {
-        result.candidate_id: _decision(
-            kind, original_by_id[result.candidate_id], result
-        )
+        result.candidate_id: _decision(kind, original_by_id[result.candidate_id], result)
         for result in evaluated
     }
 
