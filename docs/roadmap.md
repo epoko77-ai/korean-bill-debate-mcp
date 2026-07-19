@@ -19,8 +19,9 @@ operational hardening work visible rather than overstating unproven corpus or sc
   that the public deployment loads the pinned revision and never overstates broad-query recall.
 - Add an explicit migration or versioned compatibility reader for research jobs created before the
   strict `v1.0` artifact schema.
-- Run deployed Claude.ai and ChatGPT OAuth smoke tests against the 13-tool surface after every
-  release; refresh and review ChatGPT action snapshots when tool schemas change.
+- Keep the release-published 13-tool OAuth protocol smoke green for Claude.ai and
+  ChatGPT-compatible callbacks; refresh and review ChatGPT action snapshots when tool schemas
+  change, and retain manual logged-in UI checks because automation does not impersonate either UI.
 - Add cancellation and richer retry diagnostics to the durable research job surface.
 - Add a shared cache for public Assembly documents without creating cross-tenant credential or
   private-query state.

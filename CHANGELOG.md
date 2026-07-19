@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- A release-published production OAuth smoke gate for the Claude.ai and ChatGPT-compatible
+  13-tool surface, with bounded deployment-version waiting and no paid LLM credentials.
+
+### Fixed
+
+- Setup credential tests no longer read a developer's local `.env` or expose its value in a
+  failing assertion.
+
 ## [1.1.1] - 2026-07-18
 
 ### Changed

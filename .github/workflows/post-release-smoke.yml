@@ -1,0 +1,49 @@
+name: Post-release production OAuth smoke
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-release-production-oauth-smoke
+  cancel-in-progress: false
+
+jobs:
+  oauth-mount:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      ASSEMBLY_OPEN_API_KEY: ${{ secrets.ASSEMBLY_OPEN_API_KEY }}
+      KBD_REMOTE_BASE_URL: https://korean-bill-debate-mcp.vercel.app
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --extra deploy --extra mcp
+      - name: Require the production smoke credential
+        run: test -n "$ASSEMBLY_OPEN_API_KEY"
+      - name: Wait for the matching production version
+        run: |
+          expected=$(uv run python -c 'from kasm import __version__; print(__version__)')
+          attempt=1
+          while [ "$attempt" -le 20 ]; do
+            deployed=$(curl --fail --silent --show-error "$KBD_REMOTE_BASE_URL/healthz" \
+              | python -c 'import json, sys; print(json.load(sys.stdin).get("version", ""))') || true
+            if [ "$deployed" = "$expected" ]; then
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+          echo "::error::production deployment did not reach the release version"
+          exit 1
+      - name: Verify Claude and ChatGPT OAuth protocol mounts
+        run: uv run python scripts/smoke_remote_production_matrix.py --suite mount
