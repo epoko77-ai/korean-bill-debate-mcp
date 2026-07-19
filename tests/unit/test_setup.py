@@ -12,6 +12,8 @@ from kasm.setup import SERVER_COMMAND, register_client, run_setup, save_api_key
 
 
 def test_setup_stores_key_with_user_only_permissions(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("ASSEMBLY_OPEN_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
     credentials = tmp_path / "credentials.env"
     save_api_key("private-key", credentials)
     monkeypatch.setenv("KBD_CREDENTIALS_FILE", str(credentials))
