@@ -47,3 +47,5 @@ jobs:
           exit 1
       - name: Verify Claude and ChatGPT OAuth protocol mounts
         run: uv run python scripts/smoke_remote_production_matrix.py --suite mount
+      - name: Verify exact-research latency and evidence integrity
+        run: uv run python scripts/smoke_remote_production_matrix.py --suite exact

@@ -33,7 +33,11 @@ def test_post_release_smoke_passes_only_the_required_user_key() -> None:
 
     assert "ASSEMBLY_OPEN_API_KEY: ${{ secrets.ASSEMBLY_OPEN_API_KEY }}" in text
     assert 'test -n "$ASSEMBLY_OPEN_API_KEY"' in text
-    assert "smoke_remote_production_matrix.py --suite mount" in text
+    mount = text.index("smoke_remote_production_matrix.py --suite mount")
+    exact = text.index("smoke_remote_production_matrix.py --suite exact")
+    assert mount < exact
+    for suite in ("broad", "mixed", "all"):
+        assert f"smoke_remote_production_matrix.py --suite {suite}" not in text
     assert "--allow-mixed-load" not in text
     assert "upload-artifact" not in text
     for paid_secret in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"):

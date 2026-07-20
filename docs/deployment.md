@@ -7,7 +7,7 @@ query cache on the user's machine.
 
 ```bash
 export ASSEMBLY_OPEN_API_KEY='YOUR_KEY'
-uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.1 kbd mcp
+uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.2 kbd mcp
 ```
 
 ## Hosted user-keyed Streamable HTTP
@@ -132,7 +132,7 @@ claiming complete historical recall.
 
 ### Historical-scope production checks
 
-The `v1.1.1` planner knows the official date bounds for terms 1–22. That catalog expands an explicit
+The `v1.1.2` planner knows the official date bounds for terms 1–22. That catalog expands an explicit
 term/date range into deterministic source partitions; it is not a substitute for source readiness.
 No scope defaults to the configured current term, currently term 22. Before describing historical
 support in a deployment, verify all of the following:

@@ -2,10 +2,13 @@
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-07-20
+
 ### Added
 
-- A release-published production OAuth smoke gate for the Claude.ai and ChatGPT-compatible
-  13-tool surface, with bounded deployment-version waiting and no paid LLM credentials.
+- A release-published production OAuth and exact-research smoke gate for the Claude.ai and
+  ChatGPT-compatible 13-tool surface, with bounded deployment-version waiting, latency budgets,
+  exhaustive evidence traversal and long-text hash verification, and no paid LLM credentials.
 
 ### Fixed
 

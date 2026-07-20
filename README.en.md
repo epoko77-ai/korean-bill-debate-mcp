@@ -1,6 +1,6 @@
 # Korean Bill & Debate MCP
 
-Current version: `v1.1.1`
+Current version: `v1.1.2`
 
 [한국어](README.md) · [MCP setup guide](docs/mcp-clients.md) ·
 [Data sources](docs/data-sources.md) · [Architecture](docs/architecture.md)
@@ -24,7 +24,7 @@ subcommittee negotiation records and committee expert review reports.
 ![One bill connected to its text, status, subcommittee minutes, expert review, and lawmakers' Q&A](assets/english-thumbnail-v1.png)
 
 The no-account web workspace is still a Korean-language, single-request alpha. The durable
-background workflow in `v1.1.1` is available through the MCP surface first. English users should
+background workflow in `v1.1.2` is available through the MCP surface first. English users should
 use the MCP connection below while the workspace workflow and credential boundary are validated.
 
 ## Ask in English, verify the Korean official record
@@ -51,7 +51,7 @@ AI's answer are translations; open the cited official URL when exact Korean word
 
 ## Search Assembly terms 1–22, exact proposers, and historical ranges
 
-`v1.1.1` plans research against the National Assembly's official term boundaries from the 1st
+`v1.1.2` plans research against the National Assembly's official term boundaries from the 1st
 (Constituent) through the current 22nd Assembly. An explicit term, term range, calendar date, or
 date range is a hard scope. If the question contains none of those—and no exact bill number—the
 planner defaults to the current 22nd Assembly for a fast current-affairs search. A seven-digit bill
@@ -154,7 +154,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #### 2. Install the pinned GitHub release
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.1
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.2
 ```
 
 #### 3. Run one command for the client you use
@@ -206,7 +206,7 @@ natural-language question
   → answer-ready evidence with official URLs and source locators
 ```
 
-For broad research, `v1.1.1` returns a `research_id` immediately. It first exposes candidates
+For broad research, `v1.1.2` returns a `research_id` immediately. It first exposes candidates
 validated on the first official page of every planned source family, explicitly marked
 `metadata_inventory_complete=false`, while the same job continues through every source page. It
 then guides the client through the complete paginated bill/meeting/document map, prioritized core
@@ -227,7 +227,7 @@ In local mode, SQLite is a private cache rather than a bundled source database. 
 ephemeral cache storage. Current bill status is refreshed from the official status API. See the
 [Korean README](README.md) and [client guide](docs/mcp-clients.md).
 
-### Current `v1.1.1` limits
+### Current `v1.1.2` limits
 
 The optional revision-bound corpus path exists in code, but a complete official-record corpus has
 not yet been built, deployed, and operationally verified for the public service. If the configured
