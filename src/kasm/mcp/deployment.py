@@ -10,6 +10,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from kasm import __version__
 from kasm.adapters.korea.bills import BILL_DATASET
 from kasm.adapters.korea.client import AssemblyOpenApiClient
 from kasm.app import create_auto_services
@@ -133,6 +134,7 @@ def create_asgi_app(*, research_task_engine: ResearchTaskEngine | None = None) -
             {
                 "status": "ok",
                 "service": "korean-bill-debate-mcp",
+                "version": __version__,
                 **counts,
                 "semantic_index": hybrid is not None,
                 "remote_user_key": token_codec is not None,

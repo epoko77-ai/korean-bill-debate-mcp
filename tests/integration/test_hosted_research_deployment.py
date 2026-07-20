@@ -9,6 +9,7 @@ from cryptography.fernet import Fernet
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from kasm import __version__
 from kasm.mcp.remote_auth import RemoteTokenAuth
 from kasm.research.queue import (
     ResearchTask,
@@ -145,6 +146,7 @@ def test_complete_hosted_configuration_wires_one_runtime_to_mcp_and_worker(
         ):
             health = await client.get("/healthz")
             assert health.status_code == 200
+            assert health.json()["version"] == __version__
             assert health.json()["durable_research"] is True
             assert health.json()["mcp_tool_count"] == 13
             assert health.json()["corpus_revision_configured"] is False
@@ -207,6 +209,7 @@ def test_partial_hosted_configuration_exposes_neither_backend_nor_worker(
         ):
             health = await client.get("/healthz")
             assert health.status_code == 200
+            assert health.json()["version"] == __version__
             assert health.json()["durable_research"] is False
             assert health.json()["mcp_tool_count"] == 8
 

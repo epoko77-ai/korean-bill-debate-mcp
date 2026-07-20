@@ -9,6 +9,7 @@ from cryptography.fernet import Fernet
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from kasm import __version__
 from kasm.core.models import Bill, Meeting, Speech
 from kasm.indexing.build import build_vector_index
 from kasm.indexing.embeddings import HashEmbeddingProvider
@@ -90,6 +91,7 @@ def test_explicit_offline_cache_app_health(tmp_path, monkeypatch) -> None:
             assert response.json() == {
                 "status": "ok",
                 "service": "korean-bill-debate-mcp",
+                "version": __version__,
                 "meetings": 1,
                 "speeches": 1,
                 "bills": 1,

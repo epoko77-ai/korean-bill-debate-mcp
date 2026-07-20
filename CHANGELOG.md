@@ -11,6 +11,8 @@
 
 - Setup credential tests no longer read a developer's local `.env` or expose its value in a
   failing assertion.
+- The public health response now includes the running release version so post-release automation
+  can distinguish deployment lag from a ready 13-tool surface.
 
 ## [1.1.1] - 2026-07-18
 
