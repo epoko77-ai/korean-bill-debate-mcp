@@ -746,7 +746,7 @@ async def exercise() -> dict[str, object]:
             else:
                 query = os.getenv("KBD_SMOKE_QUERY", "").strip() or (
                     "2219564번 의안의 처리상태, 회의록, 전문위원 검토보고서를 "
-                    "공식 원문 기준으로 조사해줘"
+                    "공식 원문 기준으로 전건 빠짐없이 조사해줘"
                 )
                 research_arguments: dict[str, Any] = {"query": query}
                 raw_assembly_term = os.getenv("KBD_SMOKE_ASSEMBLY_TERM", "22").strip()

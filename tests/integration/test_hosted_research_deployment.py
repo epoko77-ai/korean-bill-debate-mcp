@@ -170,7 +170,7 @@ def test_complete_hosted_configuration_wires_one_runtime_to_mcp_and_worker(
                 assert "start_research" in names
                 result = await session.call_tool(
                     "start_research",
-                    {"query": "제21대 법사위의 플랫폼 노동 논의를 조사해줘"},
+                    {"query": "제21대 법사위의 플랫폼 노동 논의 전건을 빠짐없이 조사해줘"},
                 )
                 assert not result.isError
 

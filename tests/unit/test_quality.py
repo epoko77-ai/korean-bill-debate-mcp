@@ -1,5 +1,25 @@
 from kasm.app import create_services, infer_bill_title_query, infer_issue_committee
+from kasm.core.quality import issue_quality
 from kasm.mcp.tools import KasmTools
+
+
+def _complete_evidence_payload() -> dict:
+    turns = [
+        {
+            "speaker": "김의원",
+            "official_source": "https://example.test/minutes",
+            "source_locator": "p. 1",
+        }
+    ]
+    return {
+        "bills": [{"bill_no": "2200001"}],
+        "speeches": [
+            {"speaker": "김철수"},
+            {"speaker": "박영희"},
+            {"speaker": "이민수"},
+        ],
+        "discussion_threads": [{"turns": turns}],
+    }
 
 
 def test_issue_research_reports_evidence_depth_and_provenance() -> None:
@@ -21,6 +41,110 @@ def test_issue_research_reports_evidence_depth_and_provenance() -> None:
         "debate",
     ]
     assert all(event["official_url"] for event in result["timeline"])
+
+
+def test_issue_quality_accepts_checked_stage_outcomes() -> None:
+    payload = _complete_evidence_payload()
+    payload["stage_coverage"] = {
+        "requested_stages": ["subcommittee", "standing_committee", "plenary"],
+        "stages": {
+            "subcommittee": {"state": "discussion_found", "speech_count": 3},
+            "standing_committee": {
+                "state": "record_found_no_member_debate",
+                "record_count": 1,
+            },
+            "plenary": {
+                "state": "checked_no_matching_discussion",
+                "record_count": 2,
+            },
+        },
+    }
+
+    quality = issue_quality(payload)
+
+    assert quality["score"] == 100
+    assert quality["evidence_sufficient"] is True
+    assert quality["coverage_completeness"] == {
+        "complete": True,
+        "stage_coverage_provided": True,
+        "stages_complete": True,
+        "requested_stages": ["subcommittee", "standing_committee", "plenary"],
+        "complete_stages": ["subcommittee", "standing_committee", "plenary"],
+        "incomplete_stages": [],
+        "missing_stages": [],
+        "pending_stages": [],
+        "not_checked_stages": [],
+        "failed_stages": [],
+        "unknown_stages": [],
+        "stage_states": {
+            "subcommittee": "discussion_found",
+            "standing_committee": "record_found_no_member_debate",
+            "plenary": "checked_no_matching_discussion",
+        },
+        "research_pagination_provided": False,
+        "research_pagination_complete": None,
+        "research_has_more": False,
+    }
+    assert quality["warnings"] == []
+
+
+def test_issue_quality_rejects_missing_pending_unchecked_and_failed_stages() -> None:
+    payload = _complete_evidence_payload()
+    payload["stage_coverage"] = {
+        "requested_stages": ["missing", "pending", "unchecked", "failed"],
+        "stages": {
+            "pending": {"state": "metadata_found_text_pending", "record_count": 1},
+            "unchecked": {"state": "not_checked"},
+            "failed": {"state": "failed", "failure_count": 1},
+        },
+    }
+
+    quality = issue_quality(payload)
+    coverage = quality["coverage_completeness"]
+
+    assert quality["score"] < 100
+    assert quality["evidence_sufficient"] is False
+    assert coverage["complete"] is False
+    assert coverage["incomplete_stages"] == [
+        "missing",
+        "pending",
+        "unchecked",
+        "failed",
+    ]
+    assert coverage["missing_stages"] == ["missing"]
+    assert coverage["pending_stages"] == ["pending"]
+    assert coverage["not_checked_stages"] == ["unchecked"]
+    assert coverage["failed_stages"] == ["failed"]
+    assert len(quality["warnings"]) == 4
+
+
+def test_issue_quality_rejects_incomplete_or_has_more_research_pagination() -> None:
+    incomplete_payload = _complete_evidence_payload()
+    incomplete_payload["research_pagination"] = {"complete": False}
+    incomplete = issue_quality(incomplete_payload)
+
+    assert incomplete["score"] < 100
+    assert incomplete["evidence_sufficient"] is False
+    assert incomplete["coverage_completeness"]["complete"] is False
+    assert incomplete["coverage_completeness"]["research_pagination_complete"] is False
+    assert incomplete["warnings"] == [
+        "요청 범위의 회의록 조사가 완료되지 않았습니다."
+    ]
+
+    has_more_payload = _complete_evidence_payload()
+    has_more_payload["research_pagination"] = {
+        "complete": True,
+        "has_more": True,
+        "next_minutes_offset": 2,
+    }
+    has_more = issue_quality(has_more_payload)
+
+    assert has_more["score"] < 100
+    assert has_more["evidence_sufficient"] is False
+    assert has_more["coverage_completeness"]["research_has_more"] is True
+    assert has_more["warnings"] == [
+        "회의록 페이지가 더 남아 있어 요청 범위 조사가 완료되지 않았습니다."
+    ]
 
 
 def test_english_issue_research_preserves_request_and_uses_korean_evidence_query() -> None:

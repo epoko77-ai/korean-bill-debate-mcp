@@ -78,7 +78,7 @@ MCP 스키마에 읽기 전용으로 선언됩니다. 관리자 정책과 역할
 PyPI 배포 전에는 검증된 GitHub 릴리스를 직접 설치합니다.
 
 ```bash
-uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.2
+uv tool install git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.3
 ```
 
 ## 자동 설정
@@ -108,7 +108,7 @@ kbd setup --client claude-desktop
 ```bash
 claude mcp add --scope user korean-bill-debate \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.2 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.3 kbd mcp
 claude mcp get korean-bill-debate
 ```
 
@@ -119,7 +119,7 @@ Claude Code에서 `/mcp`를 실행해 8개 도구를 확인합니다.
 ```bash
 codex mcp add korean-bill-debate \
   --env ASSEMBLY_OPEN_API_KEY=본인의_키 -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.2 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.3 kbd mcp
 codex mcp get korean-bill-debate
 codex mcp list
 ```
@@ -131,7 +131,7 @@ Codex 안에서는 `/mcp`로 연결 상태를 확인합니다.
 ```bash
 gemini mcp add --scope user \
   -e ASSEMBLY_OPEN_API_KEY=본인의_키 korean-bill-debate -- \
-  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.2 kbd mcp
+  uvx --from git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.3 kbd mcp
 gemini mcp list
 ```
 
@@ -148,7 +148,7 @@ Gemini CLI 안에서는 `/mcp list`를 사용합니다.
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.2",
+        "git+https://github.com/epoko77-ai/korean-bill-debate-mcp.git@v1.1.3",
         "kbd",
         "mcp"
       ],
@@ -198,10 +198,16 @@ ChatGPT에서 서버 업데이트 뒤에도 8개만 보이면 먼저 앱 actions
 응답의 `data_mode`는 `live_open_assembly_with_local_cache`, `live_checked_at`은 이번 조회
 시각이어야 합니다.
 
+특정 법안이나 별칭 하나의 소위원회·상임위원회·본회의 주요 논의는 `explore_issue` 한 번으로
+조회합니다. `search_bills`, `list_meetings`, `search_speeches`를 먼저 각각 호출하지 마세요.
+`start_research`는 전건·전수·빠짐없이·역대 또는 복수 국회 대수를 명시한 조사에만 사용하며,
+일반 요약이 잘못 전달되면 서버가 bounded live 경로로 되돌립니다.
+
 ## 역대 국회·발의자 조사 확인
 
 완전한 13개 도구 hosted 연결의 `start_research`는 제1대부터 제22대까지 공식 임기 경계를
-사용합니다. 대수·날짜·정확한 의안번호를 쓰지 않으면 현재 제22대를 기본값으로 사용합니다.
+사용합니다. 전건 조사에서 대수·날짜·정확한 의안번호를 쓰지 않으면 현재 제22대를 기본값으로
+사용합니다.
 다음처럼 대수, 연속 범위, 서로 떨어진 비교 대수, 날짜 범위를 자연어로 명시할 수 있습니다.
 
 ```text
@@ -247,7 +253,7 @@ MCP의 선택 인자 `korean_query`로 한국어 검색어를 함께 전달할 �
 
 - **키 누락**: `ASSEMBLY_OPEN_API_KEY is required`가 나오면 setup을 다시 실행합니다.
 - **키 오류**: setup의 검증 단계에서 열린국회 오류 코드를 그대로 확인합니다.
-- **이미 등록됨**: Claude Code·Codex·Gemini의 기존 등록이 현재 `v1.1.2` 명령과 정확히
+- **이미 등록됨**: Claude Code·Codex·Gemini의 기존 등록이 현재 `v1.1.3` 명령과 정확히
   같으면 성공으로 처리합니다. 다른 명령이면 자동으로 덮어쓰지 않으므로 기존 등록을 확인한
   뒤 직접 삭제하거나 수정하세요.
 - **PDF 처리가 느림**: 내장 Python 추출기로도 동작하지만 macOS는 `brew install poppler`,

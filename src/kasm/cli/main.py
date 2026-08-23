@@ -409,7 +409,10 @@ def main(
                 services = create_services()
             else:
                 services = (service_factory or _service_factory)()
-        tools = KasmTools(services)
+        tools = KasmTools(
+            services,
+            enforce_transport_budget=args.command != "research",
+        )
         if args.command in {"demo", "search"}:
             kwargs = (
                 {}

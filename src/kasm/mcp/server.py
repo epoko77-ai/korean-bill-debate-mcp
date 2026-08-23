@@ -48,6 +48,9 @@ def create_server(
             "상위 N건, '5개 정도', 중요 법안 요약과 일반적인 범위 제한 질문은 반드시 "
             "explore_issue(limit=N)를 사용하세요. start_research는 전건·전수·빠짐없이·역대 "
             "또는 여러 국회 대수를 포괄한다고 명시한 조사에만 사용하세요. "
+            "특정 법안이나 별칭 하나의 소위원회·상임위원회·본회의 주요 논의는 "
+            "explore_issue 한 번으로 확인하고, 먼저 search_bills/list_meetings/search_speeches를 "
+            "각각 호출하거나 같은 검색을 반복하지 마세요. "
             "모든 응답의 next_action을 그대로 따르세요. "
             "같은 조사가 running이라고 새 research를 만들지 마세요. complete/partial 뒤에는 "
             "get_research_overview로 핵심과 전체 자료 지도를 먼저 확인하세요. 빠른 결과는 "
@@ -120,13 +123,22 @@ def create_server(
             implementation.get_evidence_document,
         )
         for research_method in research_methods:
+            # start_research may server-reroute an ordinary summary to the
+            # bounded live path, so it must share the SQLite/API mutation
+            # limiter with explore_issue. Status and artifact reads remain
+            # independently available while that bounded call is running.
+            limiter = (
+                legacy_limiter
+                if research_method.__name__ == "start_research"
+                else research_limiter
+            )
             annotations = (
                 research_start_annotations
                 if research_method.__name__ == "start_research"
                 else read_annotations
             )
             server.tool(annotations=annotations)(
-                _offloaded_tool(research_method, research_limiter, anyio)
+                _offloaded_tool(research_method, limiter, anyio)
             )
     return server
 
