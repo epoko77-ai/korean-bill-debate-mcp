@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 from kasm.research.request_scope import (
+    ResearchExecutionMode,
     committee_only_request,
+    decide_research_route,
     exhaustive_requested,
     focused_result_request,
     importance_requested,
     requested_result_count,
+    requested_stages,
+    sanitize_committee_scope,
+)
+
+INCIDENT_QUERY = (
+    "최근 본회의를 통과한 닥터나우 금지법과 관련하여, 소위원회, 상임위원회, "
+    "본회의에서 의원들의 주요 논의 내용을 정리해줘"
 )
 
 
@@ -35,3 +44,35 @@ def test_explicit_exhaustive_scope_wins_over_a_display_count() -> None:
 
 def test_plenary_request_is_not_committee_only() -> None:
     assert not committee_only_request("상임위원회와 본회의 논의를 정리해줘")
+
+
+def test_incident_single_measure_stage_summary_is_bounded_without_a_count() -> None:
+    route = decide_research_route(
+        INCIDENT_QUERY,
+        committees=["소위원회", "상임위원회", "본회의"],
+    )
+
+    assert route.mode is ResearchExecutionMode.BOUNDED
+    assert route.reason == "bounded_stage_summary"
+    assert route.requested_stages == (
+        "subcommittee",
+        "standing_committee",
+        "plenary",
+    )
+    assert route.committees == ()
+    assert requested_stages(INCIDENT_QUERY) == route.requested_stages
+
+
+def test_only_positive_exhaustive_or_cross_term_evidence_selects_durable() -> None:
+    assert decide_research_route(
+        INCIDENT_QUERY + " 관련 회의록을 전건 빠짐없이 조사해줘"
+    ).mode is ResearchExecutionMode.DURABLE
+    assert decide_research_route(
+        "제21대와 제22대의 플랫폼 법안을 비교해줘"
+    ).mode is ResearchExecutionMode.DURABLE
+
+
+def test_generic_stages_are_not_structured_committee_filters() -> None:
+    assert sanitize_committee_scope(
+        ["소위원회", "Standing Committee", "본회의", "보건복지위원회"]
+    ) == ("보건복지위원회",)

@@ -113,6 +113,9 @@ _BILL_TITLE_HINTS = (
     (("보완수사", "수사권", "중수청", "공소청", "검사 직접수사"), "형사소송법"),
     (("주택임대차", "임대차보호"), "주택임대차보호법"),
 )
+_BILL_INVENTORY_LIMIT = 50
+_SPEECH_INVENTORY_LIMIT = 50
+_LINK_INVENTORY_LIMIT = 100
 
 
 def infer_issue_committee(query: str) -> str | None:
@@ -372,9 +375,10 @@ class LocalServices:
         date_from: str | None = None,
         date_to: str | None = None,
         assembly_term: int | None = None,
+        committee: str | None = None,
     ) -> dict[str, Any]:
         limit = max(1, int(limit))
-        inferred_committee = infer_issue_committee(query)
+        inferred_committee = committee or infer_issue_committee(query)
         speech_cache_total = self._table_count("speeches")
         all_speeches = self.search(
             query,
@@ -462,6 +466,16 @@ class LocalServices:
             links,
             limit=limit,
         )
+        selected_bill_ids = {str(bill.get("id") or "") for bill in bills}
+        selected_speech_ids = {
+            str(speech.get("speech_id") or "") for speech in speeches
+        }
+        selected_links = [
+            link
+            for link in links
+            if str(link.get("bill_id") or "") in selected_bill_ids
+            and str(link.get("speech_id") or "") in selected_speech_ids
+        ][:_LINK_INVENTORY_LIMIT]
         eligible_bill_count = sum(
             bool(
                 (bill.get("selection_relevance") or {}).get(
@@ -479,7 +493,7 @@ class LocalServices:
             "speeches": speeches,
             "discussion_threads": threads,
             "timeline": self._issue_timeline(bills, threads),
-            "links": links,
+            "links": selected_links,
             "scope_inventory": {
                 "cache_scope": {
                     "complete": True,
@@ -489,21 +503,18 @@ class LocalServices:
                         "열린국회 전체 범위의 완전성을 뜻하지 않습니다."
                     ),
                 },
-                "bill_candidates": {
-                    "complete": True,
-                    "total": len(all_bills),
-                    "items": [self._bill_inventory_item(item) for item in all_bills],
-                },
-                "speech_candidates": {
-                    "complete": True,
-                    "total": len(speech_inventory),
-                    "items": speech_inventory,
-                },
-                "links": {
-                    "complete": True,
-                    "total": len(links),
-                    "items": links,
-                },
+                "bill_candidates": _bounded_inventory(
+                    [self._bill_inventory_item(item) for item in all_bills],
+                    limit=_BILL_INVENTORY_LIMIT,
+                ),
+                "speech_candidates": _bounded_inventory(
+                    speech_inventory,
+                    limit=_SPEECH_INVENTORY_LIMIT,
+                ),
+                "links": _bounded_inventory(
+                    links,
+                    limit=_LINK_INVENTORY_LIMIT,
+                ),
                 "selected_for_synthesis": {
                     "selection_limit": limit,
                     "bill_count": len(bills),
@@ -832,6 +843,7 @@ class LocalServices:
                     "meeting_id": first["meeting_id"],
                     "meeting": first["meeting"],
                     "committee": first["committee"],
+                    "meeting_type": turns[0].get("meeting_type") if turns else None,
                     "date": first["date"],
                     "matched_speech_ids": [item["speech_id"] for item in group],
                     "participants": list(dict.fromkeys(turn["speaker"] for turn in turns)),
@@ -936,6 +948,20 @@ def _bill_proposed_ordinal(value: Any) -> int:
 
 def _chunks(values: list[str], size: int = 400) -> list[list[str]]:
     return [values[start : start + size] for start in range(0, len(values), size)]
+
+
+def _bounded_inventory(items: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
+    total = len(items)
+    returned = items[:limit]
+    return {
+        "complete": total <= limit,
+        "total": total,
+        "observed_total": total,
+        "returned_count": len(returned),
+        "truncated": total > limit,
+        "selection": "ranked_prefix",
+        "items": returned,
+    }
 
 
 def create_services() -> ServiceContext:

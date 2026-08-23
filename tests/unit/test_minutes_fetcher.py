@@ -25,12 +25,14 @@ class Response:
 
 def test_fetches_only_official_pdf_and_extracts_text(tmp_path: Path) -> None:
     requests = []
+    runner_options = []
 
     def opener(request, **_kwargs):
         requests.append(request)
         return Response(b"%PDF-1.4 fixture")
 
-    def runner(command, **_kwargs):
+    def runner(command, **kwargs):
+        runner_options.append(kwargs)
         Path(command[-1]).write_text("○위원장 홍길동  개의합니다.", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -44,6 +46,43 @@ def test_fetches_only_official_pdf_and_extracts_text(tmp_path: Path) -> None:
     assert requests[0].headers["User-agent"] == (
         f"Mozilla/5.0 (compatible; KASM/{__version__})"
     )
+    assert runner_options[0]["timeout"] == 60.0
+
+
+def test_pdf_extraction_timeout_is_reported_as_bounded_failure(tmp_path: Path) -> None:
+    def timeout_runner(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, 1)
+
+    fetcher = MinutesFetcher(
+        tmp_path,
+        timeout=1,
+        opener=lambda *_args, **_kwargs: Response(b"%PDF-1.4 minutes"),
+        runner=timeout_runner,
+    )
+
+    with pytest.raises(RuntimeError, match="extraction deadline"):
+        fetcher.fetch("https://record.assembly.go.kr/minutes-timeout.pdf")
+
+
+def test_python_fallback_timeout_terminates_the_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing_runner(*_args, **_kwargs):
+        raise FileNotFoundError("pdftotext")
+
+    def timeout_process(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, 1)
+
+    monkeypatch.setattr("kasm.adapters.korea.pdf_text.subprocess.run", timeout_process)
+    fetcher = MinutesFetcher(
+        tmp_path,
+        timeout=1,
+        opener=lambda *_args, **_kwargs: Response(b"%PDF-1.4 minutes"),
+        runner=missing_runner,
+    )
+
+    with pytest.raises(RuntimeError, match="Python PDF extraction exceeded"):
+        fetcher.fetch("https://record.assembly.go.kr/python-timeout.pdf")
 
 
 def test_falls_back_to_python_extraction_when_poppler_is_missing(tmp_path: Path) -> None:

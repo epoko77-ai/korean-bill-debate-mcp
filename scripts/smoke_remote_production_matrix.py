@@ -27,9 +27,13 @@ _CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 _CHATGPT_ORIGIN = "https://chatgpt.com"
 _CHATGPT_REPRESENTATIVE_CALLBACK = "https://chatgpt.com/kbd-mcp-protocol-callback"
 _EXACT_QUERY = (
-    "2219564번 의안의 처리상태, 회의록, 전문위원 검토보고서를 공식 원문 기준으로 조사해줘"
+    "2219564번 의안의 처리상태, 회의록, 전문위원 검토보고서를 "
+    "공식 원문 기준으로 전건 빠짐없이 조사해줘"
 )
-_BROAD_QUERY = "2026년 7월 인공지능 관련 법안과 위원회 논의를 공식 원문 기준으로 조사해줘"
+_BROAD_QUERY = (
+    "2026년 7월 인공지능 관련 법안과 위원회 논의를 "
+    "공식 원문 기준으로 전건 빠짐없이 조사해줘"
+)
 _SAFE_PARENT_ENV = (
     "ALL_PROXY",
     "HOME",

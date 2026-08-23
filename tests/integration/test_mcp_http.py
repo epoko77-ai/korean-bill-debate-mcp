@@ -202,7 +202,10 @@ async def exercise_durable_research_tool_surface() -> None:
         assert "max_characters" in tools_by_name["get_evidence_document"].inputSchema["properties"]
         assert "전체" in (tools_by_name["get_evidence_document"].description or "")
 
-        receipt = await session.call_tool("start_research", {"query": "최근 AI 입법"})
+        receipt = await session.call_tool(
+            "start_research",
+            {"query": "최근 AI 입법 전건을 빠짐없이 조사해줘"},
+        )
         assert not receipt.isError
         assert receipt.structuredContent is not None
         assert receipt.structuredContent["research_id"] == "research_http"

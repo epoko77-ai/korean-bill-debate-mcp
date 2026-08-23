@@ -321,7 +321,7 @@ def research_tools() -> tuple[KasmTools, FakeResearchBackend]:
     )
 
 
-def test_start_research_returns_receipt_and_preserves_natural_language_scope() -> None:
+def test_start_research_reroutes_non_exhaustive_named_committee_summary() -> None:
     tools, backend = research_tools()
 
     receipt = tools.start_research(
@@ -331,19 +331,16 @@ def test_start_research_returns_receipt_and_preserves_natural_language_scope() -
         korean_query="인공지능 입법 지연",
     )
 
-    assert backend.start_call == (
-        "최근 AI 입법은 왜 지연됐나?",
-        {
-            "korean_query": "인공지능 입법 지연",
-            "assembly_term": None,
-            "committees": ("정무위원회",),
-            "date_from": "2026-01-01",
-            "date_to": None,
-        },
+    assert backend.start_call is None
+    assert backend.bounded_call == (
+        "인공지능 입법 지연",
+        {"limit": 20, "date_from": "2026-01-01", "committee": "정무위원회"},
     )
-    assert receipt["research_id"] == "research_1"
+    assert receipt["research_mode"] == "bounded_live"
+    assert receipt["compatibility"]["rerouted_to"] == "explore_issue"
+    assert receipt["compatibility"]["reason"] == "ordinary_bounded_request"
     assert receipt["comprehensive_answer_allowed"] is False
-    assert receipt["next_action"]["tool"] == "get_research_status"
+    assert receipt["next_action"]["tool"] is None
 
 
 def test_start_research_cannot_turn_explicit_five_item_request_into_exhaustive_job() -> None:
@@ -364,6 +361,29 @@ def test_start_research_cannot_turn_explicit_five_item_request_into_exhaustive_j
     assert result["compatibility"]["reason"] == "explicit_bounded_result_count"
 
 
+def test_incident_start_research_call_executes_one_bounded_call_without_recursion() -> None:
+    tools, backend = research_tools()
+    query = (
+        "최근 본회의를 통과한 닥터나우 금지법과 관련하여, 소위원회, 상임위원회, "
+        "본회의에서 의원들의 주요 논의 내용을 정리해줘"
+    )
+
+    result = tools.start_research(
+        query,
+        committees=["소위원회", "상임위원회", "본회의"],
+    )
+
+    assert backend.start_call is None
+    assert backend.bounded_call == (query, {"limit": 20})
+    assert result["requested_stages"] == [
+        "subcommittee",
+        "standing_committee",
+        "plenary",
+    ]
+    assert result["compatibility"]["reason"] == "bounded_stage_summary"
+    assert result["next_action"]["tool"] is None
+
+
 def test_explore_issue_uses_bounded_live_workflow_and_honors_limit() -> None:
     tools, backend = research_tools()
 
@@ -377,6 +397,7 @@ def test_explore_issue_uses_bounded_live_workflow_and_honors_limit() -> None:
         "workflow": "bounded_live",
         "requested_limit": 1,
         "exhaustive": False,
+        "routing_reason": "ordinary_bounded_request",
     }
     assert receipt["requested_limit"] == 1
     assert receipt["research_mode"] == "bounded_live"

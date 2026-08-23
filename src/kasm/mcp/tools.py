@@ -15,9 +15,10 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from kasm.core.quality import issue_quality
+from kasm.core.response_budget import enforce_bounded_response_budget
 from kasm.research.request_scope import (
-    exhaustive_requested,
-    focused_result_request,
+    ResearchExecutionMode,
+    decide_research_route,
     requested_result_count,
 )
 from kasm.search.bilingual import korean_committee, prepare_query
@@ -146,8 +147,14 @@ def extract_bill_numbers(query: str) -> list[str]:
 class KasmTools:
     """Public speech and bill tools, independent of any transport."""
 
-    def __init__(self, services: ServiceContext):
+    def __init__(
+        self,
+        services: ServiceContext,
+        *,
+        enforce_transport_budget: bool = True,
+    ):
         self.services = services
+        self.enforce_transport_budget = enforce_transport_budget
 
     def search_speeches(
         self,
@@ -356,8 +363,9 @@ class KasmTools:
         """Start exhaustive legislative research and return immediately with a research_id.
 
         전건·전수·빠짐없이·역대 또는 여러 국회 대수를 포괄하는 조사에만 이 도구를
-        한 번 호출하세요. 상위 N건, ``5개 정도``, 일반 요약 요청에는 이 도구를 쓰지 말고
-        ``explore_issue(limit=N)``를 사용하세요. 백그라운드에서 관련 의안,
+        한 번 호출하세요. 특정 법안·법안 별칭의 소위·상임위·본회의 주요 논의 요약,
+        상위 N건, ``5개 정도``, 일반 요약에는 ``explore_issue(limit=N)``를 사용하세요.
+        잘못 호출해도 서버가 일반 요약을 제한형 경로로 되돌립니다. 백그라운드에서 관련 의안,
         처리 상태, 안건, 소위원회 회의록, 전문위원 검토보고서, 의원 발언과 정부 답변을
         빠짐없이 확인합니다. 반환된 ``next_action``에 따라 ``get_research_status``를
         호출하고, 완료 후 ``get_research_page``의 안정적인 커서를 끝까지 따라가세요.
@@ -368,8 +376,9 @@ class KasmTools:
         연결합니다. 성공한 0건은 ``source_availability``에 데이터셋별로 표시하며, 실패나
         미완료를 자료 없음으로 표현하지 마세요.
 
-        Use this only for explicitly exhaustive Korean or English research. For top-N or ordinary
-        summaries, use ``explore_issue`` with the requested limit. This queues durable work and
+        Use this only for explicitly exhaustive Korean or English research. A single named or
+        nicknamed measure asking for subcommittee, standing-committee, and plenary highlights is
+        one bounded ``explore_issue`` call, not durable research. This queues durable work and
         returns a receipt; it never arbitrarily reduces candidates to a top-N sample. Do not make a
         comprehensive claim from the receipt or before both coverage and evidence pagination are
         complete. ``korean_query`` is only an optional Korean search hint for an English request;
@@ -390,18 +399,22 @@ class KasmTools:
         parsed_to = _optional_iso_date(date_to, "date_to")
         if parsed_from and parsed_to and parsed_from > parsed_to:
             raise ValueError("date_from must be on or before date_to")
-        # Tool selection by an MCP client is advisory, so enforce the routing
-        # rule here as well. A top-N request accidentally sent to start_research
-        # must not become a ten-minute exhaustive job.
-        if focused_result_request(query) and not committees:
-            bounded = self.explore_issue(
+        # Tool choice by an MCP client is advisory. Durable work requires
+        # positive exhaustive or cross-Assembly evidence in the request itself.
+        route = decide_research_route(query, committees=committees)
+        normalized_committees = _normalized_committees(route.committees)
+        if route.mode is ResearchExecutionMode.BOUNDED:
+            bounded = self._bounded_explore_issue(
                 query,
                 limit=requested_result_count(query) or 20,
                 korean_query=korean_query,
                 date_from=date_from,
                 date_to=date_to,
+                minutes_offset=0,
                 assembly_term=assembly_term,
-                exhaustive=False,
+                committees=normalized_committees,
+                routing_reason=route.reason,
+                requested_stages=route.requested_stages,
             )
             compatibility_value = bounded.get("compatibility")
             compatibility = (
@@ -413,29 +426,38 @@ class KasmTools:
                 {
                     "entrypoint": "start_research",
                     "rerouted_to": "explore_issue",
-                    "reason": "explicit_bounded_result_count",
+                    "reason": route.reason,
                 }
             )
             bounded["compatibility"] = compatibility
             return bounded
-        backend = self._research_backend()
-        normalized_committees = (
-            None
-            if committees is None
-            else tuple(
-                dict.fromkeys(
-                    translated
-                    for value in committees
-                    if value.strip()
-                    for translated in (korean_committee(value.strip()) or value.strip(),)
-                )
-            )
+        return self._start_durable_research(
+            query,
+            assembly_term=assembly_term,
+            committees=normalized_committees,
+            date_from=date_from,
+            date_to=date_to,
+            korean_query=korean_query,
         )
+
+    def _start_durable_research(
+        self,
+        query: str,
+        *,
+        assembly_term: int | None,
+        committees: tuple[str, ...] | None,
+        date_from: str | None,
+        date_to: str | None,
+        korean_query: str | None,
+    ) -> dict[str, Any]:
+        """Start durable work without calling either public routing entrypoint."""
+
+        backend = self._research_backend()
         value = backend.start_research(
             query.strip(),
             korean_query=korean_query.strip() if korean_query and korean_query.strip() else None,
             assembly_term=assembly_term,
-            committees=normalized_committees,
+            committees=committees,
             date_from=date_from,
             date_to=date_to,
         )
@@ -978,13 +1000,18 @@ class KasmTools:
         사용하세요.
 
         Use this as the primary tool for bounded Korean or English questions asking what happened,
-        who argued what, or how a policy and bill evolved. Results include evidence-ranked speeches,
+        who argued what, or how a policy and bill evolved. A single law nickname plus requested
+        subcommittee, standing-committee, and plenary stages belongs here. Call this tool once;
+        do not precede or follow it with redundant bill/meeting/speech discovery unless next_action
+        explicitly requests a continuation. Results include evidence-ranked speeches,
         ordered multi-turn discussion threads, bill and review-report links, official provenance,
         and live-check metadata. Long research is deliberately paged so no evidence is silently
-        truncated and no single connector request times out. When research_pagination.complete is
-        false, call this tool again with the returned next_minutes_offset and the same query/date
-        scope. Continue until complete before claiming the requested scope was comprehensively
-        checked. For each relevant bill, call get_bill_status to retrieve the expert review report.
+        truncated and no single connector request times out. Call this tool again only when
+        ``research_pagination.next_minutes_offset`` is present, using that offset and the same
+        query/date scope. If it is absent, synthesize the bounded result and disclose any deadline,
+        source, or stage gap instead of repeating discovery. Call get_bill_status only for the one
+        exact primary bill identified by the result
+        when the user needs its expert review report; never call it for every candidate.
         It queries official Open Assembly APIs before searching the private local cache and reports
         bounded-refresh diagnostics. Synthesize the answer from actual turns; do not infer a stance
         that is not supported by a quoted speech. Put each quote's citation.official_url next
@@ -992,8 +1019,8 @@ class KasmTools:
         records are Korean; answer English users in English and identify translated quotations.
         For unfamiliar English subjects, supply concise Korean keywords in korean_query.
 
-        With a durable backend, only ``exhaustive=true``, an explicit exhaustive phrase, or a
-        structured scope unsupported by the bounded path is routed to ``start_research``. Ordinary
+        With a durable backend, only ``exhaustive=true``, an explicit exhaustive phrase, or an
+        explicit multi-Assembly scope is routed to ``start_research``. Ordinary
         requests use the live Open Assembly APIs and honor ``limit``. Bounded results must not be
         described as an exhaustive inventory; expose their pagination and source coverage as-is.
         """
@@ -1003,15 +1030,20 @@ class KasmTools:
             raise ValueError("limit must be between 1 and 50")
         if minutes_offset < 0:
             raise ValueError("minutes_offset must be non-negative")
-        durable_required = bool(
-            self.services.research is not None
-            and (exhaustive or exhaustive_requested(query) or committees)
+        route = decide_research_route(
+            query,
+            exhaustive=exhaustive,
+            committees=committees,
         )
-        if durable_required:
-            receipt = self.start_research(
+        normalized_committees = _normalized_committees(route.committees)
+        if (
+            route.mode is ResearchExecutionMode.DURABLE
+            and self.services.research is not None
+        ):
+            receipt = self._start_durable_research(
                 query,
                 assembly_term=assembly_term,
-                committees=committees,
+                committees=normalized_committees,
                 date_from=date_from,
                 date_to=date_to,
                 korean_query=korean_query,
@@ -1019,15 +1051,44 @@ class KasmTools:
             receipt["compatibility"] = {
                 "entrypoint": "explore_issue",
                 "workflow": "durable_research",
-                "reason": (
-                    "structured_committee_scope"
-                    if committees
-                    else "explicit_exhaustive_request"
-                ),
+                "reason": route.reason,
                 "limit_does_not_truncate_research": True,
                 "minutes_offset_ignored": minutes_offset,
             }
             return receipt
+        return self._bounded_explore_issue(
+            query,
+            limit=limit,
+            korean_query=korean_query,
+            date_from=date_from,
+            date_to=date_to,
+            minutes_offset=minutes_offset,
+            assembly_term=assembly_term,
+            committees=normalized_committees,
+            routing_reason=(
+                "durable_backend_unavailable"
+                if route.mode is ResearchExecutionMode.DURABLE
+                else route.reason
+            ),
+            requested_stages=route.requested_stages,
+        )
+
+    def _bounded_explore_issue(
+        self,
+        query: str,
+        *,
+        limit: int,
+        korean_query: str | None,
+        date_from: str | None,
+        date_to: str | None,
+        minutes_offset: int,
+        assembly_term: int | None,
+        committees: tuple[str, ...] | None,
+        routing_reason: str,
+        requested_stages: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Execute one bounded catalog call without re-entering public routing."""
+
         catalog = self.services.catalog or self.services.repository
         prepared = prepare_query(query, korean_query)
         options: dict[str, Any] = {"limit": limit}
@@ -1039,6 +1100,10 @@ class KasmTools:
             options["minutes_offset"] = minutes_offset
         if assembly_term is not None:
             options["assembly_term"] = assembly_term
+        if committees:
+            # The legacy live path has one committee filter. A natural-language
+            # multi-committee inventory is still bounded and is disclosed below.
+            options["committee"] = committees[0]
         try:
             payload = cast(
                 dict[str, Any],
@@ -1052,7 +1117,7 @@ class KasmTools:
             # before any result is presented as complete.
             if self.services.research is None or "supports one Assembly term" not in str(exc):
                 raise
-            receipt = self.start_research(
+            receipt = self._start_durable_research(
                 query,
                 assembly_term=assembly_term,
                 committees=committees,
@@ -1080,7 +1145,15 @@ class KasmTools:
             "workflow": "bounded_live",
             "requested_limit": limit,
             "exhaustive": False,
+            "routing_reason": routing_reason,
         }
+        payload["requested_stages"] = list(requested_stages)
+        if committees:
+            payload["committee_scope"] = {
+                "requested": list(committees),
+                "applied": committees[0],
+                "complete": len(committees) == 1,
+            }
         payload["answer_source_requirements"] = {
             "per_bill_official_url_required": True,
             "per_discussion_claim_official_url_required": True,
@@ -1098,6 +1171,39 @@ class KasmTools:
                 "when no official committee/subcommittee record was found in the checked scope."
             ),
         }
+        pagination_value = payload.get("research_pagination")
+        pagination = (
+            pagination_value if isinstance(pagination_value, Mapping) else {}
+        )
+        next_offset = pagination.get("next_minutes_offset")
+        if next_offset is not None:
+            payload["next_action"] = _next_action(
+                "explore_issue",
+                {
+                    "query": query,
+                    "limit": limit,
+                    "minutes_offset": next_offset,
+                },
+                ko="아직 확인하지 못한 제한형 회의록 창만 이어서 확인하세요.",
+                en="Continue only with the next bounded minutes window; do not restart research.",
+            )
+        else:
+            payload["next_action"] = _next_action(
+                None,
+                {},
+                ko=(
+                    "현재 제한형 결과를 바로 종합하세요. 같은 검색을 반복하거나 전수조사를 "
+                    "새로 시작하지 마세요. 누락 단계는 stage_coverage대로 밝히세요."
+                ),
+                en=(
+                    "Synthesize this bounded result now. Do not repeat discovery or start durable "
+                    "research; disclose stage_coverage gaps."
+                ),
+            )
+        if self.enforce_transport_budget:
+            payload = enforce_bounded_response_budget(payload)
+            payload["quality"] = issue_quality(payload)
+            return enforce_bounded_response_budget(payload)
         return payload
 
     def _research_backend(self) -> ResearchBackend:
@@ -1235,6 +1341,18 @@ class KasmTools:
                 "요청한 의안번호와 정확히 일치하는 공식 의안을 확인하지 못했습니다."
             )
         return payload
+
+
+def _normalized_committees(values: Sequence[str]) -> tuple[str, ...] | None:
+    normalized = tuple(
+        dict.fromkeys(
+            translated
+            for value in values
+            if value.strip()
+            for translated in (korean_committee(value.strip()) or value.strip(),)
+        )
+    )
+    return normalized or None
 
 
 def _inventory_total(value: Any) -> int:

@@ -151,6 +151,7 @@ class OpenAssemblyIngestor:
         )
         parsed = parse_transcript(transcript, locator_prefix=meeting.source_url)
         agendas = agendas_from_row(row, meeting)
+        agenda_bills = bills_from_agenda(transcript, meeting)
         speeches: list[Speech] = []
         for index, item in enumerate(parsed.speeches):
             identifier = speech_id(meeting.id, item.sequence)
@@ -187,12 +188,16 @@ class OpenAssemblyIngestor:
             relations = infer_question_answer_relations(speeches)
             for relation in relations:
                 self.relations.save(relation)
-            for bill in bills_from_agenda(transcript, meeting):
+            for bill in agenda_bills:
                 self.bills.save(bill)
         # Bill-first and minutes-first refresh orders produce the same graph.
         from .bills import rebuild_speech_bill_links
 
-        rebuild_speech_bill_links(self.connection)
+        rebuild_speech_bill_links(
+            self.connection,
+            speech_ids=(speech.id for speech in speeches),
+            bill_ids=(bill.id for bill in agenda_bills),
+        )
         return IngestionResult(
             meeting,
             len(speeches),

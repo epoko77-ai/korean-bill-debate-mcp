@@ -74,6 +74,7 @@ class MinutesFetcher:
                 text_path,
                 runner=self._runner,
                 fallback_extractor=self._fallback_extractor,
+                timeout=self.timeout,
             )
         return FetchedMinutes(
             source_url=source_url,
