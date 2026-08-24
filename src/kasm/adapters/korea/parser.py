@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from .normalizer import normalize_name, normalize_organization, normalize_role, normalize_text
 
-PARSER_VERSION = "korea-rules-v2"
+PARSER_VERSION = "korea-rules-v5"
 
 # Real transcripts most commonly use ○ or ◯, with optional spaces and a colon.
 _BULLET_MARKER = re.compile(
@@ -18,12 +18,17 @@ _COLON_MARKER = re.compile(
     r"(?m)^[ \t]*(?P<label>[가-힣A-Za-z][^\n:：]{1,50}?)\s*[:：]\s*(?P<inline>[^\n]*)"
 )
 _AGENDA = re.compile(r"^[ \t]*(?P<number>\d+)\.\s*(?P<title>.+)$", re.MULTILINE)
+_TRAILING_BILL_AGENDA = re.compile(
+    r"(?m)^[ \t]*\d+\.\s*[^\n]{2,180}?법률안[^\n]{0,120}?"
+    r"(?:의안번호\s*\d{5,})"
+)
 _PROCEEDING = re.compile(
     r"^[（(](?P<kind>정회|속개|산회|박수|웃음|자료 제출|서면 답변|발언 취소|발언 정정)[^)）]*[)）]$"
 )
 
 _ROLE_SUFFIXES = (
     "소위원장",
+    "위원장대리",
     "위원장",
     "간사",
     "위원",
@@ -63,6 +68,23 @@ _NOISY_ROLE_NAME = re.compile(
     rf"^(?P<role>{_ROLE_PATTERN})(?P<name>[가-힣·]{{2,4}})[가-힣?!]{{1,12}}$"
 )
 
+# Minutes PDFs sometimes render section headings with the same bullet glyph used
+# for speaker turns.  These labels are document structure, not people.  Keep the
+# list deliberately exact: a role-less Korean personal name (for example 조정식)
+# must continue to parse, while a role-only marker is too ambiguous to attribute
+# safely and is quarantined as a parse failure below.
+_STRUCTURAL_LABELS = frozenset(
+    {
+        "소위",
+        "소위원회",
+        "의안",
+        "안건",
+        "보고",
+        "심사경과",
+        "심사경과보고",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ParsedSpeech:
@@ -96,6 +118,9 @@ def split_speaker_label(label: str) -> tuple[str, str | None, str | None]:
     """Extract (name, role, organization), conservatively and deterministically."""
 
     label = normalize_text(label).strip("()（）")
+    compact_label = re.sub(r"\s+", "", label)
+    if compact_label in _STRUCTURAL_LABELS or compact_label in _ROLE_SUFFIXES:
+        return "", None, None
     # PDF extraction sometimes appends the beginning of the spoken text to a
     # compact role-first marker (위원장김정호맙...). Preserve ordinary 2–4
     # syllable names, but trim only unmistakable residue patterns.
@@ -202,10 +227,27 @@ class KoreaTranscriptParser:
             end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
             inline = marker.group("inline") or ""
             body_start = marker.start("inline")
-            body = normalize_text(inline + source[marker.end() : end])
-            name, role, organization = split_speaker_label(marker.group("label"))
+            trailing = source[marker.end() : end]
+            agenda_boundary = _TRAILING_BILL_AGENDA.search(trailing)
+            body_end = (
+                marker.end() + agenda_boundary.start()
+                if agenda_boundary is not None
+                else end
+            )
+            body = normalize_text(inline + source[marker.end() : body_end])
+            raw_label = marker.group("label")
+            name, role, organization = split_speaker_label(raw_label)
             locator = f"{locator_prefix}:{marker.start()}-{end}"
-            if not name or not body:
+            if not name:
+                result.failures.append(
+                    ParseFailure(
+                        "non-speaker or ambiguous marker label",
+                        locator,
+                        normalize_text(source[marker.start() : end])[:160],
+                    )
+                )
+                continue
+            if not body:
                 result.failures.append(
                     ParseFailure(
                         "empty speaker or speech text",
@@ -232,7 +274,7 @@ class KoreaTranscriptParser:
                     agenda=current_agenda,
                     source_locator=locator,
                     source_start=body_start,
-                    source_end=end,
+                    source_end=body_end,
                     speech_type="proceeding" if proceeding else "speech",
                 )
             )

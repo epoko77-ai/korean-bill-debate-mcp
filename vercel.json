@@ -7,12 +7,12 @@
     "api/index.py": {
       "maxDuration": 300,
       "includeFiles": "src/**",
-      "excludeFiles": "{.git/**,.github/**,.venv/**,.uv-cache/**,.mypy_cache/**,.pytest_cache/**,.ruff_cache/**,.vercel/**,node_modules/**,assets/**,benchmarks/**,build/**,dist/**,docs/**,scripts/**,tests/**}"
+      "excludeFiles": "{.git/**,.github/**,.venv/**,.uv-cache/**,.hf-cache/**,.kasm-cache/**,.mypy_cache/**,.pytest_cache/**,.ruff_cache/**,.vercel/**,node_modules/**,assets/**,benchmarks/**,build/**,dist/**,docs/**,scripts/**,tests/**,*.sqlite3,*.faiss}"
     },
     "api/research_dispatch.py": {
       "maxDuration": 300,
       "includeFiles": "src/**",
-      "excludeFiles": "{.git/**,.github/**,.venv/**,.uv-cache/**,.mypy_cache/**,.pytest_cache/**,.ruff_cache/**,.vercel/**,node_modules/**,assets/**,benchmarks/**,build/**,dist/**,docs/**,scripts/**,tests/**}"
+      "excludeFiles": "{.git/**,.github/**,.venv/**,.uv-cache/**,.hf-cache/**,.kasm-cache/**,.mypy_cache/**,.pytest_cache/**,.ruff_cache/**,.vercel/**,node_modules/**,assets/**,benchmarks/**,build/**,dist/**,docs/**,scripts/**,tests/**,*.sqlite3,*.faiss}"
     },
     "api/queues/kbd-research.ts": {
       "maxDuration": 300,

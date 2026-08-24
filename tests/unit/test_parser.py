@@ -49,6 +49,57 @@ def test_normalizer_is_conservative():
         "법원행정",
     )
     assert split_speaker_label("이해민 위원 녕십까?") == ("이해민", "위원", None)
+    assert split_speaker_label("보건복지위원장대리 이수진") == (
+        "이수진",
+        "위원장대리",
+        "보건복지",
+    )
+
+
+def test_structural_and_role_only_labels_are_never_emitted_as_people():
+    for label in ("소위", "소위원회", "의안", "안건", "보고", "심사경과", "심사경과보고"):
+        assert split_speaker_label(label) == ("", None, None)
+    assert split_speaker_label("위원장") == ("", None, None)
+
+
+def test_structural_markers_are_quarantined_but_roleless_personal_name_is_preserved():
+    source = """○소위  법안심사 결과입니다.
+○의안: 약사법 일부개정법률안
+○안건  의사일정 제1항
+○보고  심사 결과를 보고합니다.
+○심사경과  위원회 심사를 마쳤습니다.
+○위원장  다음 순서로 넘어가겠습니다.
+○조정식  법안의 취지를 말씀드리겠습니다.
+"""
+
+    result = parse_transcript(source)
+
+    assert [speech.speaker_name for speech in result.speeches] == ["조정식"]
+    assert result.speeches[0].speaker_role is None
+    assert len(result.failures) == 6
+    assert {failure.reason for failure in result.failures} == {
+        "non-speaker or ambiguous marker label"
+    }
+
+
+def test_next_bill_agenda_heading_is_not_appended_to_previous_speech():
+    source = """1. 약사법 일부개정법률안 (의안번호 2205513)
+○김윤 위원  첫 의안에 대한 질문입니다.
+○보건복지부장관 정은경  첫 의안에 대한 정부 답변입니다.
+2. 다른 약사법 일부개정법률안 (의안번호 2299999)
+○무관 위원  다음 의안에 대한 발언입니다.
+"""
+
+    result = parse_transcript(source)
+
+    assert [speech.speaker_name for speech in result.speeches] == [
+        "김윤",
+        "정은경",
+        "무관",
+    ]
+    assert result.speeches[1].text == "첫 의안에 대한 정부 답변입니다."
+    assert "2299999" not in result.speeches[1].text
+    assert result.speeches[2].agenda and "2299999" in result.speeches[2].agenda
 
 
 def test_multiple_agendas_are_not_misattributed_to_the_last_bill():

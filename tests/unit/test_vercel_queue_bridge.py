@@ -22,9 +22,10 @@ def test_vercel_queue_trigger_preserves_python_function_and_rewrite() -> None:
     assert config["outputDirectory"] == "public"
     assert config["regions"] == ["icn1"]
     excluded = (
-        "{.git/**,.github/**,.venv/**,.uv-cache/**,.mypy_cache/**,.pytest_cache/**,"
-        ".ruff_cache/**,.vercel/**,node_modules/**,assets/**,benchmarks/**,build/**,"
-        "dist/**,docs/**,scripts/**,tests/**}"
+        "{.git/**,.github/**,.venv/**,.uv-cache/**,.hf-cache/**,.kasm-cache/**,"
+        ".mypy_cache/**,.pytest_cache/**,.ruff_cache/**,.vercel/**,node_modules/**,"
+        "assets/**,benchmarks/**,build/**,dist/**,docs/**,scripts/**,tests/**,"
+        "*.sqlite3,*.faiss}"
     )
     assert config["functions"]["api/index.py"] == {
         "maxDuration": 300,

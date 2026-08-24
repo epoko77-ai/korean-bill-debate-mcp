@@ -11,9 +11,12 @@ from kasm.live import (
     _bill_queries,
     _filter_bills_by_proposal_scope,
     _filter_meeting_rows_by_scope,
+    _measure_discussion_segment_rows,
     _meeting_date_queries,
     _proposal_date_scope,
+    _scope_target_measure_turn_text,
 )
+from kasm.search.measure_aliases import resolve_measure_alias
 from kasm.storage.database import Database
 
 QUERY = (
@@ -145,32 +148,43 @@ class IncidentClient:
         elif dataset in {BILL_DATASET, BILL_STATUS_DATASET}:
             rows = ()
         elif dataset == DATASET_BY_SOURCE[MeetingSource.COMMITTEE]:
-            assert values == {
+            assert values["DAE_NUM"] == 22
+            assert set(values) == {"DAE_NUM", "CONF_DATE", "SUB_NAME"}
+            if values == {
+                "DAE_NUM": 22,
+                "CONF_DATE": "2024",
+                "SUB_NAME": "2205513",
+            }:
+                rows = ()
+            elif values == {
                 "DAE_NUM": 22,
                 "CONF_DATE": "2025",
                 "SUB_NAME": "2205513",
-                "COMM_NAME": "보건복지위원회",
-            }
-            rows = (
-                _incident_meeting_row(
-                    "2025-11-19",
-                    "보건복지위원회 법안심사제1소위원회",
-                    "2205513",
-                    "subcommittee",
-                ),
-                _incident_meeting_row(
-                    "2025-11-20",
-                    "보건복지위원회 전체회의",
-                    "2205513",
-                    "committee",
-                ),
-                _incident_meeting_row(
-                    "2025-11-20",
-                    "무관한 전체회의",
-                    "2299999",
-                    "unrelated",
-                ),
-            )
+            }:
+                rows = (
+                    _incident_meeting_row(
+                        "2025-11-19",
+                        "보건복지위원회 법안심사제1소위원회",
+                        "2205513",
+                        "subcommittee",
+                    ),
+                    _incident_meeting_row(
+                        "2025-11-20",
+                        "보건복지위원회 전체회의",
+                        "2205513",
+                        "committee",
+                    ),
+                    _incident_meeting_row(
+                        "2025-11-20",
+                        "무관한 전체회의",
+                        "2299999",
+                        "unrelated",
+                    ),
+                )
+            else:
+                assert values["SUB_NAME"] == "2214609"
+                assert values["CONF_DATE"] in {"2025", "2026"}
+                rows = ()
         elif dataset == DATASET_BY_SOURCE[MeetingSource.PLENARY]:
             assert values == {
                 "DAE_NUM": 22,
@@ -195,6 +209,57 @@ class IncidentClient:
             rows,
             "https://open.assembly.go.kr/portal/openapi/fixture",
             dataset,
+        )
+
+
+class ManyIncidentMeetingsClient(IncidentClient):
+    """Expose more exact agenda candidates than one bounded targeted window."""
+
+    def fetch_page(
+        self,
+        dataset: str,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        parameters: dict[str, str | int] | None = None,
+        refresh: bool = False,
+    ) -> ApiPage:
+        values = dict(parameters or {})
+        if (
+            dataset == DATASET_BY_SOURCE[MeetingSource.COMMITTEE]
+            and values.get("SUB_NAME") == "2205513"
+            and values.get("CONF_DATE") == "2025"
+        ):
+            del refresh
+            self.calls.append((dataset, values))
+            rows = tuple(
+                _incident_meeting_row(
+                    f"2025-11-{10 + index:02d}",
+                    (
+                        f"보건복지위원회 법안심사제1소위원회 {index}"
+                        if index < 2
+                        else f"보건복지위원회 전체회의 {index}"
+                    ),
+                    "2205513",
+                    f"many-{index}",
+                )
+                for index in range(7)
+            )
+            return ApiPage(
+                dataset,
+                page,
+                page_size,
+                len(rows),
+                rows,
+                "https://open.assembly.go.kr/portal/openapi/fixture",
+                dataset,
+            )
+        return super().fetch_page(
+            dataset,
+            page=page,
+            page_size=page_size,
+            parameters=parameters,
+            refresh=refresh,
         )
 
 
@@ -333,7 +398,7 @@ def test_live_metadata_calls_are_bounded_to_three_bill_and_three_meeting_queries
     } == {"2026"}
 
 
-def test_incident_alias_uses_two_exact_meeting_calls_and_three_stage_minutes(
+def test_incident_alias_checks_full_vehicle_path_and_three_stage_minutes(
     tmp_path,
 ) -> None:
     database = Database(tmp_path / "incident-targeted.sqlite3")
@@ -382,13 +447,20 @@ def test_incident_alias_uses_two_exact_meeting_calls_and_three_stage_minutes(
             DATASET_BY_SOURCE[MeetingSource.SUBCOMMITTEE],
         }
     ]
-    assert len(meeting_calls) == 2
+    assert len(meeting_calls) == 5
     assert all("SUB_NAME" in parameters for _dataset, parameters in meeting_calls)
     assert not any(
         dataset == DATASET_BY_SOURCE[MeetingSource.SUBCOMMITTEE]
         for dataset, _parameters in meeting_calls
     )
-    assert service.last_refresh["months_queried"] == ["2025-11", "2026-08"]
+    assert service.last_refresh["months_queried"][0] == "2024-11"
+    assert service.last_refresh["months_queried"][-1] == "2026-08"
+    assert len(service.last_refresh["months_queried"]) == 22
+    assert service.last_refresh["query_marker_months"] == [
+        "2024-11",
+        "2025-11",
+        "2026-08",
+    ]
     assert service.last_refresh["meeting_candidates"] == 3
     assert service.last_refresh["bounded_core_candidates"] == 3
     assert service.last_refresh["has_more"] is False
@@ -420,11 +492,355 @@ def test_incident_alias_uses_two_exact_meeting_calls_and_three_stage_minutes(
     assert result["quality"]["evidence_sufficient"] is True
     assert all(
         speech["attribution"]["state"]
-        in {"exact_bill_number_in_turn_or_agenda", "exact_speech_bill_link"}
+        in {
+            "exact_bill_number_in_turn_or_agenda",
+            "exact_speech_bill_link",
+            "exact_measure_discussion_segment",
+        }
         for speech in result["speeches"]
     )
     assert {speech["speaker"] for speech in result["speeches"]} == {"김윤", "정은경"}
     assert {bill["bill_no"] for bill in result["bills"]} == {"2205513", "2214609"}
+
+
+def test_target_agenda_segment_keeps_followup_speakers_without_repeated_bill_number(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "incident-agenda-segment.sqlite3")
+    database.initialize()
+    service = LiveAssemblyServices(
+        database,
+        client=IncidentClient(),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+        max_minutes_per_request=2,
+        now=lambda: datetime(2026, 8, 23, tzinfo=UTC),
+    )
+
+    def sync_segment(row: dict[str, Any]):
+        bill_no = str(row["BILL_NO"])
+        return service.pipeline.ingestor.ingest(
+            row,
+            (
+                "1. 약사법 일부개정법률안 심사\n"
+                f"○김윤 위원  의안번호 {bill_no}의 이해충돌 방지 취지를 설명하겠습니다.\n"
+                "○서영석 위원  같은 의제의 규율 필요성에 관해 이어서 말씀드리겠습니다.\n"
+                "○보건복지부차관 이형훈  경과규정과 집행 방안을 답변드리겠습니다.\n"
+                "2. 다른 법률안 심사\n"
+                "○무관 위원  의안번호 2299999에 관한 별도 의견입니다."
+            ),
+            source_hash=f"fixture-segment-{bill_no}",
+            source_url=str(row["PDF_LINK_URL"]),
+        )
+
+    service.pipeline.sync = sync_segment  # type: ignore[method-assign]
+
+    result = service.explore_issue(INCIDENT_QUERY, limit=20)
+
+    speakers = {speech["speaker"] for speech in result["speeches"]}
+    assert {"김윤", "서영석", "이형훈"} <= speakers
+    assert "무관" not in speakers
+    followups = [
+        speech
+        for speech in result["speeches"]
+        if speech["speaker"] in {"서영석", "이형훈"}
+    ]
+    assert followups
+    assert {
+        speech["attribution"]["state"] for speech in followups
+    } == {"exact_agenda_segment_context"}
+
+
+def test_realistic_measure_segments_keep_target_exchanges_and_stage_outcomes() -> None:
+    hint = resolve_measure_alias(INCIDENT_QUERY)
+    assert hint is not None
+
+    def row(
+        meeting_id: str,
+        sequence: int,
+        text: str,
+        *,
+        speaker: str = "김미애",
+        role: str = "위원",
+    ) -> dict[str, Any]:
+        return {
+            "id": f"{meeting_id}:{sequence}",
+            "meeting_id": meeting_id,
+            "sequence": sequence,
+            "speaker_name": speaker,
+            "speaker_role": role,
+            "agenda": "복수 의사일정 제1항~제80항 일괄 심사",
+            "text": text,
+        }
+
+    subcommittee = "subcommittee"
+    subcommittee_rows = [
+        row(subcommittee, 103, "앞선 의료법 안건에 대한 의견입니다."),
+        row(subcommittee, 104, "의사일정 제10항 약사법 일부개정법률안을 심사하겠습니다."),
+        row(
+            subcommittee,
+            105,
+            "비대면진료 플랫폼의 의약품 도매상 운영과 리베이트 규율을 검토합니다.",
+            speaker="이지민",
+            role="수석전문위원",
+        ),
+        row(subcommittee, 106, "정부 측 의견 듣겠습니다.", role="소위원장"),
+        row(
+            subcommittee,
+            107,
+            "비대면진료 플랫폼사업자와 의약품 도매상 관계를 분리할 필요가 있습니다.",
+            speaker="이형훈",
+            role="차관",
+        ),
+        row(subcommittee, 113, "예, 그렇습니다.", speaker="이형훈", role="차관"),
+        row(
+            subcommittee,
+            118,
+            "닥터나우로 불리는 한 플랫폼의 도매상 소유와 처방 유인을 규제해야 합니다.",
+            speaker="김윤",
+        ),
+        row(
+            subcommittee,
+            125,
+            "기존 비대면진료 플랫폼 도매상은 어떻게 정리합니까?",
+            speaker="서명옥",
+        ),
+        row(
+            subcommittee,
+            126,
+            "부칙의 경과규정 기간에 법에 부합하도록 소유관계를 정리해야 합니다.",
+            speaker="이형훈",
+            role="차관",
+        ),
+        row(subcommittee, 127, "소급적용하나요?", speaker="서명옥"),
+        row(subcommittee, 128, "그것은 안 되겠지요.", role="소위원장"),
+        row(
+            subcommittee,
+            130,
+            "의사일정 제10항은 심사한 후 의결하고 의사일정 제11항을 심사하겠습니다.",
+            role="소위원장",
+        ),
+        row(subcommittee, 131, "다른 약사법 안건을 보고드리겠습니다."),
+        row(
+            subcommittee,
+            177,
+            "추가질의 없습니까? 의사일정 제10항부터 제12항까지 약사법 일부개정법률안은……",
+            role="소위원장",
+        ),
+        row(subcommittee, 179, "시행일은 1년으로 하고 예산은 별도입니다."),
+        row(
+            subcommittee,
+            182,
+            "식약처 예산과 심평원 예산을 반영하면 됩니다.",
+            speaker="김선민",
+        ),
+        row(
+            subcommittee,
+            184,
+            "의사일정 제10항부터 제12항까지 위원회 대안으로 채택합니다. "
+            "가결되었음을 선포합니다.",
+            role="소위원장",
+        ),
+    ]
+    subcommittee_segments = _measure_discussion_segment_rows(
+        subcommittee_rows,
+        exact_numbers=set(hint.bill_numbers),
+        linked_numbers_by_speech={},
+        hint=hint,
+        target_agenda_numbers_by_meeting={subcommittee: {10}},
+    )
+
+    assert subcommittee_segments[f"{subcommittee}:104"] == "anchor"
+    assert subcommittee_segments[f"{subcommittee}:113"] == "short_context"
+    assert subcommittee_segments[f"{subcommittee}:127"] == "short_context"
+    assert subcommittee_segments[f"{subcommittee}:128"] == "short_context"
+    assert subcommittee_segments[f"{subcommittee}:184"] == "outcome"
+    assert not {
+        f"{subcommittee}:{sequence}" for sequence in (103, 131, 177, 179, 182)
+    }.intersection(subcommittee_segments)
+
+    plenary = "plenary"
+    plenary_rows = [
+        row(plenary, 30, "특허법 표결 결과를 선포합니다.", speaker="조정식", role="의장"),
+        row(
+            plenary,
+            31,
+            "의사일정 제43항 약사법 일부개정법률안(대안)부터 제49항까지 상정합니다.",
+            speaker="조정식",
+            role="의장",
+        ),
+        row(
+            plenary,
+            32,
+            "약사법 일부개정법률안(대안)은 비대면진료 중개업자와 의약품 도매상을 "
+            "분리하려는 것입니다.",
+            speaker="이수진",
+            role="위원장대리",
+        ),
+        row(
+            plenary,
+            33,
+            "의사일정 제43항에 토론 신청이 있으므로 토론을 듣겠습니다.",
+            speaker="조정식",
+            role="의장",
+        ),
+        row(
+            plenary,
+            34,
+            "닥터나우 금지법으로 불리는 전면 금지 조항에 반대합니다.",
+            speaker="이소영",
+            role="의원",
+        ),
+        row(
+            plenary,
+            35,
+            "약사법 일부개정법률안(대안) 투표 결과 재석 178인, 찬성 95인, "
+            "반대 34인, 기권 49인으로 가결되었음을 선포합니다.",
+            speaker="조정식",
+            role="의장",
+        ),
+        row(plenary, 36, "의사일정 제50항을 상정합니다.", speaker="조정식", role="의장"),
+    ]
+    plenary_segments = _measure_discussion_segment_rows(
+        plenary_rows,
+        exact_numbers=set(hint.bill_numbers),
+        linked_numbers_by_speech={},
+        hint=hint,
+        target_agenda_numbers_by_meeting={plenary: {43}},
+    )
+
+    assert {
+        int(speech_id.rsplit(":", 1)[1]) for speech_id in plenary_segments
+    } == {31, 32, 33, 34, 35}
+    assert plenary_segments[f"{plenary}:35"] == "outcome"
+
+
+def test_target_outcome_text_is_scoped_to_the_relevant_grouped_vote() -> None:
+    hint = resolve_measure_alias(INCIDENT_QUERY)
+    assert hint is not None
+    omnibus = (
+        "의사일정 제13항 의료법 일부개정법률안(대안)을 채택합니다. "
+        "가결되었음을 선포합니다. "
+        "의사일정 제17항 약사법 일부개정법률안(대안)을 채택하고 "
+        "의사일정 제14항부터 제16항까지는 본회의에 부의하지 않습니다. "
+        "가결되었음을 선포합니다. "
+        "의사일정 제18항 마약류 관리에 관한 법률 일부개정법률안을 의결합니다."
+    )
+
+    scoped = _scope_target_measure_turn_text(
+        omnibus,
+        target_agenda_numbers={14},
+        hint=hint,
+        segment_kind="outcome",
+    )
+
+    assert scoped.startswith("의사일정 제17항 약사법")
+    assert scoped.endswith("가결되었음을 선포합니다.")
+    assert "의사일정 제13항" not in scoped
+    assert "의사일정 제18항" not in scoped
+
+
+def test_target_procedure_keeps_named_from_to_agenda_range() -> None:
+    hint = resolve_measure_alias(INCIDENT_QUERY)
+    assert hint is not None
+    grouped = (
+        "의사일정 제43항 약사법 일부개정법률안(대안)부터 의사일정 제49항 국\n"
+        "민연금법 일부개정법률안(대안)까지 이상 7건을 상정합니다.\n"
+        "보건복지위원회 이수진 위원 나오셔서 7건에 대해 심사보고해 주시기 바랍니다."
+    )
+
+    scoped = _scope_target_measure_turn_text(
+        grouped,
+        target_agenda_numbers={43},
+        hint=hint,
+        segment_kind="anchor",
+    )
+
+    assert scoped == grouped
+    assert "의사일정 제49항" in scoped
+    assert scoped.endswith("심사보고해 주시기 바랍니다.")
+
+
+def test_targeted_candidates_continue_until_exact_candidate_scope_is_checked(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "incident-targeted-pagination.sqlite3")
+    database.initialize()
+    service = LiveAssemblyServices(
+        database,
+        client=ManyIncidentMeetingsClient(),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+        now=lambda: datetime(2026, 8, 23, tzinfo=UTC),
+    )
+    synced_urls: list[str] = []
+
+    def sync_candidate(row: dict[str, Any]):
+        synced_urls.append(str(row["PDF_LINK_URL"]))
+        bill_no = str(row["BILL_NO"])
+        return service.pipeline.ingestor.ingest(
+            row,
+            (
+                f"1. 약사법 일부개정법률안 (의안번호 {bill_no})\n"
+                "○김윤 위원  비대면진료 중개업자의 도매상 이해충돌을 논의합니다.\n"
+                "○보건복지부차관 이형훈  정부 검토 의견을 답변드립니다."
+            ),
+            source_hash=f"fixture-page-{bill_no}-{row['CONF_ID']}",
+            source_url=str(row["PDF_LINK_URL"]),
+        )
+
+    service.pipeline.sync = sync_candidate  # type: ignore[method-assign]
+
+    first = service.explore_issue(INCIDENT_QUERY, limit=20)
+
+    assert first["research_pagination"]["complete"] is False
+    assert first["research_pagination"]["next_minutes_offset"] == 6
+    assert first["research_pagination"]["unselected_candidate_count"] == 2
+    assert first["stage_coverage"]["complete"] is False
+    assert first["quality"]["evidence_sufficient"] is False
+    assert len(synced_urls) == 6
+
+    second = service.explore_issue(INCIDENT_QUERY, limit=20, minutes_offset=6)
+
+    assert second["research_pagination"]["complete"] is True
+    assert second["research_pagination"]["next_minutes_offset"] is None
+    assert second["research_pagination"]["unselected_candidate_count"] == 0
+    assert second["stage_coverage"]["complete"] is True
+    assert len(synced_urls) == 8
+
+
+def test_warm_targeted_repeat_reuses_current_parser_rows(tmp_path) -> None:
+    database = Database(tmp_path / "incident-warm-reuse.sqlite3")
+    database.initialize()
+    service = LiveAssemblyServices(
+        database,
+        client=IncidentClient(),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+        max_minutes_per_request=2,
+        now=lambda: datetime(2026, 8, 23, tzinfo=UTC),
+    )
+    sync_count = 0
+
+    def sync_once(row: dict[str, Any]):
+        nonlocal sync_count
+        sync_count += 1
+        bill_no = str(row["BILL_NO"])
+        return service.pipeline.ingestor.ingest(
+            row,
+            (
+                f"1. 약사법 일부개정법률안 (의안번호 {bill_no})\n"
+                "○김윤 위원  관련 의제를 논의합니다."
+            ),
+            source_hash=f"fixture-reuse-{bill_no}",
+            source_url=str(row["PDF_LINK_URL"]),
+        )
+
+    service.pipeline.sync = sync_once  # type: ignore[method-assign]
+
+    service.explore_issue(INCIDENT_QUERY, limit=20)
+    assert sync_count == 3
+    repeated = service.explore_issue(INCIDENT_QUERY, limit=20)
+
+    assert sync_count == 3
+    assert repeated["live_refresh"]["minutes_cache_reused"] == 3
 
 
 def test_incident_alias_stops_starting_work_after_aggregate_deadline(tmp_path) -> None:

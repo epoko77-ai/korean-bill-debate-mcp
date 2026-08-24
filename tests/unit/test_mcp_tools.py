@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -382,6 +383,13 @@ def test_incident_start_research_call_executes_one_bounded_call_without_recursio
     ]
     assert result["compatibility"]["reason"] == "bounded_stage_summary"
     assert result["next_action"]["tool"] is None
+    assert "supplemental_excerpts" in result["answer_scope"]["instruction"]
+    assert result["answer_brief"]["synthesis_contract"][
+        "cover_every_supplemental_excerpt"
+    ] is True
+    actual_bytes = len(json.dumps(result, ensure_ascii=False, default=str).encode("utf-8"))
+    assert actual_bytes == result["response_budget"]["final_bytes"]
+    assert actual_bytes <= result["response_budget"]["max_bytes"]
 
 
 def test_explore_issue_uses_bounded_live_workflow_and_honors_limit() -> None:

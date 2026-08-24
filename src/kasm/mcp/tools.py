@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from kasm.core.answer_brief import build_answer_brief
 from kasm.core.quality import issue_quality
 from kasm.core.response_budget import enforce_bounded_response_budget
 from kasm.research.request_scope import (
@@ -404,7 +405,7 @@ class KasmTools:
         route = decide_research_route(query, committees=committees)
         normalized_committees = _normalized_committees(route.committees)
         if route.mode is ResearchExecutionMode.BOUNDED:
-            bounded = self._bounded_explore_issue(
+            return self._bounded_explore_issue(
                 query,
                 limit=requested_result_count(query) or 20,
                 korean_query=korean_query,
@@ -415,22 +416,12 @@ class KasmTools:
                 committees=normalized_committees,
                 routing_reason=route.reason,
                 requested_stages=route.requested_stages,
-            )
-            compatibility_value = bounded.get("compatibility")
-            compatibility = (
-                dict(compatibility_value)
-                if isinstance(compatibility_value, Mapping)
-                else {}
-            )
-            compatibility.update(
-                {
+                compatibility_overrides={
                     "entrypoint": "start_research",
                     "rerouted_to": "explore_issue",
                     "reason": route.reason,
-                }
+                },
             )
-            bounded["compatibility"] = compatibility
-            return bounded
         return self._start_durable_research(
             query,
             assembly_term=assembly_term,
@@ -1013,8 +1004,16 @@ class KasmTools:
         exact primary bill identified by the result
         when the user needs its expert review report; never call it for every candidate.
         It queries official Open Assembly APIs before searching the private local cache and reports
-        bounded-refresh diagnostics. Synthesize the answer from actual turns; do not infer a stance
-        that is not supported by a quoted speech. Put each quote's citation.official_url next
+        bounded-refresh diagnostics. When ``answer_brief`` is present it is the mandatory
+        synthesis contract. Cover every requested stage and every returned
+        ``direct_claim_evidence`` turn and every ``supplemental_excerpts`` continuation, grouping
+        only genuinely redundant arguments. Preserve enumerated reasons (first, second, final,
+        and so on) as separate subpoints instead of summarizing only the beginning of a long turn.
+        Explain the measure identity, timeline, issue map, claim/reason/response/outcome flow,
+        actor types, disposition, coverage ledger, and sources; a short speaker bullet list is not
+        complete.
+        Synthesize the answer from actual turns; do not infer a stance that is not supported by a
+        quoted speech. Put each quote's citation.official_url next
         to the claim so the user can open and verify the original minutes immediately. Source
         records are Korean; answer English users in English and identify translated quotations.
         For unfamiliar English subjects, supply concise Korean keywords in korean_query.
@@ -1086,6 +1085,7 @@ class KasmTools:
         committees: tuple[str, ...] | None,
         routing_reason: str,
         requested_stages: tuple[str, ...],
+        compatibility_overrides: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Execute one bounded catalog call without re-entering public routing."""
 
@@ -1147,6 +1147,8 @@ class KasmTools:
             "exhaustive": False,
             "routing_reason": routing_reason,
         }
+        if compatibility_overrides:
+            payload["compatibility"].update(compatibility_overrides)
         payload["requested_stages"] = list(requested_stages)
         if committees:
             payload["committee_scope"] = {
@@ -1200,9 +1202,27 @@ class KasmTools:
                     "research; disclose stage_coverage gaps."
                 ),
             )
+        payload["answer_brief"] = build_answer_brief(
+            payload,
+            requested_stages=requested_stages,
+        )
+        payload["scoped_synthesis_allowed"] = True
+        payload["answer_scope"] = {
+            "kind": "targeted_sufficient_not_exhaustive",
+            "detailed_scoped_answer_required": True,
+            "exhaustive_claim_allowed": False,
+            "instruction": (
+                "comprehensive_answer_allowed=false는 전수조사 완료 주장을 금지하는 뜻입니다. "
+                "answer_brief의 근거로 상세한 범위 한정 답변을 작성해야 합니다. 각 단계의 "
+                "direct_claim_evidence와 같은 발언에 딸린 supplemental_excerpts를 모두 반영하고, "
+                "열거된 논거를 앞부분 하나로 축약하지 마세요."
+            ),
+        }
         if self.enforce_transport_budget:
-            payload = enforce_bounded_response_budget(payload)
-            payload["quality"] = issue_quality(payload)
+            # Quality describes the full checked retrieval.  The transport
+            # budget separately records which arrays were shortened; do not
+            # recompute retrieval quality from an already truncated envelope
+            # or pass the same evidence through a second lossy budget cycle.
             return enforce_bounded_response_budget(payload)
         return payload
 

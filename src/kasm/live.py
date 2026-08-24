@@ -21,6 +21,7 @@ from kasm.adapters.korea.client import AssemblyOpenApiClient
 from kasm.adapters.korea.documents import BillDocumentFetcher, BillDocumentsClient
 from kasm.adapters.korea.fetcher import MinutesFetcher
 from kasm.adapters.korea.ingestion import meeting_from_open_assembly_row
+from kasm.adapters.korea.parser import PARSER_VERSION
 from kasm.adapters.korea.pipeline import OpenAssemblyPipeline, distinct_minutes_rows
 from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource, classify_meeting
 from kasm.app import LocalServices, infer_bill_title_query, infer_issue_committee
@@ -96,11 +97,26 @@ _INSTRUCTION_PREFIXES = (
     "중요",
 )
 _BOUNDED_PROPOSAL_DISCOVERY_LIMIT = 50
-_TARGETED_MINUTES_LIMIT = 3
+_TARGETED_MINUTES_LIMIT = 6
+_TARGETED_SPEECH_LIMIT = 36
 _EXACT_BILL_NUMBER = re.compile(r"(?<!\d)(\d{7})(?!\d)")
+_AGENDA_ITEM_TITLE_NUMBER = re.compile(r"^\s*(\d+)\.")
+_AGENDA_ITEM_REFERENCE = re.compile(r"의사일정\s*제\s*(\d+)\s*항")
+_AGENDA_ITEM_RANGE = re.compile(
+    r"의사일정\s*제\s*(\d+)\s*항\s*부터\s*"
+    r"(?:의사일정\s*)?제\s*(\d+)\s*항\s*까지"
+)
+_OUTCOME_END = re.compile(r"가결되었음을\s*선포합니다[.。]?")
+_NEXT_BILL_PARAGRAPH = re.compile(
+    r"(?m)^\s*(?:다음은\s*)?[가-힣·][가-힣·\s]{1,90}?"
+    r"(?:법률|법)\s*(?:일부개정)?법률안"
+)
 _LIVE_BILL_INVENTORY_LIMIT = 50
 _LIVE_MEETING_INVENTORY_LIMIT = 50
 _TARGETED_DEADLINE_SECONDS = 120.0
+_STRUCTURAL_SPEAKER_LABELS = frozenset(
+    {"소위", "소위원회", "의안", "안건", "보고", "심사경과", "심사경과보고"}
+)
 
 
 class LiveAssemblyServices:
@@ -458,6 +474,15 @@ class LiveAssemblyServices:
             for item in self._latest_meeting_inventory
             if item.get("meeting_id")
         }
+        meeting_inventory_by_id = {
+            str(item.get("meeting_id") or ""): item
+            for item in self._latest_meeting_inventory
+            if item.get("meeting_id")
+        }
+        target_agenda_numbers_by_meeting = {
+            meeting_id: _target_agenda_numbers(item, exact_numbers=set(hint.bill_numbers))
+            for meeting_id, item in meeting_inventory_by_id.items()
+        }
         meeting_ids = tuple(meeting_type_by_id)
         if not meeting_ids:
             payload["speeches"] = []
@@ -500,11 +525,38 @@ class LiveAssemblyServices:
             term for term in hint.evidence_terms if term not in {"약사법"}
         )
         query_tokens = query_terms(payload.get("query") or hint.evidence_query)
+        anchored_agenda_numbers: dict[tuple[str, str], set[str]] = {}
+        for raw in rows:
+            row = dict(raw)
+            agenda = str(row.get("agenda") or "").strip()
+            if not agenda or agenda.startswith("복수 의사일정"):
+                continue
+            observed_all = set(
+                _EXACT_BILL_NUMBER.findall(
+                    f"{agenda}\n{str(row.get('text') or '')}"
+                )
+            )
+            observed = observed_all.intersection(exact_numbers)
+            if observed and not observed_all.difference(exact_numbers):
+                anchored_agenda_numbers.setdefault(
+                    (str(row.get("meeting_id") or ""), agenda), set()
+                ).update(observed)
+        discussion_segment_rows = _measure_discussion_segment_rows(
+            rows,
+            exact_numbers=exact_numbers,
+            linked_numbers_by_speech=linked_numbers_by_speech,
+            hint=hint,
+            target_agenda_numbers_by_meeting=target_agenda_numbers_by_meeting,
+        )
         for raw in rows:
             row = dict(raw)
             speech_id = str(row.get("id") or "")
+            meeting_id = str(row.get("meeting_id") or "")
             agenda = str(row.get("agenda") or "")
             text = str(row.get("text") or "")
+            speaker_name = str(row.get("speaker_name") or "").strip()
+            if _is_structural_speaker_label(speaker_name):
+                continue
             haystack = f"{agenda}\n{text}"
             observed_numbers = set(_EXACT_BILL_NUMBER.findall(haystack))
             linked_numbers = linked_numbers_by_speech.get(speech_id, set())
@@ -514,7 +566,7 @@ class LiveAssemblyServices:
                 if _normalized_phrase_present(anchor, haystack)
             ]
             exact_observed = observed_numbers.intersection(exact_numbers)
-            if exact_observed:
+            if exact_observed and not observed_numbers.difference(exact_numbers):
                 attribution_state = "exact_bill_number_in_turn_or_agenda"
                 attributed_numbers = sorted(exact_observed)
                 base_score = 100
@@ -526,11 +578,51 @@ class LiveAssemblyServices:
                 attribution_state = "exact_speech_bill_link"
                 attributed_numbers = sorted(linked_numbers)
                 base_score = 90
+            elif (meeting_id, agenda.strip()) in anchored_agenda_numbers:
+                attribution_state = "exact_agenda_segment_context"
+                attributed_numbers = sorted(
+                    anchored_agenda_numbers[(meeting_id, agenda.strip())]
+                )
+                base_score = 84
+            elif speech_id in discussion_segment_rows:
+                segment_kind = discussion_segment_rows[speech_id]
+                if segment_kind == "short_context":
+                    continue
+                attribution_state = "exact_measure_discussion_segment"
+                attributed_numbers = sorted(
+                    set(
+                        meeting_inventory_by_id.get(meeting_id, {}).get(
+                            "related_bill_numbers", []
+                        )
+                    ).intersection(exact_numbers)
+                )
+                if not attributed_numbers:
+                    attributed_numbers = sorted(exact_numbers)
+                base_score = {
+                    "outcome": 94,
+                    "anchor": 86,
+                    "government_response": 82,
+                    "bridge": 76,
+                }.get(segment_kind, 76)
             else:
                 continue
             item = dict(row)
             item["speech_id"] = item.pop("id")
             item["speaker"] = item.pop("speaker_name")
+            scoping_segment_kind = discussion_segment_rows.get(speech_id)
+            if scoping_segment_kind is not None:
+                scoped_text = _scope_target_measure_turn_text(
+                    text,
+                    target_agenda_numbers=target_agenda_numbers_by_meeting.get(
+                        meeting_id, set()
+                    ),
+                    hint=hint,
+                    segment_kind=scoping_segment_kind,
+                )
+                if scoped_text != text:
+                    item["source_text_length"] = len(text)
+                    item["text"] = scoped_text
+                    item["text_scoped_to_target_agenda"] = True
             item["matched_terms"] = [
                 term for term in query_tokens if term.casefold() in text.casefold()
             ]
@@ -543,6 +635,10 @@ class LiveAssemblyServices:
                 "matched_measure_anchors": matched_anchors,
                 "is_legislator": is_legislator,
             }
+            if speech_id in discussion_segment_rows:
+                item["attribution"]["segment_kind"] = discussion_segment_rows[
+                    speech_id
+                ]
             item["attribution_score"] = (
                 base_score
                 + len(matched_anchors) * 10
@@ -570,13 +666,38 @@ class LiveAssemblyServices:
             attributed,
             meeting_type_by_id,
             requested_stage_names,
-            limit=max(1, limit),
+            limit=max(1, limit, min(_TARGETED_SPEECH_LIMIT, len(attributed))),
+        )
+        stage_order = {
+            stage: index for index, stage in enumerate(requested_stage_names)
+        }
+        selected.sort(
+            key=lambda item: (
+                stage_order.get(
+                    _stage_for_meeting_type(
+                        meeting_type_by_id.get(str(item.get("meeting_id") or ""), "")
+                    )
+                    or "",
+                    len(stage_order),
+                ),
+                str(item.get("date") or ""),
+                int(item.get("sequence") or 0),
+                str(item.get("speech_id") or ""),
+            )
         )
         # Generic one-turn context has no agenda-boundary metadata. The
         # discussion threads below preserve only same-agenda context instead.
         payload["speeches"] = selected
-        threads = self.local._discussion_threads(selected)
-        payload["discussion_threads"] = _bound_measure_threads(threads, selected)
+        threads = self.local._discussion_threads(attributed)
+        payload["discussion_threads"] = _bound_measure_threads(
+            threads,
+            selected,
+            segment_context_ids={
+                speech_id
+                for speech_id, kind in discussion_segment_rows.items()
+                if kind == "short_context"
+            },
+        )
 
         selected_speech_ids = {
             str(item.get("speech_id") or "") for item in selected
@@ -635,9 +756,17 @@ class LiveAssemblyServices:
         )
         requested_months = _requested_months(query, date_from, date_to)
         if measure_hint is not None and not requested_months:
-            # Nickname resolution narrows directly to known official milestones.
-            # Never widen every noisy same-title bill from proposal month to now.
-            months = set(measure_hint.milestone_months)
+            # Search exact bill numbers from their proposal month through the
+            # known processing milestones.  This stays bounded without silently
+            # dropping an earlier exact-number committee record.
+            months = {
+                *measure_hint.milestone_months,
+                *(
+                    identity.proposed_at[:7]
+                    for identity in measure_hint.identities
+                    if re.fullmatch(r"(?:19|20)\d{2}-\d{2}-\d{2}", identity.proposed_at)
+                ),
+            }
         initial_months = set(months)
         proposal_scope = _proposal_date_scope(query)
         if proposal_scope is not None and date_from is None and date_to is None:
@@ -758,7 +887,6 @@ class LiveAssemblyServices:
                 BILL_DATASET,
                 page_size=10,
                 parameters={"AGE": assembly_term, "BILL_NO": bill_no},
-                refresh=True,
             )
             exact_rows = [
                 row for row in fetched_rows if _value(row, "BILL_NO") == bill_no
@@ -776,7 +904,6 @@ class LiveAssemblyServices:
                 BILL_STATUS_DATASET,
                 page_size=10,
                 parameters={"AGE": assembly_term, "BILL_NO": bill_no},
-                refresh=True,
             )
             exact_status_rows = [
                 row for row in status_rows if _value(row, "BILL_NO") == bill_no
@@ -1041,7 +1168,6 @@ class LiveAssemblyServices:
             BILL_STATUS_DATASET,
             page_size=100,
             parameters={"AGE": term, "BILL_NO": bill_no},
-            refresh=True,
         )
         exact_rows = [row for row in page.rows if _value(row, "BILL_NO") == bill_no]
         if exact_rows:
@@ -1060,7 +1186,6 @@ class LiveAssemblyServices:
             BILL_DATASET,
             page_size=10,
             parameters={"AGE": term, "BILL_NO": bill_no},
-            refresh=True,
         )
         exact_rows = [row for row in page.rows if _value(row, "BILL_NO") == bill_no]
         if exact_rows:
@@ -1164,12 +1289,29 @@ class LiveAssemblyServices:
         )
         scope.update(_temporal_window(queried_months))
         exact_numbers = measure_hint.bill_numbers if measure_hint is not None else ()
+        effective_queried_months = queried_months
+        if measure_hint is not None and queried_months:
+            effective_queried_months = sorted(
+                _month_span(queried_months[0], _month_end_date(queried_months[-1]))
+            )
+            scope.update(_temporal_window(effective_queried_months))
+            scope.update(
+                {
+                    "mode": "targeted_measure_exact_bill_years",
+                    "query_granularity": "calendar_year_with_exact_bill_number",
+                    "query_marker_months": queried_months,
+                }
+            )
         if measure_hint is not None:
             query_specs = _targeted_measure_meeting_queries(
                 measure_hint,
                 queried_months,
                 requested_stage_names,
             )
+            scope["exact_years_queried"] = sorted(
+                {date_query[:4] for _source, date_query, _bill_no in query_specs}
+            )
+            scope["exact_query_count"] = len(query_specs)
             for source, date_query, bill_no in query_specs:
                 if self._deadline_expired(deadline_at):
                     deadline_exceeded = True
@@ -1179,8 +1321,9 @@ class LiveAssemblyServices:
                     "CONF_DATE": date_query,
                     "SUB_NAME": bill_no,
                 }
-                if committee and source is MeetingSource.COMMITTEE:
-                    parameters["COMM_NAME"] = committee
+                # SUB_NAME is an exact bill-number constraint.  Adding the
+                # originating committee here would hide later referrals to a
+                # different committee and make the processing path incomplete.
                 fetched_rows, _source_hashes = self._fetch_complete(
                     DATASET_BY_SOURCE[source], page_size=1000, parameters=parameters
                 )
@@ -1230,7 +1373,7 @@ class LiveAssemblyServices:
                 rows.extend(subcommittee_rows)
             else:
                 deadline_exceeded = True
-        rows = _filter_meeting_rows_by_scope(rows, scope, queried_months)
+        rows = _filter_meeting_rows_by_scope(rows, scope, effective_queried_months)
         candidates = distinct_minutes_rows(tuple(rows))
         candidates.sort(key=lambda row: _meeting_relevance(row, query, committee), reverse=True)
         meeting_repository = MeetingRepository(self.database)
@@ -1260,7 +1403,8 @@ class LiveAssemblyServices:
                     else None
                 ),
                 "deadline_exceeded": deadline_exceeded,
-                "months_queried": queried_months,
+                "months_queried": effective_queried_months,
+                "query_marker_months": queried_months,
                 "temporal_scope": scope,
                 "candidate_offset": 0,
                 "next_minutes_offset": None,
@@ -1268,6 +1412,7 @@ class LiveAssemblyServices:
             }
             return
         ingested = 0
+        cache_reused = 0
         failures = 0
         attempted = 0
         effective_minutes_limit = self.max_minutes_per_request
@@ -1278,11 +1423,14 @@ class LiveAssemblyServices:
                 max(self.max_minutes_per_request, stage_count),
             )
             effective_minutes_limit = targeted_limit
-            window = _stage_balanced_meeting_rows(
+            ordered_candidates = _stage_balanced_meeting_rows(
                 candidates,
                 requested_stage_names,
-                limit=targeted_limit,
+                limit=len(candidates),
             )
+            window = ordered_candidates[
+                candidate_offset : candidate_offset + targeted_limit
+            ]
         else:
             window = candidates[
                 candidate_offset : candidate_offset + self.max_minutes_per_request
@@ -1292,6 +1440,11 @@ class LiveAssemblyServices:
             for row in window
             if (value := _optional_minutes_url(row)) is not None
         ]
+        cached_current_urls = {
+            str(item.get("official_url") or "")
+            for item in self._latest_meeting_inventory
+            if item.get("current_parser_complete") is True
+        }
         for row in window:
             if self._deadline_expired(deadline_at):
                 deadline_exceeded = True
@@ -1301,6 +1454,10 @@ class LiveAssemblyServices:
                 official_url = OpenAssemblyPipeline.minutes_url(row)
             except ValueError:
                 official_url = ""
+            if official_url and official_url in cached_current_urls:
+                cache_reused += 1
+                self._minutes_failed_urls.discard(official_url)
+                continue
             try:
                 self.pipeline.sync(row)
             except (OSError, RuntimeError, ValueError):
@@ -1323,7 +1480,7 @@ class LiveAssemblyServices:
             self.database, candidates
         )
         next_offset = candidate_offset + attempted
-        has_more = measure_hint is None and next_offset < len(candidates)
+        has_more = next_offset < len(candidates)
         candidate_urls = {
             candidate_url
             for row in candidates
@@ -1338,18 +1495,25 @@ class LiveAssemblyServices:
             "bounded_core_candidates": len(window),
             "bounded_core_attempted": attempted,
             "bounded_core_official_urls": bounded_core_urls,
-            "unselected_candidate_count": max(0, len(candidates) - len(window)),
+            "attempted_candidate_count": min(len(candidates), next_offset),
+            "checked_candidate_count": sum(
+                item.get("full_text_loaded") is True
+                for item in self._latest_meeting_inventory
+            ),
+            "unselected_candidate_count": max(0, len(candidates) - next_offset),
             "deadline_seconds": (
                 self.targeted_deadline_seconds if measure_hint is not None else None
             ),
             "deadline_exceeded": deadline_exceeded,
             "deadline_skipped_count": max(0, len(window) - attempted),
             "minutes_ingested": ingested,
+            "minutes_cache_reused": cache_reused,
             "minutes_failures": len(failed_urls),
             "minutes_failures_in_window": failures,
             "failed_official_urls": failed_urls,
             "minutes_limit": effective_minutes_limit,
-            "months_queried": queried_months,
+            "months_queried": effective_queried_months,
+            "query_marker_months": queried_months,
             "temporal_scope": scope,
             "candidate_offset": candidate_offset,
             "next_minutes_offset": next_offset if has_more else None,
@@ -1813,17 +1977,39 @@ def _targeted_measure_meeting_queries(
     requested = set(stage_names)
     if not requested:
         requested = {"subcommittee", "standing_committee", "plenary"}
-    source_bill_no = next(
+    source_identity = next(
         (
-            identity.bill_no
+            identity
             for identity in hint.identities
             if identity.role == "source_member_bill"
         ),
-        hint.bill_numbers[0],
+        hint.identities[0],
     )
+    primary_identity = hint.identity(hint.primary_vehicle_bill_no)
+    source_year = source_identity.proposed_at[:4]
+    primary_year = primary_identity.proposed_at[:4] if primary_identity else years[0]
+    source_years = [
+        year for year in years if source_year <= year <= primary_year
+    ] or [years[0]]
+    vehicle_years = [year for year in years if year >= primary_year] or [years[-1]]
     result: list[tuple[MeetingSource, str, str]] = []
     if requested.intersection({"subcommittee", "standing_committee"}):
-        result.append((MeetingSource.COMMITTEE, years[0], source_bill_no))
+        # Query only the source bill's proposal-to-alternative years, then the
+        # alternative's own years.  Later referrals to another committee (for
+        # example Legislation and Judiciary) remain visible because no
+        # originating committee-name filter is applied.
+        for year in source_years:
+            result.append(
+                (MeetingSource.COMMITTEE, year, source_identity.bill_no)
+            )
+        for year in vehicle_years:
+            result.append(
+                (
+                    MeetingSource.COMMITTEE,
+                    year,
+                    hint.primary_vehicle_bill_no,
+                )
+            )
     if "plenary" in requested:
         result.append(
             (
@@ -1832,7 +2018,7 @@ def _targeted_measure_meeting_queries(
                 hint.primary_vehicle_bill_no,
             )
         )
-    return result
+    return list(dict.fromkeys(result))
 
 
 def _row_mentions_exact_bill(row: dict[str, Any], bill_numbers: Iterable[str]) -> bool:
@@ -1907,6 +2093,349 @@ def _normalized_phrase_present(phrase: str, text: str) -> bool:
     ).casefold()
 
 
+def _is_structural_speaker_label(value: str) -> bool:
+    compact = re.sub(r"\s+", "", value)
+    return compact in _STRUCTURAL_SPEAKER_LABELS or compact in {
+        "위원장",
+        "소위원장",
+        "의장",
+        "부의장",
+    }
+
+
+def _stage_for_meeting_type(meeting_type: str) -> str | None:
+    return {
+        MeetingSource.SUBCOMMITTEE.value: "subcommittee",
+        MeetingSource.COMMITTEE.value: "standing_committee",
+        MeetingSource.PLENARY.value: "plenary",
+    }.get(meeting_type)
+
+
+def _target_agenda_numbers(
+    meeting: dict[str, Any], *, exact_numbers: set[str]
+) -> set[int]:
+    """Return official agenda ordinals tied to the exact target bill family."""
+
+    result: set[int] = set()
+    raw_items = meeting.get("agenda_items")
+    if not isinstance(raw_items, list):
+        return result
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        bill_no = str(raw.get("bill_no") or "")
+        if bill_no not in exact_numbers:
+            continue
+        match = _AGENDA_ITEM_TITLE_NUMBER.match(str(raw.get("title") or ""))
+        if match is not None:
+            result.add(int(match.group(1)))
+    return result
+
+
+def _referenced_agenda_numbers(text: str) -> set[int]:
+    """Expand explicit ``의사일정 제N항`` references, including small ranges."""
+
+    numbers = {int(value) for value in _AGENDA_ITEM_REFERENCE.findall(text)}
+    for start_value, end_value in _AGENDA_ITEM_RANGE.findall(text):
+        start, end = int(start_value), int(end_value)
+        if start <= end and end - start <= 100:
+            numbers.update(range(start, end + 1))
+    return numbers
+
+
+def _agenda_reference_spans(text: str) -> list[tuple[int, int, set[int]]]:
+    """Return non-overlapping agenda references with expanded range members."""
+
+    spans: list[tuple[int, int, set[int]]] = []
+    range_bounds: list[tuple[int, int]] = []
+    for match in _AGENDA_ITEM_RANGE.finditer(text):
+        start_value, end_value = int(match.group(1)), int(match.group(2))
+        numbers = {start_value, end_value}
+        if start_value <= end_value and end_value - start_value <= 100:
+            numbers = set(range(start_value, end_value + 1))
+        spans.append((match.start(), match.end(), numbers))
+        range_bounds.append((match.start(), match.end()))
+    for match in _AGENDA_ITEM_REFERENCE.finditer(text):
+        if any(start <= match.start() < end for start, end in range_bounds):
+            continue
+        spans.append((match.start(), match.end(), {int(match.group(1))}))
+    return sorted(spans, key=lambda value: (value[0], value[1]))
+
+
+def _phrase_pattern(value: str) -> re.Pattern[str]:
+    compact = re.sub(r"\s+", "", value)
+    return re.compile(r"\s*".join(re.escape(character) for character in compact))
+
+
+def _agenda_references_form_named_range(
+    text: str,
+    current: tuple[int, int, set[int]],
+    following: tuple[int, int, set[int]],
+    *,
+    following_boundary: int,
+) -> bool:
+    """Recognize ``제N항 <제명>부터 제M항 <제명>까지`` groupings.
+
+    ``_AGENDA_ITEM_RANGE`` handles the compact form where the two references
+    are adjacent.  Plenary minutes commonly insert each bill title between
+    ``부터`` and ``까지``; treating the second reference as a new agenda block
+    would leave only the first title in the cited excerpt.
+    """
+
+    _current_start, current_end, _current_numbers = current
+    following_start, following_end, _following_numbers = following
+    between = text[current_end:following_start]
+    after_following = text[following_end:following_boundary]
+    return bool(
+        re.search(r"부터\s*$", between)
+        and re.search(r"까지", after_following)
+    )
+
+
+def _scope_target_measure_turn_text(
+    text: str,
+    *,
+    target_agenda_numbers: set[int],
+    hint: MeasureAliasHint,
+    segment_kind: str,
+) -> str:
+    """Keep the verbatim target block inside a chair's multi-item speech."""
+
+    if not text.strip():
+        return text
+    references = _agenda_reference_spans(text)
+    target_index = next(
+        (
+            index
+            for index, (_start, _end, numbers) in enumerate(references)
+            if target_agenda_numbers.intersection(numbers)
+        ),
+        None,
+    )
+    start: int | None = None
+    reference_end = 0
+    if target_index is not None:
+        start, reference_end, _numbers = references[target_index]
+        if target_index > 0:
+            previous_start, _previous_end, _previous_numbers = references[
+                target_index - 1
+            ]
+            preceding = re.sub(
+                r"\s+", "", text[previous_start:start]
+            ).casefold()
+            target_titles = {
+                re.sub(r"\s+", "", identity.name).casefold()
+                for identity in hint.identities
+                if identity.name
+            }
+            if any(title in preceding for title in target_titles):
+                start = previous_start
+    else:
+        alternative_patterns = [
+            _phrase_pattern(identity.name)
+            for identity in hint.identities
+            if identity.name
+            and identity.role == "committee_alternative_primary_vehicle"
+        ]
+        title_match = next(
+            (
+                match
+                for pattern in alternative_patterns
+                if (match := pattern.search(text)) is not None
+            ),
+            None,
+        )
+        if title_match is None:
+            return text
+        start = title_match.start()
+        reference_end = title_match.end()
+
+    end = len(text)
+    if segment_kind == "outcome":
+        outcome = _OUTCOME_END.search(text, reference_end)
+        if outcome is not None:
+            end = outcome.end()
+    elif target_index is not None and target_index + 1 < len(references):
+        boundary_index = target_index + 1
+        while boundary_index < len(references):
+            following_boundary = (
+                references[boundary_index + 1][0]
+                if boundary_index + 1 < len(references)
+                else len(text)
+            )
+            if not _agenda_references_form_named_range(
+                text,
+                references[boundary_index - 1],
+                references[boundary_index],
+                following_boundary=following_boundary,
+            ):
+                break
+            boundary_index += 1
+        if boundary_index < len(references):
+            end = references[boundary_index][0]
+    else:
+        next_bill = _NEXT_BILL_PARAGRAPH.search(text, reference_end)
+        if next_bill is not None:
+            end = next_bill.start()
+    scoped = text[start:end].strip()
+    return scoped or text
+
+
+def _measure_discussion_segment_rows(
+    rows: Iterable[Any],
+    *,
+    exact_numbers: set[str],
+    linked_numbers_by_speech: dict[str, set[str]],
+    hint: MeasureAliasHint,
+    target_agenda_numbers_by_meeting: dict[str, set[int]] | None = None,
+) -> dict[str, str]:
+    """Find compact same-discussion runs without treating a whole PDF as one agenda.
+
+    Exact Open Assembly agenda queries can return only the matching agenda row even
+    though the PDF contains dozens of other items.  Meeting-level attribution is
+    therefore unsafe.  Strong measure anchors establish short runs; substantive
+    turns between nearby anchors are retained as bridge evidence.
+    """
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for raw in rows:
+        row = dict(raw)
+        grouped.setdefault(str(row.get("meeting_id") or ""), []).append(row)
+
+    alternative_titles = {
+        re.sub(r"\s+", "", identity.name).casefold()
+        for identity in hint.identities
+        if identity.name and identity.role == "committee_alternative_primary_vehicle"
+    }
+    result: dict[str, str] = {}
+    target_agenda_numbers_by_meeting = target_agenda_numbers_by_meeting or {}
+    for meeting_id, meeting_rows in grouped.items():
+        ordered = sorted(
+            meeting_rows,
+            key=lambda item: (
+                int(item.get("sequence") or 0),
+                str(item.get("id") or ""),
+            ),
+        )
+        target_agenda_numbers = target_agenda_numbers_by_meeting.get(meeting_id, set())
+        anchor_kinds: dict[int, str] = {}
+        for position, row in enumerate(ordered):
+            speech_id = str(row.get("id") or "")
+            text = str(row.get("text") or "")
+            agenda = str(row.get("agenda") or "")
+            compact = re.sub(r"\s+", "", f"{agenda}\n{text}").casefold()
+            text_compact = re.sub(r"\s+", "", text).casefold()
+            observed_numbers = set(_EXACT_BILL_NUMBER.findall(compact))
+            exact_identifier = bool(observed_numbers.intersection(exact_numbers))
+            exact_link = bool(
+                linked_numbers_by_speech.get(speech_id, set()).intersection(
+                    exact_numbers
+                )
+            )
+            omnibus = (
+                bool(observed_numbers.difference(exact_numbers))
+                or compact.count("일부개정법률안") > 3
+            )
+            alternative_title_anchor = any(
+                title and title in text_compact for title in alternative_titles
+            )
+            platform_anchor = any(
+                term in compact
+                for term in ("플랫폼", "비대면", "약국중개", "원격의료산업협의회")
+            )
+            wholesale_anchor = any(
+                term in compact for term in ("의약품도매", "도매상", "도매업")
+            )
+            rebate_anchor = "리베이트" in compact
+            alias_anchor = "닥터나우" in compact
+            concept_count = sum(
+                (platform_anchor, wholesale_anchor, rebate_anchor)
+            )
+            referenced_agenda_numbers = _referenced_agenda_numbers(
+                f"{agenda}\n{text}"
+            )
+            target_agenda_reference = bool(
+                target_agenda_numbers.intersection(referenced_agenda_numbers)
+            )
+            procedural = any(
+                term in text_compact
+                for term in ("상정", "심사", "토론", "의결", "투표", "채택", "가결")
+            )
+            outcome = any(
+                term in text_compact
+                for term in ("투표결과", "가결되었음을선포", "대안으로채택")
+            )
+            safe_specific_anchor = (
+                (alias_anchor or concept_count >= 2)
+                and not observed_numbers.difference(exact_numbers)
+            )
+            target_procedure_anchor = target_agenda_reference and procedural
+            alternative_outcome_anchor = alternative_title_anchor and outcome
+            if not (
+                (exact_identifier and not omnibus)
+                or (exact_link and not omnibus)
+                or safe_specific_anchor
+                or target_procedure_anchor
+                or alternative_outcome_anchor
+            ):
+                continue
+            anchor_kinds[position] = (
+                "outcome"
+                if outcome
+                and (target_agenda_reference or alternative_title_anchor)
+                else "anchor"
+            )
+        anchor_positions = sorted(anchor_kinds)
+        if not anchor_positions:
+            continue
+
+        clusters: list[list[int]] = []
+        for position in anchor_positions:
+            sequence = int(ordered[position].get("sequence") or 0)
+            if not clusters:
+                clusters.append([position])
+                continue
+            previous_sequence = int(
+                ordered[clusters[-1][-1]].get("sequence") or 0
+            )
+            if sequence - previous_sequence <= 8:
+                clusters[-1].append(position)
+            else:
+                clusters.append([position])
+
+        anchor_set = set(anchor_positions)
+        for cluster in clusters:
+            first, last = cluster[0], cluster[-1]
+            end = last
+            if last + 1 < len(ordered):
+                next_role = str(ordered[last + 1].get("speaker_role") or "")
+                if any(
+                    role in next_role
+                    for role in ("장관", "차관", "정부위원", "처장", "청장", "국장")
+                ):
+                    end += 1
+            for position in range(first, end + 1):
+                row = ordered[position]
+                speech_id = str(row.get("id") or "")
+                speaker = str(row.get("speaker_name") or "").strip()
+                text = str(row.get("text") or "").strip()
+                if not speech_id or _is_structural_speaker_label(speaker):
+                    continue
+                if position in anchor_set:
+                    result[speech_id] = anchor_kinds[position]
+                elif position == end and end > last:
+                    result[speech_id] = (
+                        "government_response"
+                        if len(re.sub(r"\s+", "", text)) >= 24
+                        else "short_context"
+                    )
+                elif len(re.sub(r"\s+", "", text)) < 24:
+                    result[speech_id] = "short_context"
+                else:
+                    result[speech_id] = "bridge"
+    return result
+
+
 def _stage_balanced_speeches(
     speeches: list[dict[str, Any]],
     meeting_type_by_id: dict[str, str],
@@ -1941,7 +2470,24 @@ def _stage_balanced_speeches(
             if meeting_type_by_id.get(str(speech.get("meeting_id") or ""))
             == meeting_type
         ]
-        for speech in candidates[:quota]:
+        diverse: list[dict[str, Any]] = []
+        seen_speakers: set[str] = set()
+        for speech in candidates:
+            speaker = str(speech.get("speaker") or "").strip()
+            if not speaker or speaker in seen_speakers:
+                continue
+            diverse.append(speech)
+            seen_speakers.add(speaker)
+            if len(diverse) >= quota:
+                break
+        if len(diverse) < quota:
+            diverse_ids = {str(item.get("speech_id") or "") for item in diverse}
+            diverse.extend(
+                speech
+                for speech in candidates
+                if str(speech.get("speech_id") or "") not in diverse_ids
+            )
+        for speech in diverse[:quota]:
             speech_id = str(speech.get("speech_id") or "")
             if speech_id in selected_ids:
                 continue
@@ -1963,13 +2509,16 @@ def _stage_balanced_speeches(
 def _bound_measure_threads(
     threads: list[dict[str, Any]],
     attributed_speeches: list[dict[str, Any]],
+    *,
+    segment_context_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep exact matched turns and only their same-agenda adjacent context."""
+    """Keep direct turns plus context proven to sit inside a target segment."""
 
     attributed_by_id = {
         str(speech.get("speech_id") or ""): speech
         for speech in attributed_speeches
     }
+    segment_context_ids = segment_context_ids or set()
     bounded: list[dict[str, Any]] = []
     for raw_thread in threads:
         thread = dict(raw_thread)
@@ -1980,39 +2529,26 @@ def _bound_measure_threads(
         ]
         if not matched_ids:
             continue
-        matched_agendas = {
-            str(attributed_by_id[speech_id].get("agenda") or "").strip()
-            for speech_id in matched_ids
-            if str(attributed_by_id[speech_id].get("agenda") or "").strip()
-        }
-        matched_sequences = {
-            int(attributed_by_id[speech_id].get("sequence") or 0)
-            for speech_id in matched_ids
-        }
         turns: list[dict[str, Any]] = []
         for raw_turn in thread.get("turns") or []:
             if not isinstance(raw_turn, dict):
                 continue
             turn = dict(raw_turn)
             speech_id = str(turn.get("speech_id") or "")
-            agenda = str(turn.get("agenda") or "").strip()
-            sequence = int(turn.get("sequence") or 0)
             directly_attributed = attributed_by_id.get(speech_id)
-            same_agenda = bool(agenda and agenda in matched_agendas)
-            immediate_unlabelled_context = not agenda and any(
-                abs(sequence - matched_sequence) <= 1
-                for matched_sequence in matched_sequences
-            )
-            if directly_attributed is None and not (
-                same_agenda or immediate_unlabelled_context
-            ):
+            if directly_attributed is None and speech_id not in segment_context_ids:
                 continue
             turn["attribution"] = (
                 directly_attributed.get("attribution")
                 if directly_attributed is not None
                 else {
-                    "state": "adjacent_context_only",
-                    "instruction": "맥락 보존용 발언이며 독립적인 법안 입장 근거로 쓰지 마세요.",
+                    "state": "exact_measure_discussion_segment_context",
+                    "segment_kind": "short_context",
+                    "evidence_use": "context_only",
+                    "instruction": (
+                        "확인된 동일 의제 구간의 짧은 문답입니다. 앞뒤 직접 근거와 함께만 "
+                        "사용하고 독립적인 법안 입장으로 쓰지 마세요."
+                    ),
                 }
             )
             turns.append(turn)
@@ -2397,12 +2933,18 @@ def _bill_inventory_entry(row: dict[str, Any]) -> dict[str, Any]:
 def _meeting_inventory(
     database: Database, rows: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    speech_counts = {
-        str(row["meeting_id"]): int(row["speech_count"])
-        for row in database.connection.execute(
-            "SELECT meeting_id, count(*) AS speech_count FROM speeches GROUP BY meeting_id"
-        ).fetchall()
-    }
+    speech_stats: dict[str, dict[str, Any]] = {}
+    for row in database.connection.execute(
+        """SELECT meeting_id, parser_version, count(*) AS speech_count
+           FROM speeches GROUP BY meeting_id, parser_version"""
+    ).fetchall():
+        meeting_id = str(row["meeting_id"])
+        stats = speech_stats.setdefault(
+            meeting_id, {"speech_count": 0, "parser_versions": set()}
+        )
+        stats["speech_count"] += int(row["speech_count"])
+        if row["parser_version"]:
+            stats["parser_versions"].add(str(row["parser_version"]))
     items: list[dict[str, Any]] = []
     for row in rows:
         try:
@@ -2428,7 +2970,11 @@ def _meeting_inventory(
             related_bill_numbers = list(
                 dict.fromkeys(_EXACT_BILL_NUMBER.findall(repr(row)))
             )
-        speech_count = speech_counts.get(meeting.id, 0)
+        stats = speech_stats.get(
+            meeting.id, {"speech_count": 0, "parser_versions": set()}
+        )
+        speech_count = int(stats["speech_count"])
+        parser_versions = sorted(stats["parser_versions"])
         items.append(
             {
                 "meeting_id": meeting.id,
@@ -2437,9 +2983,18 @@ def _meeting_inventory(
                 "committee": meeting.committee_name_ko,
                 "meeting_type": meeting.meeting_type,
                 "related_bill_numbers": related_bill_numbers,
+                "agenda_items": agendas,
+                "agenda_item_count": len(agendas),
                 "official_url": meeting.source_url,
-                "full_text_loaded": speech_count > 0,
+                "full_text_loaded": (
+                    speech_count > 0 and parser_versions == [PARSER_VERSION]
+                ),
+                "cached_speech_rows_present": speech_count > 0,
                 "speech_count": speech_count,
+                "parser_versions": parser_versions,
+                "current_parser_complete": (
+                    speech_count > 0 and parser_versions == [PARSER_VERSION]
+                ),
             }
         )
     return items
@@ -2606,11 +3161,6 @@ def _issue_stage_coverage(
     failed_urls = set(refresh.get("failed_official_urls") or [])
     exact_check_performed = bool(refresh.get("targeted_measure"))
     deadline_exceeded = refresh.get("deadline_exceeded") is True
-    bounded_core_urls = {
-        str(value)
-        for value in refresh.get("bounded_core_official_urls") or []
-        if value
-    }
     stages: dict[str, dict[str, Any]] = {}
     complete_states = {
         "discussion_found",
@@ -2624,15 +3174,10 @@ def _issue_stage_coverage(
             for item in meeting_inventory
             if str(item.get("meeting_type") or "") == meeting_type
         ]
-        candidates = (
-            [
-                item
-                for item in all_candidates
-                if str(item.get("official_url") or "") in bounded_core_urls
-            ]
-            if exact_check_performed and bounded_core_urls
-            else all_candidates
-        )
+        # Exact-measure candidates omitted by the bounded PDF window still
+        # belong to completeness accounting.  Excluding them here previously
+        # let three checked PDFs masquerade as a complete candidate search.
+        candidates = all_candidates
         checked = [item for item in candidates if item.get("full_text_loaded") is True]
         matched = [
             item
@@ -2649,16 +3194,16 @@ def _issue_stage_coverage(
             for item in candidates
             if str(item.get("official_url") or "") in failed_urls
         ]
-        if member_matched:
-            state = "discussion_found"
-        elif matched:
-            state = "record_found_no_member_debate"
-        elif failures:
+        if failures:
             state = "failed"
         elif deadline_exceeded and (not candidates or len(checked) < len(candidates)):
             state = "deadline_exceeded"
         elif candidates and len(checked) < len(candidates):
             state = "metadata_found_text_pending"
+        elif member_matched:
+            state = "discussion_found"
+        elif matched:
+            state = "record_found_no_member_debate"
         elif candidates:
             state = (
                 "record_found_no_member_debate"
@@ -2669,6 +3214,30 @@ def _issue_stage_coverage(
             state = "checked_no_matching_discussion"
         else:
             state = "not_checked"
+        meeting_records: list[dict[str, Any]] = []
+        for item in candidates[:12]:
+            meeting_id = str(item.get("meeting_id") or "")
+            official_url = str(item.get("official_url") or "")
+            if official_url in failed_urls:
+                evidence_state = "failed"
+            elif item.get("full_text_loaded") is not True:
+                evidence_state = "metadata_found_text_pending"
+            elif meeting_id in member_speech_meeting_ids:
+                evidence_state = "discussion_found"
+            elif meeting_id in speech_meeting_ids:
+                evidence_state = "record_found_no_member_debate"
+            else:
+                evidence_state = "checked_no_matching_discussion"
+            meeting_records.append(
+                {
+                    "meeting_id": item.get("meeting_id"),
+                    "date": item.get("date"),
+                    "title": item.get("title"),
+                    "official_url": item.get("official_url"),
+                    "full_text_loaded": item.get("full_text_loaded"),
+                    "evidence_state": evidence_state,
+                }
+            )
         stages[stage] = {
             "state": state,
             "candidate_count": len(candidates),
@@ -2681,16 +3250,7 @@ def _issue_stage_coverage(
             "matched_discussion_count": len(member_matched),
             "failed_count": len(failures),
             "pending_count": max(0, len(candidates) - len(checked) - len(failures)),
-            "meetings": [
-                {
-                    "meeting_id": item.get("meeting_id"),
-                    "date": item.get("date"),
-                    "title": item.get("title"),
-                    "official_url": item.get("official_url"),
-                    "full_text_loaded": item.get("full_text_loaded"),
-                }
-                for item in candidates[:3]
-            ],
+            "meetings": meeting_records,
             "gap_reason": (
                 None
                 if state in {"discussion_found", "record_found_no_member_debate"}

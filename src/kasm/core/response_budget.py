@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from kasm.core.answer_brief import reconcile_answer_brief
+
 MAX_BOUNDED_RESPONSE_BYTES = 128 * 1024
 
 _METADATA_RESERVE_BYTES = 12 * 1024
@@ -23,11 +25,18 @@ _GENERIC_LIST_ITEMS = 64
 _GENERIC_MAPPING_ITEMS = 64
 _GENERIC_DEPTH = 8
 _AUDIT_SAMPLE_LIMIT = 64
+_ANSWER_DIRECT_EXCERPT_BYTES = 2400
+_ANSWER_CONTEXT_EXCERPT_BYTES = 800
+_ANSWER_SUPPLEMENTAL_EXCERPT_BYTES = 1800
+_ANSWER_SUPPLEMENTAL_EXCERPT_LIMIT = 4
 
 _TOP_LEVEL_PRIORITY = (
     "query",
     "evidence_query",
     "next_action",
+    "answer_brief",
+    "answer_scope",
+    "scoped_synthesis_allowed",
     "target_resolution",
     "stage_coverage",
     "research_pagination",
@@ -129,27 +138,21 @@ class _BudgetAudit:
         if isinstance(raw_sections, list):
             for value in raw_sections[:_AUDIT_SAMPLE_LIMIT]:
                 audit.truncated_sections.add(str(value))
-            audit.truncated_section_overflow += max(
-                0, len(raw_sections) - _AUDIT_SAMPLE_LIMIT
-            )
+            audit.truncated_section_overflow += max(0, len(raw_sections) - _AUDIT_SAMPLE_LIMIT)
         raw_counts = previous.get("section_counts")
         if isinstance(raw_counts, Mapping):
             for raw_path in sorted(raw_counts, key=str)[:_AUDIT_SAMPLE_LIMIT]:
                 value = raw_counts[raw_path]
                 if isinstance(value, Mapping):
                     audit.section_counts[str(raw_path)] = dict(value)
-            audit.section_count_overflow += max(
-                0, len(raw_counts) - _AUDIT_SAMPLE_LIMIT
-            )
+            audit.section_count_overflow += max(0, len(raw_counts) - _AUDIT_SAMPLE_LIMIT)
         raw_values = previous.get("compacted_values")
         if isinstance(raw_values, Mapping):
             for raw_path in sorted(raw_values, key=str)[:_AUDIT_SAMPLE_LIMIT]:
                 value = raw_values[raw_path]
                 if isinstance(value, Mapping):
                     audit.compacted_values[str(raw_path)] = dict(value)
-            audit.compacted_value_overflow += max(
-                0, len(raw_values) - _AUDIT_SAMPLE_LIMIT
-            )
+            audit.compacted_value_overflow += max(0, len(raw_values) - _AUDIT_SAMPLE_LIMIT)
         raw_omitted = previous.get("omitted_top_level")
         if isinstance(raw_omitted, list):
             audit.omitted_top_level.update(str(value) for value in raw_omitted)
@@ -239,6 +242,7 @@ def enforce_bounded_response_budget(
     stage_inputs_before = _stage_input_signature(payload)
 
     _compact_evidence_text(payload, audit)
+    _compact_answer_brief(payload, audit)
     _compact_stage_coverage(payload, audit)
     _bound_root(payload, audit)
 
@@ -248,6 +252,13 @@ def enforce_bounded_response_budget(
     _drop_optional_top_level(payload, audit, content_target)
     if _size(payload) > content_target:
         _replace_with_emergency_projection(payload, audit)
+    if _size(payload) > content_target:
+        _fit_answer_brief_to_target(
+            payload,
+            audit,
+            target=content_target,
+            max_bytes=max_bytes,
+        )
 
     quality_inputs_after = _quality_input_signature(payload)
     stage_inputs_after = _stage_input_signature(payload)
@@ -301,9 +312,7 @@ def _compact_evidence_text(payload: dict[str, Any], audit: _BudgetAudit) -> None
                 thread["turns_observed"] = observed
                 thread["turns_returned"] = 5
                 thread["turns_truncated"] = True
-                audit.mark_count(
-                    "discussion_threads[].turns", observed=observed, returned=5
-                )
+                audit.mark_count("discussion_threads[].turns", observed=observed, returned=5)
                 turns = thread["turns"]
             if isinstance(turns, list):
                 for turn_index, turn in enumerate(turns):
@@ -316,6 +325,422 @@ def _compact_evidence_text(payload: dict[str, Any], audit: _BudgetAudit) -> None
                         f"discussion_threads[{thread_index}].turns[{turn_index}]",
                         audit,
                     )
+
+
+def _compact_answer_brief(payload: dict[str, Any], audit: _BudgetAudit) -> None:
+    """Keep the answer contract useful while bounding duplicated excerpts."""
+
+    raw = payload.get("answer_brief")
+    if not isinstance(raw, dict):
+        return
+    stages = raw.get("stages")
+    if isinstance(stages, dict):
+        for stage_name, stage in stages.items():
+            if not isinstance(stage, dict):
+                continue
+            evidence = stage.get("evidence")
+            if isinstance(evidence, list) and len(evidence) > 16:
+                observed = len(evidence)
+                stage["evidence"] = evidence[:16]
+                audit.mark_count(
+                    f"answer_brief.stages.{stage_name}.evidence",
+                    observed=observed,
+                    returned=16,
+                )
+                evidence = stage["evidence"]
+            if isinstance(evidence, list):
+                for item in evidence:
+                    if not isinstance(item, dict):
+                        continue
+                    value = item.get("excerpt_verbatim")
+                    if isinstance(value, str):
+                        excerpt_limit = (
+                            _ANSWER_CONTEXT_EXCERPT_BYTES
+                            if item.get("evidence_use") == "context_only"
+                            else _ANSWER_DIRECT_EXCERPT_BYTES
+                        )
+                        compact = _truncate_utf8(value, excerpt_limit)
+                        if compact != value:
+                            item["excerpt_verbatim"] = compact
+                            item["excerpt_inline_complete"] = False
+                            audit.mark_text(
+                                "answer_brief.stages[].evidence[].excerpt_verbatim",
+                                value,
+                                compact,
+                            )
+                    supplements = item.get("supplemental_excerpts")
+                    if not isinstance(supplements, list):
+                        continue
+                    if len(supplements) > _ANSWER_SUPPLEMENTAL_EXCERPT_LIMIT:
+                        observed = len(supplements)
+                        item["supplemental_excerpts"] = supplements[
+                            :_ANSWER_SUPPLEMENTAL_EXCERPT_LIMIT
+                        ]
+                        supplements = item["supplemental_excerpts"]
+                        audit.mark_count(
+                            "answer_brief.stages[].evidence[].supplemental_excerpts",
+                            observed=observed,
+                            returned=len(supplements),
+                        )
+                    for supplement in supplements:
+                        if not isinstance(supplement, dict):
+                            continue
+                        supplemental_text = supplement.get("excerpt_verbatim")
+                        if not isinstance(supplemental_text, str):
+                            continue
+                        compact_supplement = _truncate_utf8(
+                            supplemental_text, _ANSWER_SUPPLEMENTAL_EXCERPT_BYTES
+                        )
+                        if compact_supplement == supplemental_text:
+                            continue
+                        supplement["excerpt_verbatim"] = compact_supplement
+                        supplement["segment_inline_complete"] = False
+                        audit.mark_text(
+                            "answer_brief.stages[].evidence[].supplemental_excerpts[].excerpt_verbatim",
+                            supplemental_text,
+                            compact_supplement,
+                        )
+    reconcile_answer_brief(raw)
+
+
+def _fit_answer_brief_to_target(
+    payload: dict[str, Any],
+    audit: _BudgetAudit,
+    *,
+    target: int,
+    max_bytes: int,
+) -> None:
+    """Shrink only duplicated brief detail, preserving cited stage evidence.
+
+    The normal 128 KiB envelope keeps direct excerpts at 2,400 bytes whenever
+    possible and never lowers them below 1,600 bytes.  Smaller stress envelopes
+    may progressively shorten excerpts and reduce evidence, but retain one
+    cited direct turn for every represented discussion stage.
+    """
+
+    raw = payload.get("answer_brief")
+    if not isinstance(raw, dict) or _size(payload) <= target:
+        return
+
+    _compact_answer_brief_repeated_fields(raw, audit)
+    reconcile_answer_brief(raw)
+    if _size(payload) <= target:
+        return
+
+    _trim_answer_brief_meetings(raw, audit, limit=3)
+    if _size(payload) <= target:
+        return
+
+    excerpt_levels = (
+        ((1600, 640, _ANSWER_SUPPLEMENTAL_EXCERPT_BYTES),)
+        if max_bytes >= MAX_BOUNDED_RESPONSE_BYTES
+        else (
+            (1600, 640, 1600),
+            (1200, 560, 1200),
+            (720, 400, 720),
+            (480, 320, 480),
+        )
+    )
+    for direct_limit, context_limit, supplemental_limit in excerpt_levels:
+        _clip_answer_brief_excerpts(
+            raw,
+            audit,
+            direct_limit=direct_limit,
+            context_limit=context_limit,
+            supplemental_limit=supplemental_limit,
+        )
+        reconcile_answer_brief(raw)
+        if _size(payload) <= target:
+            return
+
+    # Small envelopes trade duplicated continuations before they discard an
+    # attributed direct-evidence row.  The parent row and its citation remain
+    # usable even when every supplemental segment has been removed.
+    if max_bytes < MAX_BOUNDED_RESPONSE_BYTES:
+        while _size(payload) > target and _remove_one_supplemental_excerpt(raw, audit):
+            reconcile_answer_brief(raw)
+
+    while _size(payload) > target and _remove_one_answer_evidence(
+        raw,
+        audit,
+        evidence_use="context_only",
+        preserve_per_stage=1,
+    ):
+        reconcile_answer_brief(raw)
+
+    while _size(payload) > target and _remove_one_answer_evidence(
+        raw,
+        audit,
+        evidence_use="direct_claim_evidence",
+        preserve_per_stage=1,
+        preserve_cited=True,
+    ):
+        reconcile_answer_brief(raw)
+
+    while _size(payload) > target and _remove_one_answer_evidence(
+        raw,
+        audit,
+        evidence_use="context_only",
+        preserve_per_stage=0,
+    ):
+        reconcile_answer_brief(raw)
+
+    if _size(payload) > target:
+        _trim_answer_brief_meetings(raw, audit, limit=1)
+        _trim_answer_brief_timeline(raw, audit, limit=6)
+        reconcile_answer_brief(raw)
+
+    # At sub-128 KiB envelopes, lower excerpts only after direct evidence has
+    # been stage-balanced. This preserves useful detail instead of returning a
+    # broad list of sentence fragments.
+    if _size(payload) > target and max_bytes < MAX_BOUNDED_RESPONSE_BYTES:
+        for direct_limit, context_limit in ((320, 240), (192, 160), (96, 96)):
+            _clip_answer_brief_excerpts(
+                raw,
+                audit,
+                direct_limit=direct_limit,
+                context_limit=context_limit,
+                supplemental_limit=direct_limit,
+            )
+            reconcile_answer_brief(raw)
+            if _size(payload) <= target:
+                break
+
+
+def _compact_answer_brief_repeated_fields(brief: dict[str, Any], audit: _BudgetAudit) -> None:
+    stages = brief.get("stages")
+    if not isinstance(stages, dict):
+        return
+    changed = False
+    for stage in stages.values():
+        if not isinstance(stage, dict):
+            continue
+        evidence = stage.get("evidence")
+        if not isinstance(evidence, list):
+            continue
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            for name in ("stage", "meeting", "committee", "meeting_type"):
+                if name in item:
+                    item.pop(name, None)
+                    changed = True
+            for name in [name for name, value in item.items() if value is None]:
+                item.pop(name, None)
+                changed = True
+            agenda = item.get("agenda")
+            if isinstance(agenda, str):
+                compact_agenda = _truncate_utf8(agenda, 320)
+                if compact_agenda != agenda:
+                    item["agenda"] = compact_agenda
+                    changed = True
+            citation = item.get("citation")
+            if isinstance(citation, dict):
+                for name in ("meeting", "date", "speaker"):
+                    if name in citation:
+                        citation.pop(name, None)
+                        changed = True
+            attribution = item.get("attribution")
+            if isinstance(attribution, dict):
+                projected = {
+                    name: attribution[name]
+                    for name in ("state", "bill_numbers", "is_legislator")
+                    if name in attribution
+                }
+                if projected != attribution:
+                    item["attribution"] = projected
+                    changed = True
+    if changed:
+        audit.mark_section("answer_brief.stages[].evidence[].repeated_fields")
+
+
+def _clip_answer_brief_excerpts(
+    brief: dict[str, Any],
+    audit: _BudgetAudit,
+    *,
+    direct_limit: int,
+    context_limit: int,
+    supplemental_limit: int,
+) -> None:
+    stages = brief.get("stages")
+    if not isinstance(stages, dict):
+        return
+    for stage_name, stage in stages.items():
+        if not isinstance(stage, dict):
+            continue
+        evidence = stage.get("evidence")
+        if not isinstance(evidence, list):
+            continue
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("excerpt_verbatim")
+            if isinstance(value, str):
+                limit = (
+                    context_limit if item.get("evidence_use") == "context_only" else direct_limit
+                )
+                compact = _truncate_utf8(value, limit)
+                if compact != value:
+                    item["excerpt_verbatim"] = compact
+                    item["excerpt_inline_complete"] = False
+                    audit.mark_text(
+                        f"answer_brief.stages.{stage_name}.evidence[].excerpt_verbatim",
+                        value,
+                        compact,
+                    )
+            supplements = item.get("supplemental_excerpts")
+            if not isinstance(supplements, list):
+                continue
+            for supplement in supplements:
+                if not isinstance(supplement, dict):
+                    continue
+                supplemental_text = supplement.get("excerpt_verbatim")
+                if not isinstance(supplemental_text, str):
+                    continue
+                compact_supplement = _truncate_utf8(supplemental_text, supplemental_limit)
+                if compact_supplement == supplemental_text:
+                    continue
+                supplement["excerpt_verbatim"] = compact_supplement
+                supplement["segment_inline_complete"] = False
+                audit.mark_text(
+                    (
+                        f"answer_brief.stages.{stage_name}.evidence[]"
+                        ".supplemental_excerpts[].excerpt_verbatim"
+                    ),
+                    supplemental_text,
+                    compact_supplement,
+                )
+
+
+def _remove_one_supplemental_excerpt(brief: dict[str, Any], audit: _BudgetAudit) -> bool:
+    stages = brief.get("stages")
+    if not isinstance(stages, dict):
+        return False
+    candidates: list[tuple[int, int, str, str, list[Any], int]] = []
+    for stage_name, stage in stages.items():
+        if not isinstance(stage, dict):
+            continue
+        evidence = stage.get("evidence")
+        if not isinstance(evidence, list):
+            continue
+        for item in evidence:
+            if not isinstance(item, Mapping):
+                continue
+            supplements = item.get("supplemental_excerpts")
+            if not isinstance(supplements, list) or not supplements:
+                continue
+            evidence_id = str(item.get("evidence_id") or item.get("speech_id") or "turn")
+            for index, supplement in enumerate(supplements):
+                continuation_priority = int(
+                    isinstance(supplement, Mapping)
+                    and supplement.get("segment_kind") == "argument_continuation"
+                )
+                candidates.append(
+                    (
+                        continuation_priority,
+                        _value_size(supplement),
+                        str(stage_name),
+                        evidence_id,
+                        supplements,
+                        index,
+                    )
+                )
+    if not candidates:
+        return False
+    _priority, _bytes, stage_name, evidence_id, supplements, index = max(
+        candidates,
+        key=lambda value: (value[0], value[1], value[2], value[3], value[5]),
+    )
+    path = f"answer_brief.stages.{stage_name}.evidence.{evidence_id}.supplemental_excerpts"
+    observed = audit.observed_count(path, len(supplements))
+    supplements.pop(index)
+    audit.mark_count(path, observed=observed, returned=len(supplements))
+    return True
+
+
+def _trim_answer_brief_meetings(brief: dict[str, Any], audit: _BudgetAudit, *, limit: int) -> None:
+    stages = brief.get("stages")
+    if not isinstance(stages, dict):
+        return
+    for stage_name, stage in stages.items():
+        if not isinstance(stage, dict):
+            continue
+        meetings = stage.get("meetings")
+        if not isinstance(meetings, list) or len(meetings) <= limit:
+            continue
+        observed = audit.observed_count(f"answer_brief.stages.{stage_name}.meetings", len(meetings))
+        stage["meetings"] = meetings[:limit]
+        audit.mark_count(
+            f"answer_brief.stages.{stage_name}.meetings",
+            observed=observed,
+            returned=limit,
+        )
+
+
+def _trim_answer_brief_timeline(brief: dict[str, Any], audit: _BudgetAudit, *, limit: int) -> None:
+    processing = brief.get("processing")
+    if not isinstance(processing, dict):
+        return
+    timeline = processing.get("timeline")
+    if not isinstance(timeline, list) or len(timeline) <= limit:
+        return
+    observed = audit.observed_count("answer_brief.processing.timeline", len(timeline))
+    processing["timeline"] = timeline[:limit]
+    audit.mark_count(
+        "answer_brief.processing.timeline",
+        observed=observed,
+        returned=limit,
+    )
+
+
+def _remove_one_answer_evidence(
+    brief: dict[str, Any],
+    audit: _BudgetAudit,
+    *,
+    evidence_use: str,
+    preserve_per_stage: int,
+    preserve_cited: bool = False,
+) -> bool:
+    stages = brief.get("stages")
+    if not isinstance(stages, dict):
+        return False
+    candidates: list[tuple[int, str, dict[str, Any], list[Any], list[int]]] = []
+    for stage_name, stage in stages.items():
+        if not isinstance(stage, dict):
+            continue
+        evidence = stage.get("evidence")
+        if not isinstance(evidence, list):
+            continue
+        indices = [
+            index
+            for index, item in enumerate(evidence)
+            if isinstance(item, Mapping) and item.get("evidence_use") == evidence_use
+        ]
+        if len(indices) <= preserve_per_stage:
+            continue
+        if preserve_cited and preserve_per_stage:
+            cited = [
+                index
+                for index in indices
+                if isinstance(evidence[index], Mapping)
+                and isinstance(evidence[index].get("citation"), Mapping)
+                and evidence[index]["citation"].get("official_url")
+                and evidence[index]["citation"].get("source_locator")
+            ]
+            protected = cited[0] if cited else indices[0]
+            indices = [index for index in indices if index != protected]
+        if indices:
+            candidates.append((len(indices), str(stage_name), stage, evidence, indices))
+    if not candidates:
+        return False
+    _count, stage_name, _stage, evidence, indices = max(
+        candidates, key=lambda item: (item[0], item[1])
+    )
+    path = f"answer_brief.stages.{stage_name}.evidence"
+    observed = audit.observed_count(path, len(evidence))
+    evidence.pop(indices[-1])
+    audit.mark_count(path, observed=observed, returned=len(evidence))
+    return True
 
 
 def _compact_stage_coverage(payload: dict[str, Any], audit: _BudgetAudit) -> None:
@@ -407,7 +832,12 @@ def _bound_root(payload: dict[str, Any], audit: _BudgetAudit) -> None:
 
 def _bound_value(value: Any, path: str, audit: _BudgetAudit, *, depth: int) -> Any:
     if isinstance(value, str):
-        compact = _truncate_utf8(value, _GENERIC_STRING_BYTES)
+        string_limit = (
+            _ANSWER_DIRECT_EXCERPT_BYTES
+            if path.startswith("answer_brief.")
+            else _GENERIC_STRING_BYTES
+        )
+        compact = _truncate_utf8(value, string_limit)
         if compact != value:
             audit.mark_text(path, value, compact)
         return compact
@@ -432,13 +862,9 @@ def _bound_value(value: Any, path: str, audit: _BudgetAudit, *, depth: int) -> A
     if isinstance(value, Mapping):
         keys = _prioritized_keys(value, _IDENTIFIER_FIELDS, _GENERIC_MAPPING_ITEMS)
         if len(keys) < len(value):
-            audit.mark_count(
-                path, observed=len(value), returned=len(keys), kind="mapping"
-            )
+            audit.mark_count(path, observed=len(value), returned=len(keys), kind="mapping")
         return {
-            str(key): _bound_value(
-                value[key], f"{path}.{key}", audit, depth=depth + 1
-            )
+            str(key): _bound_value(value[key], f"{path}.{key}", audit, depth=depth + 1)
             for key in keys
         }
     rendered = str(value)
@@ -448,9 +874,7 @@ def _bound_value(value: Any, path: str, audit: _BudgetAudit, *, depth: int) -> A
     return compact
 
 
-def _bound_record_strings(
-    record: dict[str, Any], path: str, audit: _BudgetAudit
-) -> None:
+def _bound_record_strings(record: dict[str, Any], path: str, audit: _BudgetAudit) -> None:
     for name, value in list(record.items()):
         if not isinstance(value, str):
             continue
@@ -460,9 +884,7 @@ def _bound_record_strings(
             audit.mark_text(f"{path}.{name}", value, compact)
 
 
-def _reduce_known_sections(
-    payload: dict[str, Any], audit: _BudgetAudit, target: int
-) -> None:
+def _reduce_known_sections(payload: dict[str, Any], audit: _BudgetAudit, target: int) -> None:
     scope_value = payload.get("scope_inventory")
     scope = scope_value if isinstance(scope_value, dict) else {}
     inventory_paths = (
@@ -484,9 +906,7 @@ def _reduce_known_sections(
             observed = _inventory_observed_total(section, len(items), audit, name)
             section["items"] = items[:keep]
             _mark_inventory_page(section, observed=observed)
-            audit.mark_count(
-                f"scope_inventory.{name}", observed=observed, returned=keep
-            )
+            audit.mark_count(f"scope_inventory.{name}", observed=observed, returned=keep)
             changed = True
             if _size(payload) <= target:
                 break
@@ -536,9 +956,7 @@ def _reduce_known_sections(
             return
 
 
-def _drop_optional_top_level(
-    payload: dict[str, Any], audit: _BudgetAudit, target: int
-) -> None:
+def _drop_optional_top_level(payload: dict[str, Any], audit: _BudgetAudit, target: int) -> None:
     if _size(payload) <= target:
         return
     protected = set(_TOP_LEVEL_PRIORITY)
@@ -561,9 +979,7 @@ def _drop_optional_top_level(
             return
 
 
-def _replace_with_emergency_projection(
-    payload: dict[str, Any], audit: _BudgetAudit
-) -> None:
+def _replace_with_emergency_projection(payload: dict[str, Any], audit: _BudgetAudit) -> None:
     projection: dict[str, Any] = {}
     for name in _TOP_LEVEL_PRIORITY:
         if name not in payload:
@@ -573,12 +989,14 @@ def _replace_with_emergency_projection(
             if isinstance(value, list):
                 observed = audit.observed_count(name, len(value))
                 returned = value[:1]
-                projection[name] = [
-                    _identifier_projection(item, depth=0) for item in returned
-                ]
+                projection[name] = [_identifier_projection(item, depth=0) for item in returned]
                 audit.mark_count(name, observed=observed, returned=len(returned))
             continue
-        if name == "stage_coverage":
+        if name == "answer_brief":
+            # This is already a compact, citation-bearing projection.  It is
+            # more useful to an MCP client than the duplicated raw arrays.
+            projection[name] = value
+        elif name == "stage_coverage":
             # Already reduced by _compact_stage_coverage; its requested-stage
             # states are quality inputs and must survive emergency projection.
             projection[name] = value
@@ -628,9 +1046,7 @@ def _inventory_projection(value: Any, audit: _BudgetAudit) -> Any:
             path = f"scope_inventory.{name}"
             observed = _inventory_observed_total(section, len(items), audit, name)
             returned = items[:1]
-            page["items"] = [
-                _identifier_projection(item, depth=0) for item in returned
-            ]
+            page["items"] = [_identifier_projection(item, depth=0) for item in returned]
             _mark_inventory_page(page, observed=observed)
             audit.mark_count(path, observed=observed, returned=len(returned))
         result[name] = page
@@ -645,22 +1061,15 @@ def _identifier_projection(value: Any, *, depth: int) -> Any:
     if depth >= 4:
         return _truncate_utf8(str(value), 256)
     if isinstance(value, list):
-        return [
-            _identifier_projection(item, depth=depth + 1) for item in value[:3]
-        ]
+        return [_identifier_projection(item, depth=depth + 1) for item in value[:3]]
     if isinstance(value, tuple):
         return _identifier_projection(list(value), depth=depth)
     if isinstance(value, Mapping):
         selected = [name for name in _IDENTIFIER_FIELDS if name in value]
         if not selected:
-            selected = [
-                key
-                for key in sorted(value, key=str)
-                if _is_critical_field(str(key))
-            ][:24]
+            selected = [key for key in sorted(value, key=str) if _is_critical_field(str(key))][:24]
         return {
-            str(key): _identifier_projection(value[key], depth=depth + 1)
-            for key in selected[:24]
+            str(key): _identifier_projection(value[key], depth=depth + 1) for key in selected[:24]
         }
     return _truncate_utf8(str(value), 256)
 
@@ -759,9 +1168,7 @@ def _fit_final_envelope(
     _settle_final_bytes(payload, budget)
 
 
-def _absolute_fallback(
-    payload: dict[str, Any], *, max_bytes: int, original_bytes: int
-) -> None:
+def _absolute_fallback(payload: dict[str, Any], *, max_bytes: int, original_bytes: int) -> None:
     stage = payload.get("stage_coverage")
     pagination = payload.get("research_pagination")
     next_action = payload.get("next_action")
@@ -820,9 +1227,7 @@ def _budget_payload(
     stage_inputs_preserved: bool,
 ) -> dict[str, Any]:
     truncated = bool(
-        audit.truncated_sections
-        or audit.truncated_section_overflow
-        or audit.omitted_top_level
+        audit.truncated_sections or audit.truncated_section_overflow or audit.omitted_top_level
     )
     budget: dict[str, Any] = {
         "max_bytes": max_bytes,
@@ -853,8 +1258,7 @@ def _budget_payload(
     }
     if audit.compacted_values:
         budget["compacted_values"] = {
-            name: audit.compacted_values[name]
-            for name in sorted(audit.compacted_values)
+            name: audit.compacted_values[name] for name in sorted(audit.compacted_values)
         }
     if audit.omitted_top_level:
         budget["omitted_top_level"] = sorted(audit.omitted_top_level)
@@ -922,9 +1326,7 @@ def _quality_input_signature(payload: Mapping[str, Any]) -> str:
         "cited_count": cited_count,
         "speaker_counts": sorted(speaker_counts.items()),
         "stage": _quality_stage_projection(payload.get("stage_coverage")),
-        "pagination": _quality_pagination_projection(
-            payload.get("research_pagination")
-        ),
+        "pagination": _quality_pagination_projection(payload.get("research_pagination")),
     }
     return hashlib.sha256(_canonical_bytes(projection)).hexdigest()
 
@@ -951,9 +1353,7 @@ def _quality_stage_projection(value: Any) -> dict[str, Any] | None:
     for stage in requested:
         raw_stage = stages.get(stage)
         state = (
-            str(raw_stage.get("state") or "").strip()
-            if isinstance(raw_stage, Mapping)
-            else None
+            str(raw_stage.get("state") or "").strip() if isinstance(raw_stage, Mapping) else None
         )
         states.append((stage, state))
     return {"requested_stages": requested, "states": states}
@@ -1023,9 +1423,7 @@ def _inventory_observed_total(
     return max(fallback, reported, audit.observed_count(f"scope_inventory.{name}", 0))
 
 
-def _prioritized_keys(
-    value: Mapping[Any, Any], priority: tuple[str, ...], limit: int
-) -> list[Any]:
+def _prioritized_keys(value: Mapping[Any, Any], priority: tuple[str, ...], limit: int) -> list[Any]:
     selected: list[Any] = []
     for name in priority:
         if name in value and name not in selected:
