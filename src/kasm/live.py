@@ -603,7 +603,7 @@ class LiveAssemblyServices:
             item["matched_terms"] = [
                 term for term in query_tokens if term.casefold() in text.casefold()
             ]
-            is_legislator = _is_legislator_role(str(item.get("speaker_role") or ""))
+            is_legislator = _has_legislator_signal(item)
             item["attribution"] = {
                 "state": attribution_state,
                 "bill_numbers": attributed_numbers,
@@ -3076,6 +3076,15 @@ def _is_legislator_role(role: str) -> bool:
     return normalized == "의원" or normalized.endswith("위원") or normalized.endswith("위원장")
 
 
+def _has_legislator_signal(speech: dict[str, Any]) -> bool:
+    """Recover a role token that official PDF layout sometimes shifts into text."""
+
+    if _is_legislator_role(str(speech.get("speaker_role") or "")):
+        return True
+    text = str(speech.get("text") or "").lstrip()
+    return re.match(r"^(?:의원|위원)(?:\s|[,:])", text) is not None
+
+
 def _issue_stage_coverage(
     query: str,
     payload: dict[str, Any],
@@ -3102,7 +3111,7 @@ def _issue_stage_coverage(
                 isinstance(speech.get("attribution"), dict)
                 and speech["attribution"].get("is_legislator") is True
             )
-            or _is_legislator_role(str(speech.get("speaker_role") or ""))
+            or _has_legislator_signal(speech)
         )
     }
     failed_urls = set(refresh.get("failed_official_urls") or [])

@@ -12,6 +12,7 @@ from kasm.live import (
     _filter_bills_by_proposal_scope,
     _filter_bills_by_temporal_scope,
     _filter_meeting_rows_by_scope,
+    _has_legislator_signal,
     _measure_discussion_segment_rows,
     _meeting_date_queries,
     _proposal_date_scope,
@@ -32,6 +33,15 @@ AI_BASIC_ACT_QUERY = (
     "제22대 국회 AI 기본법의 법안소위·과방위 전체회의·본회의 주요 논의를 "
     "정확하고 충분하게 정리해줘."
 )
+
+
+def test_legislator_role_shifted_into_pdf_text_is_recovered_conservatively() -> None:
+    assert _has_legislator_signal({"speaker_role": None, "text": "위원 법안의 정의를 묻겠습니다."})
+    assert _has_legislator_signal({"speaker_role": "의원", "text": "질의하겠습니다."})
+    assert not _has_legislator_signal(
+        {"speaker_role": None, "text": "위원님들께 정부 입장을 설명드리겠습니다."}
+    )
+    assert not _has_legislator_signal({"speaker_role": "장관", "text": "답변드리겠습니다."})
 
 
 class RecordingClient:
