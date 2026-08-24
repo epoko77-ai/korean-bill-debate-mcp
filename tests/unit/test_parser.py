@@ -98,6 +98,78 @@ def test_speaker_shifted_entirely_into_inline_text_is_recovered_from_repetition(
     assert result.failures == []
 
 
+def test_wide_gap_between_role_and_name_recovers_production_pypdf_markers():
+    source = """◯소위원장      김미애  조율 여부를 확인하겠습니다.
+◯수석전문위원  이지민   검토 결과를 보고드리겠습니다.
+◯위원장   박주민  의결 절차를 진행하겠습니다.
+◯보건복지부제2차관   이형훈  정부 의견과 경과규정을 설명하겠습니다.
+◯보건복지부 장관   정은경   집행 과정에서 관리하겠습니다.
+◯보건복지위원장대리    이수진   심사 결과를 보고드리겠습니다.
+◯서영석  위원 개연성이 높은 사안입니다.
+◯위원장  회의를 시작합니다.
+◯김미애  위원 여러분의 의견을 듣겠습니다.
+"""
+
+    result = parse_transcript(source)
+
+    assert [
+        (speech.speaker_name, speech.speaker_role, speech.organization)
+        for speech in result.speeches
+    ] == [
+        ("김미애", "소위원장", None),
+        ("이지민", "수석전문위원", None),
+        ("박주민", "위원장", None),
+        ("이형훈", "차관", "보건복지부"),
+        ("정은경", "장관", "보건복지부"),
+        ("이수진", "위원장대리", "보건복지"),
+        ("서영석", "위원", None),
+        ("김미애", None, None),
+    ]
+    assert [speech.text for speech in result.speeches] == [
+        "조율 여부를 확인하겠습니다.",
+        "검토 결과를 보고드리겠습니다.",
+        "의결 절차를 진행하겠습니다.",
+        "정부 의견과 경과규정을 설명하겠습니다.",
+        "집행 과정에서 관리하겠습니다.",
+        "심사 결과를 보고드리겠습니다.",
+        "개연성이 높은 사안입니다.",
+        "위원 여러분의 의견을 듣겠습니다.",
+    ]
+    assert len(result.failures) == 1
+    assert "위원장 회의를 시작합니다" in result.failures[0].excerpt
+
+
+def test_wide_gap_recovery_rejects_structural_selection_and_spoken_title():
+    source = """◯안건조정위원장    선임
+◯소위원장   선임
+◯김윤  위원장, 이 법안은 다시 검토해야 합니다.
+"""
+
+    result = parse_transcript(source)
+
+    observed = [
+        (speech.speaker_name, speech.speaker_role, speech.text)
+        for speech in result.speeches
+    ]
+    assert observed == [
+        ("김윤", None, "위원장, 이 법안은 다시 검토해야 합니다."),
+    ]
+    assert len(result.failures) == 2
+    assert all("선임" in failure.excerpt for failure in result.failures)
+
+
+def test_role_only_prose_is_not_manufactured_as_a_person():
+    source = """◯위원장    이제 시작하겠습니다.
+◯소위원장   정리 후 의결하겠습니다.
+◯의장    선포하겠습니다.
+"""
+
+    result = parse_transcript(source)
+
+    assert result.speeches == []
+    assert len(result.failures) == 3
+
+
 def test_next_bill_agenda_heading_is_not_appended_to_previous_speech():
     source = """1. 약사법 일부개정법률안 (의안번호 2205513)
 ○김윤 위원  첫 의안에 대한 질문입니다.

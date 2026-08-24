@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -19,6 +20,7 @@ from kasm.live import (
     _proposal_date_scope,
     _scope_target_measure_turn_text,
 )
+from kasm.mcp.tools import KasmTools, ServiceContext
 from kasm.search.measure_aliases import resolve_measure_alias
 from kasm.storage.database import Database
 
@@ -892,6 +894,163 @@ def test_incident_alias_checks_full_vehicle_path_and_three_stage_minutes(
     assert {bill["bill_no"] for bill in result["bills"]} == {"2205513", "2214609"}
 
 
+def test_doctornow_production_layout_survives_to_answer_brief(tmp_path) -> None:
+    database = Database(tmp_path / "incident-production-layout.sqlite3")
+    database.initialize()
+    service = LiveAssemblyServices(
+        database,
+        client=IncidentClient(),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+        max_minutes_per_request=2,
+        now=lambda: datetime(2026, 8, 24, tzinfo=UTC),
+    )
+    lee_opposition = (
+        "이 법안을 반대하는 이유를 세 가지로 말씀드리겠습니다. "
+        "첫 번째, 아직 확인되지 않은 우려만으로 사업 전체를 금지해서는 안 됩니다. "
+        + ("이미 마련된 행위규제를 먼저 시행하고 결과를 검증해야 합니다. " * 28)
+        + "중소벤처기업부와 공정거래위원회도 전면 금지보다 사후 제재가 적절하다고 했습니다. "
+        "두 번째, 허용되던 사업을 사후 입법으로 금지하면 창업과 벤처투자가 위축됩니다. "
+        + ("예측 가능한 규제 환경이 혁신 생태계의 기본 조건입니다. " * 12)
+        + "마지막으로, 환자가 처방약 재고가 있는 약국을 일일이 찾는 불편이 계속됩니다. "
+        + ("약 보유 정보와 가격 비교 편익을 함께 해결해야 합니다. " * 10)
+    )
+
+    def sync_production_layout(row: dict[str, Any]):
+        bill_no = str(row["BILL_NO"])
+        meeting_id = str(row["CONF_ID"])
+        if meeting_id == "incident-subcommittee":
+            target_ordinal = 10
+            turns = (
+                "◯수석전문위원    이지민  비대면진료 플랫폼의 의약품 도매상과 "
+                "리베이트 규율 취지는 타당합니다.\n"
+                "◯보건복지부제2차관    이형훈  비대면진료 플랫폼의 도매상 허가 금지는 수용하고 "
+                "거래 제한은 수정 수용합니다.\n"
+                "◯소위원장    김미애  원격의료산업협의회의 영업 자유 침해 지적을 "
+                "완전히 무시해도 되는지 충분한 설명이 필요합니다.\n"
+                "◯보건복지부제2차관    이형훈  관련 업계와 협의했고 이해충돌 방지를 위한 "
+                "수정안의 세부 범위를 계속 조율하고 있습니다.\n"
+                "◯김윤    위원 도매상을 소유한 플랫폼의 처방 유인과 차익 구조를 규제해야 합니다.\n"
+                "◯서영석    위원 개연성이 높은 이해충돌을 미리 명확히 규정하지 않으면 "
+                "유통 과정에서 분란과 갈등이 반복될 수 있습니다.\n"
+                "◯소위원장    김미애  사실상 지배의 범위와 우회 거래 가능성을 어떤 기준으로 "
+                "판단하고 차단할 것인지 구체적으로 설명해 주십시오.\n"
+                "◯서명옥    위원 비대면진료 플랫폼이 이미 도매업을 하면 어떻게 적용합니까?\n"
+                "◯보건복지부제2차관    이형훈  부칙 경과규정으로 소유관계를 정비하도록 하겠습니다."
+            )
+        elif meeting_id == "incident-committee":
+            target_ordinal = 17
+            turns = (
+                "◯소위원장    김미애  세 의원의 약사법 일부개정법률안을 통합한 대안으로 "
+                "비대면진료 플랫폼의 의약품 도매상 허가와 거래 제한을 심사보고합니다.\n"
+                "◯박희승    위원 불공정행위 규제에는 동의하지만 환자 편익과 "
+                "비대면진료 플랫폼 시장 축소가 우려됩니다.\n"
+                "◯보건복지부장관    정은경  플랫폼과 의약품 도매상의 이해충돌을 방지해야 합니다.\n"
+                "◯김윤    위원 비대면진료 금지가 아니라 신종 리베이트를 막는 법입니다.\n"
+                "◯보건복지부장관    정은경  비대면진료 플랫폼과 도매상 규제를 시행하겠습니다.\n"
+                "◯위원장    박주민  약사법 일부개정법률안(대안)은 가결되었음을 선포합니다."
+            )
+        else:
+            target_ordinal = 43
+            turns = (
+                "◯의장    조정식  의사일정 제43항 약사법 일부개정법률안 대안을 상정합니다.\n"
+                "◯보건복지위원장대리    이수진  플랫폼과 의약품 도매상의 분리를 위한 대안입니다.\n"
+                "◯의장    조정식  이 법안에 반대토론 신청이 있으므로 발언을 듣겠습니다.\n"
+                f"◯이소영    의원 {lee_opposition}\n"
+                "◯의장    조정식  약사법 일부개정법률안(대안)은 재석 178인 중 "
+                "찬성 95인, 반대 34인, "
+                "기권 49인으로 가결되었음을 선포합니다."
+            )
+        row["agenda_items"] = [
+            {"title": "1. 의료법 일부개정법률안", "bill_no": "2299998"},
+            {
+                "title": f"{target_ordinal}. 약사법 일부개정법률안(대안)",
+                "bill_no": bill_no,
+            },
+            {"title": "80. 국민연금법 일부개정법률안", "bill_no": "2299999"},
+        ]
+        heading = (
+            "1. 의료법 일부개정법률안 (의안번호 2299998)\n"
+            f"{target_ordinal}. 약사법 일부개정법률안(대안) (의안번호 {bill_no})\n"
+            "80. 국민연금법 일부개정법률안 (의안번호 2299999)\n"
+        )
+        return service.pipeline.ingestor.ingest(
+            row,
+            heading + turns,
+            source_hash=f"production-layout-{meeting_id}",
+            source_url=str(row["PDF_LINK_URL"]),
+        )
+
+    service.pipeline.sync = sync_production_layout  # type: ignore[method-assign]
+    tools = KasmTools(
+        ServiceContext(search=service, repository=service, catalog=service)  # type: ignore[arg-type]
+    )
+
+    result = tools.explore_issue(INCIDENT_QUERY, limit=20, assembly_term=22)
+    brief = result["answer_brief"]
+    expected = {
+        "subcommittee": Counter(
+            {"이지민": 1, "이형훈": 3, "김미애": 2, "김윤": 1, "서영석": 1, "서명옥": 1}
+        ),
+        "standing_committee": Counter(
+            {"김미애": 1, "박희승": 1, "정은경": 2, "김윤": 1, "박주민": 1}
+        ),
+        "plenary": Counter({"조정식": 3, "이수진": 1, "이소영": 1}),
+    }
+    for stage, expected_speakers in expected.items():
+        direct = [
+            item
+            for item in brief["stages"][stage]["evidence"]
+            if item.get("evidence_use") == "direct_claim_evidence"
+        ]
+        observed_speakers = Counter(str(item.get("speaker")) for item in direct)
+        assert observed_speakers == expected_speakers, [
+            (item.get("speaker"), item.get("attribution"), item.get("excerpt_verbatim"))
+            for item in direct
+        ]
+        assert brief["evidence_ledger"]["by_stage"][stage]["transport_omitted_count"] == 0
+
+    lee = next(
+        item
+        for item in brief["stages"]["plenary"]["evidence"]
+        if item.get("speaker") == "이소영"
+    )
+    assert len(lee["supplemental_excerpts"]) == 3
+    totals = brief["evidence_ledger"]["totals"]
+    assert totals["returned_count"] == 20
+    assert totals["supplemental_returned_count"] == 3
+    assert totals["transport_omitted_count"] == 0
+    assert totals["supplemental_transport_omitted_count"] == 0
+    final_government_response = next(
+        item
+        for item in brief["stages"]["subcommittee"]["evidence"]
+        if item.get("speaker") == "이형훈" and "경과규정" in item.get("excerpt_verbatim", "")
+    )
+    assert final_government_response["attribution"]["state"] == (
+        "exact_measure_discussion_segment"
+    )
+    assert final_government_response["attribution"]["segment_kind"] == (
+        "government_response"
+    )
+    standing_outcome = next(
+        item
+        for item in brief["stages"]["standing_committee"]["evidence"]
+        if item.get("speaker") == "박주민"
+    )
+    assert standing_outcome["attribution"]["state"] == "exact_measure_discussion_segment"
+    assert standing_outcome["attribution"]["segment_kind"] == "outcome"
+    assert not {"보건복지부제2차관", "보건복지부장관", "보건복지위원장대리"}.intersection(
+        item.get("speaker")
+        for stage in expected
+        for item in brief["stages"][stage]["evidence"]
+    )
+    assert {
+        row["parser_version"]
+        for row in database.connection.execute(
+            "SELECT DISTINCT parser_version FROM speeches"
+        ).fetchall()
+    } == {PARSER_VERSION}
+
+
 def test_target_agenda_segment_keeps_followup_speakers_without_repeated_bill_number(
     tmp_path,
 ) -> None:
@@ -1284,7 +1443,7 @@ def test_warm_targeted_repeat_reuses_current_parser_rows(tmp_path) -> None:
     database.connection.commit()
     reparsed = service.explore_issue(INCIDENT_QUERY, limit=20)
 
-    assert PARSER_VERSION == "korea-rules-v6"
+    assert PARSER_VERSION == "korea-rules-v7"
     assert sync_count == 6
     assert reparsed["live_refresh"]["minutes_cache_reused"] == 0
     assert reparsed["live_refresh"]["minutes_ingested"] == 3
