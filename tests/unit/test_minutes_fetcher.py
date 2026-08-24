@@ -51,6 +51,7 @@ def test_fetches_only_official_pdf_and_extracts_text(tmp_path: Path) -> None:
 
 def test_pdf_extraction_timeout_is_reported_as_bounded_failure(tmp_path: Path) -> None:
     def timeout_runner(command, **_kwargs):
+        Path(command[-1]).write_text("partial minutes", encoding="utf-8")
         raise subprocess.TimeoutExpired(command, 1)
 
     fetcher = MinutesFetcher(
@@ -62,6 +63,7 @@ def test_pdf_extraction_timeout_is_reported_as_bounded_failure(tmp_path: Path) -
 
     with pytest.raises(RuntimeError, match="extraction deadline"):
         fetcher.fetch("https://record.assembly.go.kr/minutes-timeout.pdf")
+    assert list((tmp_path / "minutes").glob("*.txt")) == []
 
 
 def test_python_fallback_timeout_terminates_the_worker(

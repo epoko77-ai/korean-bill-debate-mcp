@@ -33,6 +33,10 @@ def extract_pdf_text(
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"pdftotext failed: {exc.stderr.strip()}") from exc
     except subprocess.TimeoutExpired as exc:
+        # Poppler can leave a truncated output file when it is terminated.  A
+        # later request must extract again instead of treating that partial
+        # artifact as a valid cache hit.
+        text_path.unlink(missing_ok=True)
         raise RuntimeError("pdftotext exceeded the document extraction deadline") from exc
 
     if fallback_extractor is None and timeout is not None:

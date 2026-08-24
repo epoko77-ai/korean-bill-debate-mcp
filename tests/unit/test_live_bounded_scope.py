@@ -417,6 +417,15 @@ def test_exact_question_has_hard_proposal_scope_and_one_year_meeting_query() -> 
     assert _meeting_date_queries(
         [f"2026-{month:02d}" for month in range(1, 13)]
     ) == ["2026"]
+    assert _meeting_date_queries(["2026-01", "2026-02", "2026-03"]) == [
+        "2026-01",
+        "2026-02",
+        "2026-03",
+    ]
+    assert _meeting_date_queries(
+        [f"2026-{month:02d}" for month in range(1, 8)],
+        as_of=date(2026, 7, 18),
+    ) == ["2026"]
 
 
 def test_ai_basic_act_alias_resolves_source_and_final_vehicle() -> None:
@@ -553,15 +562,91 @@ def test_ai_basic_act_uses_source_for_committee_and_vehicle_for_plenary(
         }
         for speech in result["speeches"]
     )
-    assert _meeting_date_queries(["2026-01", "2026-02", "2026-03"]) == [
-        "2026-01",
-        "2026-02",
-        "2026-03",
+
+
+def test_ai_basic_act_high_signal_turns_anchor_without_repeating_bill_number() -> None:
+    hint = resolve_measure_alias(AI_BASIC_ACT_QUERY)
+    assert hint is not None
+    rows = [
+        {
+            "id": "ai-standing:1",
+            "meeting_id": "ai-standing",
+            "sequence": 1,
+            "speaker_name": "이해민",
+            "speaker_role": "위원",
+            "agenda": "복수 의사일정 제1항부터 제19항까지 일괄 심사",
+            "text": (
+                "인공지능 기본법은 규제 범위의 문제점을 계속 모니터링하며 "
+                "법의 완결성을 더해야 합니다."
+            ),
+        },
+        {
+            "id": "ai-standing:2",
+            "meeting_id": "ai-standing",
+            "sequence": 2,
+            "speaker_name": "과학기술정보통신부장관",
+            "speaker_role": "장관",
+            "agenda": "복수 의사일정 제1항부터 제19항까지 일괄 심사",
+            "text": "고영향 인공지능과 투명성 의무를 균형 있게 집행하겠습니다.",
+        },
+        {
+            "id": "ai-standing:3",
+            "meeting_id": "ai-standing",
+            "sequence": 3,
+            "speaker_name": "전문위원",
+            "speaker_role": "전문위원",
+            "agenda": "복수 의사일정",
+            "text": (
+                "인공지능 산업 육성도 중요합니다. 장애인 차별조항 정비를 위한 "
+                "과학기술정보방송통신위원회 소관 6개 법률 일부개정을 위한 "
+                "법률안을 보고드리겠습니다."
+            ),
+        },
+        {
+            "id": "ai-standing:4",
+            "meeting_id": "ai-standing",
+            "sequence": 4,
+            "speaker_name": "박충권",
+            "speaker_role": "의원",
+            "agenda": "복수 의사일정",
+            "text": "KBS 수신료에 관한 방송법 개정안을 반대합니다.",
+        },
+        {
+            "id": "ai-standing:5",
+            "meeting_id": "ai-standing",
+            "sequence": 5,
+            "speaker_name": "의장",
+            "speaker_role": "의장",
+            "agenda": "복수 의사일정",
+            "text": "박충권 의원 수고하셨습니다. 다음 토론자를 부르겠습니다.",
+        },
+        {
+            "id": "ai-standing:6",
+            "meeting_id": "ai-standing",
+            "sequence": 6,
+            "speaker_name": "우원식",
+            "speaker_role": "의장",
+            "agenda": "복수 의사일정",
+            "text": (
+                "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법안(대안)은 "
+                "가결되었음을 선포합니다."
+            ),
+        },
     ]
-    assert _meeting_date_queries(
-        [f"2026-{month:02d}" for month in range(1, 8)],
-        as_of=date(2026, 7, 18),
-    ) == ["2026"]
+
+    segments = _measure_discussion_segment_rows(
+        rows,
+        exact_numbers=set(hint.bill_numbers),
+        linked_numbers_by_speech={},
+        hint=hint,
+        target_agenda_numbers_by_meeting={"ai-standing": {7}},
+    )
+
+    assert segments == {
+        "ai-standing:1": "anchor",
+        "ai-standing:2": "anchor",
+        "ai-standing:6": "outcome",
+    }
 
 
 def test_meeting_rows_are_hard_filtered_to_effective_scope() -> None:

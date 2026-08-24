@@ -66,7 +66,7 @@ def create_asgi_app(*, research_task_engine: ResearchTaskEngine | None = None) -
             client=client,
             data_dir=data_dir,
             max_minutes_per_request=int(os.getenv("KBD_REMOTE_MAX_MINUTES_PER_REQUEST", "2")),
-            source_timeout=float(os.getenv("KBD_REMOTE_SOURCE_TIMEOUT_SECONDS", "15")),
+            source_timeout=float(os.getenv("KBD_REMOTE_SOURCE_TIMEOUT_SECONDS", "45")),
         )
         token_codec = RemoteTokenAuth(None, remote_secret)
         oauth = RemoteOAuth(token_codec)

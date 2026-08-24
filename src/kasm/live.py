@@ -107,6 +107,9 @@ _NEXT_BILL_PARAGRAPH = re.compile(
     r"(?m)^\s*(?:다음은\s*)?[가-힣·][가-힣·\s]{1,90}?"
     r"(?:법률|법)\s*(?:일부개정)?법률안"
 )
+_NAMED_MEASURE_REFERENCE = re.compile(
+    r"[가-힣·0-9]{2,120}?(?:법률안|법(?:일부개정|개정|폐지)?안)"
+)
 _LIVE_BILL_INVENTORY_LIMIT = 50
 _LIVE_MEETING_INVENTORY_LIMIT = 50
 _TARGETED_DEADLINE_SECONDS = 120.0
@@ -2193,9 +2196,52 @@ def _measure_discussion_segment_rows(
         grouped.setdefault(str(row.get("meeting_id") or ""), []).append(row)
 
     alternative_titles = {
-        re.sub(r"\s+", "", identity.name).casefold()
+        re.sub(
+            r"\s+",
+            "",
+            LEGAL_TERMINOLOGY.normalize_equivalents(identity.name),
+        ).casefold()
         for identity in hint.identities
         if identity.name and identity.role == "committee_alternative_primary_vehicle"
+    }
+    formal_title_anchors: set[str] = set()
+    formal_titles = [hint.matched_alias]
+    formal_titles.extend(
+        identity.name
+        for identity in hint.identities
+        if identity.name
+        and (
+            identity.role != "source_member_bill"
+            or "일부개정법률안" not in re.sub(r"\s+", "", identity.name)
+        )
+    )
+    for title in formal_titles:
+        compact_title = re.sub(
+            r"\s+",
+            "",
+            LEGAL_TERMINOLOGY.normalize_equivalents(title),
+        ).casefold()
+        if len(compact_title) < 5:
+            continue
+        formal_title_anchors.add(compact_title)
+        if compact_title.endswith("안"):
+            formal_title_anchors.add(compact_title[:-1])
+    evidence_anchors = {
+        re.sub(
+            r"\s+",
+            "",
+            LEGAL_TERMINOLOGY.normalize_equivalents(term),
+        ).casefold()
+        for term in hint.evidence_terms
+        if len(re.sub(r"\s+", "", term)) >= 5
+    }
+    family_markers = {
+        token.casefold()
+        for term in hint.evidence_terms
+        for token in re.findall(
+            r"[가-힣A-Za-z]{4,}",
+            LEGAL_TERMINOLOGY.normalize_equivalents(term),
+        )
     }
     result: dict[str, str] = {}
     target_agenda_numbers_by_meeting = target_agenda_numbers_by_meeting or {}
@@ -2209,12 +2255,18 @@ def _measure_discussion_segment_rows(
         )
         target_agenda_numbers = target_agenda_numbers_by_meeting.get(meeting_id, set())
         anchor_kinds: dict[int, str] = {}
+        agenda_boundaries: set[int] = set()
         for position, row in enumerate(ordered):
             speech_id = str(row.get("id") or "")
             text = str(row.get("text") or "")
             agenda = str(row.get("agenda") or "")
             compact = re.sub(r"\s+", "", f"{agenda}\n{text}").casefold()
             text_compact = re.sub(r"\s+", "", text).casefold()
+            normalized_text_compact = re.sub(
+                r"\s+",
+                "",
+                LEGAL_TERMINOLOGY.normalize_equivalents(text),
+            ).casefold()
             observed_numbers = set(_EXACT_BILL_NUMBER.findall(compact))
             exact_identifier = bool(observed_numbers.intersection(exact_numbers))
             exact_link = bool(
@@ -2225,7 +2277,12 @@ def _measure_discussion_segment_rows(
                 or compact.count("일부개정법률안") > 3
             )
             alternative_title_anchor = any(
-                title and title in text_compact for title in alternative_titles
+                title and title in normalized_text_compact
+                for title in alternative_titles
+            )
+            formal_title_anchor = any(
+                title and title in normalized_text_compact
+                for title in formal_title_anchors
             )
             platform_anchor = any(
                 term in compact for term in ("플랫폼", "비대면", "약국중개", "원격의료산업협의회")
@@ -2234,6 +2291,33 @@ def _measure_discussion_segment_rows(
             rebate_anchor = "리베이트" in compact
             alias_anchor = "닥터나우" in compact
             concept_count = sum((platform_anchor, wholesale_anchor, rebate_anchor))
+            evidence_anchor_hits = {
+                anchor
+                for anchor in evidence_anchors
+                if anchor in normalized_text_compact
+            }
+            named_measure_references = tuple(
+                match.group()
+                for match in _NAMED_MEASURE_REFERENCE.finditer(normalized_text_compact)
+            )
+            same_family_named_measure = any(
+                marker in reference
+                for reference in named_measure_references
+                for marker in family_markers
+            )
+            unrelated_named_measure = bool(
+                named_measure_references
+                and not same_family_named_measure
+                and not formal_title_anchor
+                and not alternative_title_anchor
+                and not exact_identifier
+                and not exact_link
+            )
+            hint_specific_anchor = formal_title_anchor or bool(
+                evidence_anchor_hits and not unrelated_named_measure
+            )
+            if unrelated_named_measure:
+                agenda_boundaries.add(position)
             referenced_agenda_numbers = _referenced_agenda_numbers(f"{agenda}\n{text}")
             target_agenda_reference = bool(
                 target_agenda_numbers.intersection(referenced_agenda_numbers)
@@ -2246,7 +2330,7 @@ def _measure_discussion_segment_rows(
                 term in text_compact for term in ("투표결과", "가결되었음을선포", "대안으로채택")
             )
             safe_specific_anchor = (
-                alias_anchor or concept_count >= 2
+                alias_anchor or concept_count >= 2 or hint_specific_anchor
             ) and not observed_numbers.difference(exact_numbers)
             target_procedure_anchor = target_agenda_reference and procedural
             alternative_outcome_anchor = alternative_title_anchor and outcome
@@ -2260,7 +2344,12 @@ def _measure_discussion_segment_rows(
                 continue
             anchor_kinds[position] = (
                 "outcome"
-                if outcome and (target_agenda_reference or alternative_title_anchor)
+                if outcome
+                and (
+                    target_agenda_reference
+                    or alternative_title_anchor
+                    or hint_specific_anchor
+                )
                 else "anchor"
             )
         anchor_positions = sorted(anchor_kinds)
@@ -2274,7 +2363,11 @@ def _measure_discussion_segment_rows(
                 clusters.append([position])
                 continue
             previous_sequence = int(ordered[clusters[-1][-1]].get("sequence") or 0)
-            if sequence - previous_sequence <= 8:
+            crossed_agenda_boundary = any(
+                clusters[-1][-1] < boundary < position
+                for boundary in agenda_boundaries
+            )
+            if sequence - previous_sequence <= 8 and not crossed_agenda_boundary:
                 clusters[-1].append(position)
             else:
                 clusters.append([position])
