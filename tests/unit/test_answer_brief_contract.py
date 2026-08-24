@@ -13,7 +13,7 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from kasm.core.answer_brief import build_answer_brief
+from kasm.core.answer_brief import build_answer_brief, build_synthesis_completion_check
 from kasm.core.response_budget import enforce_bounded_response_budget
 
 REQUESTED_STAGES = ("subcommittee", "standing_committee", "plenary")
@@ -420,7 +420,10 @@ def _long_enumerated_opposition() -> str:
         "이 법안을 반대하는 이유를 세 가지로 말씀드리겠습니다. "
         "첫 번째, 아직 확인되지 않은 우려만으로 사업 전체를 금지해서는 안 됩니다. "
         + ("이미 마련된 행위규제를 먼저 시행하고 그 결과를 검증해야 합니다. " * 28)
-        + "공정거래위원회도 사후 제재가 경쟁과 소비자 후생에 더 적절하다고 보았습니다. "
+        + "의료법상 약국 추천과 경제적 이익 수수 금지 같은 행위규제를 먼저 시행해야 합니다. "
+        "중소벤처기업부는 창업 위축을, 수석전문위원은 영업·직업선택의 자유 침해를, "
+        "입법조사처는 관계기관 조정 부족을 지적했습니다. "
+        "공정거래위원회도 사후 제재가 경쟁과 소비자 후생에 더 적절하다고 보았습니다. "
         "두 번째, 허용되던 사업을 사후 입법으로 금지하면 창업과 벤처투자가 위축됩니다. "
         + ("예측 가능한 규제 환경이 혁신 생태계의 기본 조건입니다. " * 12)
         + "마지막으로, 환자가 처방약 재고가 있는 약국을 찾지 못하는 불편이 계속됩니다. "
@@ -662,6 +665,13 @@ def test_checked_exact_absence_can_represent_a_requested_stage() -> None:
     breadth = brief["comparison_readiness"]["dimensions"]["breadth"]
     assert breadth["status"] == "ready"
     assert breadth["metrics"]["represented_or_verified_absent_stage_count"] == 3
+    contract = brief["synthesis_contract"]
+    assert contract["plenary_opposition_or_approval_debate_must_not_be_omitted"] is False
+    assert contract["verified_plenary_absence_must_be_reported"] is True
+    plenary_manifest = brief["mandatory_coverage"]["stages"]["plenary"]
+    assert plenary_manifest["direct_evidence_count"] == 0
+    assert plenary_manifest["required_evidence"] == []
+    assert "확인 상태와 한계" in brief["mandatory_coverage"]["instruction_ko"]
 
 
 def test_answer_brief_survives_transport_budget_with_stage_and_ledger_contract() -> None:
@@ -747,15 +757,21 @@ def test_32k_transport_preserves_three_cited_stages_and_reconciles_derivatives()
     brief = result["answer_brief"]
     assert set(brief["stages"]) == set(REQUESTED_STAGES)
     actual_ids: set[str] = set()
+    actual_direct_ids: list[str] = []
     for stage_name in REQUESTED_STAGES:
         stage = brief["stages"][stage_name]
         direct = _direct_evidence(stage)
         assert direct
         assert all(
-            item["citation"]["official_url"].startswith("https://record.assembly.go.kr/")
+            item["speaker"]
+            and item["evidence_id"]
+            and item["citation"]["official_url"].startswith(
+                "https://record.assembly.go.kr/"
+            )
             and item["citation"]["source_locator"].startswith("p.")
             for item in direct
         )
+        actual_direct_ids.extend(str(item["evidence_id"]) for item in direct)
         direct_ids = {item["evidence_id"] for item in direct}
         context_ids = {
             item["evidence_id"]
@@ -773,6 +789,14 @@ def test_32k_transport_preserves_three_cited_stages_and_reconciles_derivatives()
         assert counts["meeting_counts"]["represented_in_returned_evidence_count"] == len(
             represented_meetings
         )
+        compact_manifest = brief["mandatory_coverage"]["stages"][stage_name]
+        assert compact_manifest["direct_evidence_count"] == len(direct)
+        assert compact_manifest["required_evidence_detail_path"] == (
+            f"answer_brief.stages.{stage_name}.evidence"
+        )
+        assert "required_evidence" not in compact_manifest
+
+    assert len(actual_direct_ids) == len(set(actual_direct_ids))
 
     for participant in brief["participant_index"]:
         assert set(participant["evidence_ids"]) <= actual_ids
@@ -821,6 +845,61 @@ def test_default_128k_keeps_all_selected_direct_turns_and_long_excerpts() -> Non
     assert max(excerpts) <= 2_400
     assert all(
         returned["evidence_ledger"]["by_stage"][stage]["transport_omitted_count"] == 0
+        for stage in REQUESTED_STAGES
+    )
+
+
+def test_large_answer_contract_reconciles_returned_and_transport_omitted_ids() -> None:
+    payload = _expanded_stage_payload(turns_per_stage=16, long_text=True)
+    brief = build_answer_brief(payload, requested_stages=REQUESTED_STAGES)
+    selected_by_stage = {
+        stage: {
+            str(item["evidence_id"])
+            for item in _direct_evidence(brief["stages"][stage])
+        }
+        for stage in REQUESTED_STAGES
+    }
+    payload["answer_brief"] = brief
+    payload["next_action"] = {
+        "tool": None,
+        "synthesis_completion_check": build_synthesis_completion_check(brief),
+    }
+
+    result = enforce_bounded_response_budget(payload)
+
+    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= 128 * 1024
+    assert "synthesis_completion_check" in result["next_action"]
+    returned = result["answer_brief"]
+    completion = result["next_action"]["synthesis_completion_check"]
+    for stage in REQUESTED_STAGES:
+        returned_ids = {
+            str(item["evidence_id"])
+            for item in _direct_evidence(returned["stages"][stage])
+        }
+        ledger = returned["evidence_ledger"]["by_stage"][stage]
+        omitted_ids = set(ledger["transport_omitted_evidence_ids"])
+        assert returned_ids | omitted_ids == selected_by_stage[stage]
+        assert returned_ids.isdisjoint(omitted_ids)
+        assert ledger["transport_omitted_count"] == len(omitted_ids)
+
+        manifest = returned["mandatory_coverage"]["stages"][stage]
+        assert set(manifest["required_evidence_ids"]) == returned_ids
+        assert manifest["transport_omitted_evidence_ids_path"] == (
+            "answer_brief.evidence_ledger.by_stage."
+            f"{stage}.transport_omitted_evidence_ids"
+        )
+        assert manifest["required_evidence_detail_path"] == (
+            f"answer_brief.stages.{stage}.evidence"
+        )
+
+        stage_check = completion["by_stage"][stage]
+        assert set(stage_check["required_evidence_ids"]) == returned_ids
+        assert set(stage_check["transport_omitted_evidence_ids"]) == omitted_ids
+        assert stage_check["required_direct_evidence_count"] == len(returned_ids)
+        assert stage_check["transport_omitted_count"] == len(omitted_ids)
+
+    assert completion["totals"]["transport_omitted_direct_evidence_count"] == sum(
+        returned["evidence_ledger"]["by_stage"][stage]["transport_omitted_count"]
         for stage in REQUESTED_STAGES
     )
 
@@ -874,6 +953,285 @@ def test_long_enumerated_speech_preserves_later_arguments_as_supplemental_excerp
     plenary_counts = brief["evidence_ledger"]["by_stage"]["plenary"]
     assert plenary_counts["supplemental_returned_count"] == len(supplements)
     assert plenary_counts["supplemental_transport_omitted_count"] == 0
+
+
+def test_answer_head_manifest_requires_every_stage_and_full_plenary_opposition() -> None:
+    payload = _doctor_now_payload()
+    opposition = next(item for item in payload["speeches"] if item["speech_id"] == "plenary-2")
+    opposition["text"] = _long_enumerated_opposition()
+
+    brief = build_answer_brief(payload, requested_stages=REQUESTED_STAGES)
+
+    assert list(brief)[:4] == [
+        "schema_version",
+        "synthesis_contract",
+        "mandatory_coverage",
+        "required_answer_sections",
+    ]
+    contract = brief["synthesis_contract"]
+    assert contract["synthesis_compliance_required"] is True
+    assert contract["one_named_entry_per_direct_evidence"] is True
+    assert contract["different_speakers_must_not_be_merged"] is True
+    assert contract["stage_summary_cannot_replace_speaker_detail"] is True
+    assert contract["do_not_reduce_substantive_speaker_entries_to_one_line"] is True
+    assert "two or more sentences" in contract["substantive_entry_detail_standard"]
+    assert contract["plenary_debate_must_be_a_separate_section"] is True
+    assert contract["self_check_returned_counts_before_final"] is True
+
+    mandatory = brief["mandatory_coverage"]
+    assert list(mandatory["stages"]) == list(REQUESTED_STAGES)
+    for stage in REQUESTED_STAGES:
+        stage_manifest = mandatory["stages"][stage]
+        assert stage_manifest["separate_heading_required"] is True
+        assert stage_manifest["direct_evidence_count"] == len(
+            _direct_evidence(brief["stages"][stage])
+        )
+    plenary = mandatory["stages"]["plenary"]
+    assert plenary["plenary_debate_must_not_be_omitted"] is True
+    lee = next(
+        item for item in plenary["required_evidence"] if item["evidence_id"] == "plenary-2"
+    )
+    assert lee["speaker"] == "이소영"
+    assert lee["required_argument_point_count"] == 3
+    supplemental_text = " ".join(
+        item["excerpt_preview"] for item in lee["supplemental_argument_previews"]
+    )
+    assert "공정거래위원회" in supplemental_text
+    assert "창업과 벤처투자" in supplemental_text
+    assert "처방약 재고" in supplemental_text
+    totals = mandatory["totals"]
+    assert contract["required_direct_evidence_count"] == totals["direct_evidence_count"]
+    assert contract["required_supplemental_argument_count"] == totals[
+        "supplemental_argument_count"
+    ]
+    assert contract["required_argument_point_count"] == totals[
+        "required_argument_point_count"
+    ]
+
+
+def test_generic_manifest_invariant_handles_zero_one_many_and_duplicate_speaker() -> None:
+    payload = _expanded_stage_payload(turns_per_stage=2, long_text=False)
+    payload["target_resolution"]["matched_alias"] = "합성 검증 법안"
+    payload["discussion_threads"] = []
+    subcommittee = next(
+        item for item in payload["speeches"] if item["meeting_type"] == "subcommittee"
+    )
+    standing = [
+        item for item in payload["speeches"] if item["meeting_type"] == "committee"
+    ]
+    standing[0]["speaker"] = standing[1]["speaker"] = "동일 발언자"
+    standing[0]["citation"]["speaker"] = standing[1]["citation"]["speaker"] = "동일 발언자"
+    standing[0]["text"] = _long_enumerated_opposition()
+    payload["speeches"] = [subcommittee, *standing]
+    payload["stage_coverage"]["stages"]["plenary"].update(
+        {
+            "state": "checked_no_matching_discussion",
+            "observed_candidate_count": 1,
+            "candidate_count": 1,
+            "checked_count": 1,
+            "matched_discussion_count": 0,
+            "failed_count": 0,
+            "pending_count": 0,
+        }
+    )
+
+    brief = build_answer_brief(payload, requested_stages=REQUESTED_STAGES)
+
+    expected_counts = {"subcommittee": 1, "standing_committee": 2, "plenary": 0}
+    for stage, expected_count in expected_counts.items():
+        direct = _direct_evidence(brief["stages"][stage])
+        manifest = brief["mandatory_coverage"]["stages"][stage]
+        manifest_rows = manifest["required_evidence"]
+        assert len(direct) == len(manifest_rows) == expected_count
+        assert {
+            (
+                str(row["evidence_id"]),
+                str(row["speaker"]),
+                str(row["citation"]["official_url"]),
+                str(row["citation"]["source_locator"]),
+            )
+            for row in manifest_rows
+        } == {
+            (
+                str(row["evidence_id"]),
+                str(row["speaker"]),
+                str(row["citation"]["official_url"]),
+                str(row["citation"]["source_locator"]),
+            )
+            for row in direct
+        }
+
+    standing_manifest = brief["mandatory_coverage"]["stages"]["standing_committee"]
+    assert standing_manifest["required_speakers"] == ["동일 발언자"]
+    assert len(standing_manifest["required_evidence"]) == 2
+    enumerated = next(
+        row
+        for row in standing_manifest["required_evidence"]
+        if row["supplemental_argument_previews"]
+    )
+    segment_kinds = [
+        item["segment_kind"] for item in enumerated["supplemental_argument_previews"]
+    ]
+    assert "argument_continuation" in segment_kinds
+    assert "enumerated_argument" in segment_kinds
+    assert enumerated["required_argument_point_count"] == (
+        1 + segment_kinds.count("enumerated_argument")
+    )
+    assert brief["synthesis_contract"][
+        "plenary_opposition_or_approval_debate_must_not_be_omitted"
+    ] is False
+    assert brief["synthesis_contract"]["verified_plenary_absence_must_be_reported"] is True
+
+
+def test_doctornow_release_gate_preserves_expected_speakers_arguments_and_outcomes() -> None:
+    payload = _doctor_now_payload()
+    urls = {
+        "subcommittee": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=55851",
+        "standing_committee": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=55861",
+        "plenary": "https://record.assembly.go.kr/assembly/viewer/minutes/download/pdf.do?id=57175",
+    }
+    payload["speeches"].extend(
+        [
+            _turn(
+                "sub-6",
+                "서명옥",
+                "위원",
+                "기존 사업자에게 소급 적용되는지, 경과기간에 소유·운영 관계를 분리하는지 묻습니다.",
+                meeting_id="meeting-sub",
+                meeting="법안심사제1소위원회",
+                date="2025-11-18",
+                meeting_type="subcommittee",
+                url=urls["subcommittee"],
+                page="p.24",
+            ),
+            _turn(
+                "sub-7",
+                "김미애",
+                "소위원장",
+                "세 원안을 위원회 대안으로 통합하고 시행일은 공포 후 1년으로 하여 가결합니다.",
+                meeting_id="meeting-sub",
+                meeting="법안심사제1소위원회",
+                date="2025-11-18",
+                meeting_type="subcommittee",
+                url=urls["subcommittee"],
+                page="p.25",
+            ),
+            _turn(
+                "committee-3",
+                "김미애",
+                "소위원장",
+                "김윤·김예지·백혜련안을 통합한 대안과 도매상 허가·특수관계 거래 제한을 보고합니다.",
+                meeting_id="meeting-committee",
+                meeting="보건복지위원회 전체회의",
+                date="2025-11-20",
+                meeting_type="committee",
+                url=urls["standing_committee"],
+                page="p.27",
+            ),
+            _turn(
+                "committee-4",
+                "김윤",
+                "위원",
+                (
+                    "비대면진료 제한법이 아니라 구매 유도와 검색 우선 노출을 막는 "
+                    "신종 리베이트 방지법입니다. 대안을 채택하고 원안 세 건은 "
+                    "본회의에 부의하지 않습니다."
+                ),
+                meeting_id="meeting-committee",
+                meeting="보건복지위원회 전체회의",
+                date="2025-11-20",
+                meeting_type="committee",
+                url=urls["standing_committee"],
+                page="p.30",
+            ),
+            _turn(
+                "plenary-3",
+                "조정식",
+                "의장",
+                "재석 178인 중 찬성 95인, 반대 34인, 기권 49인으로 가결되었음을 선포합니다.",
+                meeting_id="meeting-plenary",
+                meeting="제438회 제1차 본회의",
+                date="2026-08-20",
+                meeting_type="plenary",
+                url=urls["plenary"],
+                page="p.47",
+            ),
+        ]
+    )
+    opposition = next(item for item in payload["speeches"] if item["speech_id"] == "plenary-2")
+    opposition["text"] = _long_enumerated_opposition()
+    payload["answer_brief"] = build_answer_brief(payload, requested_stages=REQUESTED_STAGES)
+
+    result = enforce_bounded_response_budget(payload)
+    brief = result["answer_brief"]
+    expected_speakers = {
+        "subcommittee": {"이지민", "김미애", "이형훈", "김윤", "서영석", "서명옥"},
+        "standing_committee": {"김미애", "박희승", "정은경", "김윤"},
+        "plenary": {"이수진", "이소영", "조정식"},
+    }
+    for stage, speakers in expected_speakers.items():
+        direct = _direct_evidence(brief["stages"][stage])
+        assert speakers <= {str(item.get("speaker")) for item in direct}
+        assert brief["evidence_ledger"]["by_stage"][stage]["transport_omitted_count"] == 0
+
+    all_text = " ".join(
+        str(item.get("excerpt_verbatim") or "")
+        + " "
+        + " ".join(
+            str(extra.get("excerpt_verbatim") or "")
+            for extra in item.get("supplemental_excerpts") or []
+        )
+        for stage in REQUESTED_STAGES
+        for item in _direct_evidence(brief["stages"][stage])
+    )
+    for phrase in (
+        "우려만으로 사업 전체를 금지",
+        "의료법상 약국 추천",
+        "중소벤처기업부",
+        "영업·직업선택의 자유",
+        "입법조사처",
+        "공정거래위원회",
+        "창업과 벤처투자",
+        "처방약 재고",
+        "공포 후 1년",
+        "본회의에 부의하지",
+        "재석 178인",
+        "찬성 95인",
+        "반대 34인",
+        "기권 49인",
+    ):
+        assert phrase in all_text
+
+    serialized = json.dumps(result, ensure_ascii=False).encode("utf-8")
+    for phrase in (
+        "이소영",
+        "중소벤처기업부",
+        "공정거래위원회",
+        "창업과 벤처투자",
+        "처방약 재고",
+        "재석 178인",
+    ):
+        position = serialized.find(phrase.encode("utf-8"))
+        assert 0 <= position < 25_000
+
+
+def test_budget_preserves_raw_rows_not_represented_by_answer_brief() -> None:
+    payload = _doctor_now_payload()
+    brief = build_answer_brief(payload, requested_stages=REQUESTED_STAGES)
+    brief["stages"]["plenary"]["evidence"] = [
+        item
+        for item in brief["stages"]["plenary"]["evidence"]
+        if item.get("evidence_id") != "plenary-2"
+    ]
+    payload["speeches"].append({"speaker": "ID 없는 발언", "text": "보존되어야 합니다."})
+    payload["answer_brief"] = brief
+
+    result = enforce_bounded_response_budget(payload)
+
+    assert any(item.get("speech_id") == "plenary-2" for item in result["speeches"])
+    assert any(item.get("speaker") == "ID 없는 발언" for item in result["speeches"])
+    projection = result.get("duplicate_evidence_projection")
+    assert projection is None or projection["all_raw_evidence_ids_represented"] is False
 
 
 def test_default_128k_preserves_direct_rows_and_core_supplemental_arguments() -> None:

@@ -82,6 +82,22 @@ def test_structural_markers_are_quarantined_but_roleless_personal_name_is_preser
     }
 
 
+def test_speaker_shifted_entirely_into_inline_text_is_recovered_from_repetition():
+    source = """◯   소위원장 김미애법안심사제1소위원장 김미애 위원입니다.
+우리 법안심사제1소위원회는 49건의 법안을 심사했습니다.
+◯위원장 박주민  수고하셨습니다.
+"""
+
+    result = parse_transcript(source)
+
+    assert [(speech.speaker_name, speech.speaker_role) for speech in result.speeches] == [
+        ("김미애", "소위원장"),
+        ("박주민", "위원장"),
+    ]
+    assert "49건의 법안" in result.speeches[0].text
+    assert result.failures == []
+
+
 def test_next_bill_agenda_heading_is_not_appended_to_previous_speech():
     source = """1. 약사법 일부개정법률안 (의안번호 2205513)
 ○김윤 위원  첫 의안에 대한 질문입니다.

@@ -5,6 +5,7 @@ from typing import Any
 
 from kasm.adapters.korea.bills import BILL_DATASET, BILL_STATUS_DATASET
 from kasm.adapters.korea.client import ApiPage
+from kasm.adapters.korea.parser import PARSER_VERSION
 from kasm.adapters.korea.sources import DATASET_BY_SOURCE, MeetingSource
 from kasm.live import (
     LiveAssemblyServices,
@@ -332,6 +333,8 @@ class AiBasicActClient:
 class ManyIncidentMeetingsClient(IncidentClient):
     """Expose more exact agenda candidates than one bounded targeted window."""
 
+    committee_candidate_count = 7
+
     def fetch_page(
         self,
         dataset: str,
@@ -360,7 +363,7 @@ class ManyIncidentMeetingsClient(IncidentClient):
                     "2205513",
                     f"many-{index}",
                 )
-                for index in range(7)
+                for index in range(self.committee_candidate_count)
             )
             return ApiPage(
                 dataset,
@@ -378,6 +381,10 @@ class ManyIncidentMeetingsClient(IncidentClient):
             parameters=parameters,
             refresh=refresh,
         )
+
+
+class FourIncidentMeetingsClient(ManyIncidentMeetingsClient):
+    committee_candidate_count = 3
 
 
 def _incident_meeting_row(
@@ -1012,7 +1019,7 @@ def test_realistic_measure_segments_keep_target_exchanges_and_stage_outcomes() -
         row(
             subcommittee,
             182,
-            "식약처 예산과 심평원 예산을 반영하면 됩니다.",
+            "의료기기 판매업자의 의약품 도매상 업무를 함께 검토해야 합니다.",
             speaker="김선민",
         ),
         row(
@@ -1080,7 +1087,14 @@ def test_realistic_measure_segments_keep_target_exchanges_and_stage_outcomes() -
             speaker="조정식",
             role="의장",
         ),
-        row(plenary, 36, "의사일정 제50항을 상정합니다.", speaker="조정식", role="의장"),
+        row(
+            plenary,
+            36,
+            "약사법 일부개정법률안(대안) 투표 의원(178인) 찬성 의원(95인) "
+            "반대 의원(34인) 기권 의원(49인) 명단입니다.",
+            speaker="주얼리산업",
+        ),
+        row(plenary, 37, "의사일정 제50항을 상정합니다.", speaker="조정식", role="의장"),
     ]
     plenary_segments = _measure_discussion_segment_rows(
         plenary_rows,
@@ -1094,6 +1108,7 @@ def test_realistic_measure_segments_keep_target_exchanges_and_stage_outcomes() -
         int(speech_id.rsplit(":", 1)[1]) for speech_id in plenary_segments
     } == {31, 32, 33, 34, 35}
     assert plenary_segments[f"{plenary}:35"] == "outcome"
+    assert f"{plenary}:36" not in plenary_segments
 
 
 def test_target_outcome_text_is_scoped_to_the_relevant_grouped_vote() -> None:
@@ -1189,6 +1204,44 @@ def test_targeted_candidates_continue_until_exact_candidate_scope_is_checked(
     assert len(synced_urls) == 8
 
 
+def test_named_measure_checks_all_four_candidates_despite_generic_limit_two(tmp_path) -> None:
+    database = Database(tmp_path / "incident-four-candidates.sqlite3")
+    database.initialize()
+    service = LiveAssemblyServices(
+        database,
+        client=FourIncidentMeetingsClient(),  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+        max_minutes_per_request=2,
+        now=lambda: datetime(2026, 8, 23, tzinfo=UTC),
+    )
+    synced: list[str] = []
+
+    def sync_candidate(row: dict[str, Any]):
+        synced.append(str(row["PDF_LINK_URL"]))
+        bill_no = str(row["BILL_NO"])
+        return service.pipeline.ingestor.ingest(
+            row,
+            (
+                f"1. 약사법 일부개정법률안 (의안번호 {bill_no})\n"
+                "○김윤 위원  비대면진료 플랫폼과 의약품 도매상 이해충돌을 논의합니다."
+            ),
+            source_hash=f"fixture-four-{row['CONF_ID']}",
+            source_url=str(row["PDF_LINK_URL"]),
+        )
+
+    service.pipeline.sync = sync_candidate  # type: ignore[method-assign]
+
+    result = service.explore_issue(INCIDENT_QUERY, limit=20)
+
+    assert service.last_refresh["meeting_candidates"] == 4
+    assert service.last_refresh["bounded_core_candidates"] == 4
+    assert service.last_refresh["checked_candidate_count"] == 4
+    assert service.last_refresh["unselected_candidate_count"] == 0
+    assert service.last_refresh["has_more"] is False
+    assert len(synced) == 4
+    assert result["research_pagination"]["next_minutes_offset"] is None
+
+
 def test_warm_targeted_repeat_reuses_current_parser_rows(tmp_path) -> None:
     database = Database(tmp_path / "incident-warm-reuse.sqlite3")
     database.initialize()
@@ -1223,6 +1276,24 @@ def test_warm_targeted_repeat_reuses_current_parser_rows(tmp_path) -> None:
 
     assert sync_count == 3
     assert repeated["live_refresh"]["minutes_cache_reused"] == 3
+
+    database.connection.execute(
+        "UPDATE speeches SET parser_version = ?",
+        ("korea-rules-v5",),
+    )
+    database.connection.commit()
+    reparsed = service.explore_issue(INCIDENT_QUERY, limit=20)
+
+    assert PARSER_VERSION == "korea-rules-v6"
+    assert sync_count == 6
+    assert reparsed["live_refresh"]["minutes_cache_reused"] == 0
+    assert reparsed["live_refresh"]["minutes_ingested"] == 3
+    assert {
+        row["parser_version"]
+        for row in database.connection.execute(
+            "SELECT DISTINCT parser_version FROM speeches"
+        ).fetchall()
+    } == {PARSER_VERSION}
 
 
 def test_incident_alias_stops_starting_work_after_aggregate_deadline(tmp_path) -> None:

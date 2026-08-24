@@ -538,7 +538,7 @@ class LiveAssemblyServices:
             agenda = str(row.get("agenda") or "")
             text = str(row.get("text") or "")
             speaker_name = str(row.get("speaker_name") or "").strip()
-            if _is_structural_speaker_label(speaker_name):
+            if _is_structural_speaker_label(speaker_name) or _is_vote_roster_appendix(text):
                 continue
             haystack = f"{agenda}\n{text}"
             observed_numbers = set(_EXACT_BILL_NUMBER.findall(haystack))
@@ -1362,11 +1362,11 @@ class LiveAssemblyServices:
         attempted = 0
         effective_minutes_limit = self.max_minutes_per_request
         if measure_hint is not None:
-            stage_count = len(tuple(dict.fromkeys(requested_stage_names))) or 3
-            targeted_limit = min(
-                _TARGETED_MINUTES_LIMIT,
-                max(self.max_minutes_per_request, stage_count),
-            )
+            # A named-measure search normally yields only a handful of milestone
+            # records.  Check every candidate when there are at most six so a
+            # fourth relevant meeting is not left pending merely because the
+            # deployment's generic per-request default is three.
+            targeted_limit = min(_TARGETED_MINUTES_LIMIT, len(candidates))
             effective_minutes_limit = targeted_limit
             ordered_candidates = _stage_balanced_meeting_rows(
                 candidates,
@@ -2174,6 +2174,19 @@ def _scope_target_measure_turn_text(
     return scoped or text
 
 
+def _is_vote_roster_appendix(text: str) -> bool:
+    """Identify roll-call name appendices without hiding the chair's result."""
+
+    compact = re.sub(r"\s+", "", text)
+    if re.search(r"투표의원\([^)]*\)", compact) is None:
+        return False
+    category_count = sum(
+        re.search(rf"{category}의원\([^)]*\)", compact) is not None
+        for category in ("찬성", "반대", "기권")
+    )
+    return category_count >= 2
+
+
 def _measure_discussion_segment_rows(
     rows: Iterable[Any],
     *,
@@ -2259,6 +2272,8 @@ def _measure_discussion_segment_rows(
         for position, row in enumerate(ordered):
             speech_id = str(row.get("id") or "")
             text = str(row.get("text") or "")
+            if _is_vote_roster_appendix(text):
+                continue
             agenda = str(row.get("agenda") or "")
             compact = re.sub(r"\s+", "", f"{agenda}\n{text}").casefold()
             text_compact = re.sub(r"\s+", "", text).casefold()
@@ -2316,6 +2331,16 @@ def _measure_discussion_segment_rows(
             hint_specific_anchor = formal_title_anchor or bool(
                 evidence_anchor_hits and not unrelated_named_measure
             )
+            if hint.key == "doctor_now_pharmaceutical_wholesale_restriction":
+                # ``의약품도매상`` alone also appears in unrelated provisions.
+                # Require both the platform side and the distribution/rebate
+                # side unless a formal title or exact identifier bounds it.
+                hint_specific_anchor = formal_title_anchor or (
+                    bool(evidence_anchor_hits)
+                    and platform_anchor
+                    and (wholesale_anchor or rebate_anchor)
+                    and not unrelated_named_measure
+                )
             if unrelated_named_measure:
                 agenda_boundaries.add(position)
             referenced_agenda_numbers = _referenced_agenda_numbers(f"{agenda}\n{text}")
@@ -2329,9 +2354,16 @@ def _measure_discussion_segment_rows(
             outcome = any(
                 term in text_compact for term in ("투표결과", "가결되었음을선포", "대안으로채택")
             )
-            safe_specific_anchor = (
-                alias_anchor or concept_count >= 2 or hint_specific_anchor
-            ) and not observed_numbers.difference(exact_numbers)
+            if hint.key == "doctor_now_pharmaceutical_wholesale_restriction":
+                safe_specific_anchor = (
+                    alias_anchor
+                    or (platform_anchor and (wholesale_anchor or rebate_anchor))
+                    or formal_title_anchor
+                ) and not observed_numbers.difference(exact_numbers)
+            else:
+                safe_specific_anchor = (
+                    alias_anchor or concept_count >= 2 or hint_specific_anchor
+                ) and not observed_numbers.difference(exact_numbers)
             target_procedure_anchor = target_agenda_reference and procedural
             alternative_outcome_anchor = alternative_title_anchor and outcome
             if not (

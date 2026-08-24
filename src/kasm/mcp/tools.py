@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from kasm.core.answer_brief import build_answer_brief
+from kasm.core.answer_brief import build_answer_brief, build_synthesis_completion_check
 from kasm.core.quality import issue_quality
 from kasm.core.response_budget import enforce_bounded_response_budget
 from kasm.research.request_scope import (
@@ -983,7 +983,13 @@ class KasmTools:
         committees: list[str] | None = None,
         exhaustive: bool = False,
     ) -> dict[str, Any]:
-        """Return a bounded live answer across bills, status, committees and discussions.
+        """Return one detailed, answer-ready review across every requested legislative stage.
+
+        필수: 이 도구는 한 번만 호출하고 ``answer_brief.mandatory_coverage``를 최종 답변의
+        체크리스트로 사용하세요. 소위·상임위·본회의를 각각 독립 절로 쓰고 모든
+        ``direct_claim_evidence``를 발언자별 주장·이유·답변까지 반영해야 합니다. 본회의
+        찬반토론과 같은 발언의 ``supplemental_excerpts``를 생략하거나 짧은 발언자 목록으로
+        대체하면 미완성 답변입니다. 답변 직전 단계별 반환 건수와 후반 논거 수를 대조하세요.
 
         상위 N건, ``5개 정도``, 중요 법안 요약처럼 범위가 제한된 일반 질문의 기본
         도구입니다. ``limit``는 사용자가 요구한 결과 수를 그대로 반영하세요. 전건·전수·
@@ -1164,6 +1170,8 @@ class KasmTools:
                 "scope_inventory.bill_candidates.items[].official_url",
             ],
             "discussion_url_fields": [
+                "answer_brief.mandatory_coverage.stages[*].required_evidence[*].citation",
+                "answer_brief.stages[*].evidence[*].citation",
                 "speeches[].citation.official_url",
                 "discussion_threads[].turns[].citation.official_url",
                 "scope_inventory.meeting_candidates.items[].official_url",
@@ -1218,12 +1226,17 @@ class KasmTools:
                 "열거된 논거를 앞부분 하나로 축약하지 마세요."
             ),
         }
+        _attach_synthesis_completion_check(payload)
+        _order_answer_first(payload)
         if self.enforce_transport_budget:
+            _project_duplicate_evidence_for_answer_transport(payload)
             # Quality describes the full checked retrieval.  The transport
             # budget separately records which arrays were shortened; do not
             # recompute retrieval quality from an already truncated envelope
             # or pass the same evidence through a second lossy budget cycle.
-            return enforce_bounded_response_budget(payload)
+            result = enforce_bounded_response_budget(payload)
+            _order_answer_first(result)
+            return result
         return payload
 
     def _research_backend(self) -> ResearchBackend:
@@ -1473,6 +1486,169 @@ def _optional_iso_date(value: str | None, field_name: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"{field_name} must use YYYY-MM-DD") from exc
+
+
+def _attach_synthesis_completion_check(payload: dict[str, Any]) -> None:
+    """Make final-answer coverage counts visible before the long evidence body."""
+
+    action_value = payload.get("next_action")
+    if not isinstance(action_value, dict) or action_value.get("tool") is not None:
+        return
+    brief = payload.get("answer_brief")
+    if not isinstance(brief, Mapping):
+        return
+    completion = build_synthesis_completion_check(brief)
+    action_value["synthesis_completion_check"] = completion
+    by_stage = completion["by_stage"]
+    plenary_completion = by_stage.get("plenary")
+    plenary_required = (
+        int(plenary_completion.get("required_direct_evidence_count") or 0) > 0
+        if isinstance(plenary_completion, Mapping)
+        else False
+    )
+    plenary_instruction_ko = (
+        "반환된 본회의 찬반토론을 생략하면 안 됩니다. "
+        if plenary_required
+        else "본회의 직접 근거가 없으면 확인 상태와 한계를 명시하세요. "
+    )
+    plenary_instruction_en = (
+        "Never omit returned plenary approval or opposition debate. "
+        if plenary_required
+        else "If no direct plenary evidence was returned, state its checked status and limits. "
+    )
+    action_value["instruction_ko"] = (
+        "반드시 단계별 독립 절과 발언자별 상세 항목을 작성한 뒤 "
+        "synthesis_completion_check의 근거 ID·논거 수를 최종 답변과 대조하세요. "
+        + plenary_instruction_ko
+        + str(action_value.get("instruction_ko") or "")
+    )
+    action_value["instruction_en"] = (
+        "Write a separate section for every stage and a detailed named entry for every direct "
+        "evidence item, then reconcile all IDs and argument counts in synthesis_completion_check. "
+        + plenary_instruction_en
+        + str(action_value.get("instruction_en") or "")
+    )
+
+
+def _project_duplicate_evidence_for_answer_transport(payload: dict[str, Any]) -> None:
+    """Drop only raw bodies that are fully duplicated in the answer brief.
+
+    The legacy arrays were previously serialized before ``answer_brief`` and
+    consumed tens of kilobytes without adding evidence.  Keep them whenever an
+    ID is not represented by the brief, so this optimization cannot silently
+    reduce coverage.
+    """
+
+    brief = payload.get("answer_brief")
+    if not isinstance(brief, Mapping):
+        return
+    measure = brief.get("measure")
+    if not isinstance(measure, Mapping) or not measure.get("primary_vehicle_bill_no"):
+        return
+    raw_stages = brief.get("stages")
+    stages = raw_stages if isinstance(raw_stages, Mapping) else {}
+    represented_ids = {
+        str(item.get("speech_id") or item.get("evidence_id") or "")
+        for raw_stage in stages.values()
+        if isinstance(raw_stage, Mapping)
+        for item in (raw_stage.get("evidence") or [])
+        if isinstance(item, Mapping) and (item.get("speech_id") or item.get("evidence_id"))
+    }
+    raw_speeches = payload.get("speeches")
+    speeches = raw_speeches if isinstance(raw_speeches, list) else []
+    speech_ids = {
+        str(item.get("speech_id") or "")
+        for item in speeches
+        if isinstance(item, Mapping) and item.get("speech_id")
+    }
+    raw_threads = payload.get("discussion_threads")
+    threads = raw_threads if isinstance(raw_threads, list) else []
+    thread_turn_ids = {
+        str(turn.get("speech_id") or "")
+        for thread in threads
+        if isinstance(thread, Mapping)
+        for turn in (thread.get("turns") or [])
+        if isinstance(turn, Mapping) and turn.get("speech_id")
+    }
+    speech_rows_identifiable = all(
+        isinstance(item, Mapping) and bool(item.get("speech_id")) for item in speeches
+    )
+    thread_rows_identifiable = all(
+        isinstance(thread, Mapping)
+        and isinstance(thread.get("turns"), list)
+        and all(
+            isinstance(turn, Mapping) and bool(turn.get("speech_id"))
+            for turn in thread.get("turns", [])
+        )
+        for thread in threads
+    )
+    speech_bodies_duplicate = (
+        bool(speeches) and speech_rows_identifiable and speech_ids <= represented_ids
+    )
+    thread_bodies_duplicate = (
+        bool(threads) and thread_rows_identifiable and thread_turn_ids <= represented_ids
+    )
+    if speech_bodies_duplicate:
+        payload.pop("speeches", None)
+    if thread_bodies_duplicate:
+        payload.pop("discussion_threads", None)
+    payload["duplicate_evidence_projection"] = {
+        "authoritative_body": "answer_brief.stages[*].evidence",
+        "reason": "raw evidence bodies duplicate the answer-ready cited projection",
+        "speeches_observed_count": len(speeches),
+        "speech_bodies_omitted_as_duplicate": speech_bodies_duplicate,
+        "discussion_threads_observed_count": len(threads),
+        "discussion_turns_observed_count": len(thread_turn_ids),
+        "discussion_bodies_omitted_as_duplicate": thread_bodies_duplicate,
+        "all_raw_evidence_ids_represented": (speech_ids | thread_turn_ids) <= represented_ids,
+    }
+
+
+def _order_answer_first(payload: dict[str, Any]) -> None:
+    """Place synthesis instructions and balanced evidence before legacy metadata."""
+
+    brief_value = payload.get("answer_brief")
+    if isinstance(brief_value, dict):
+        brief_priority = (
+            "schema_version",
+            "synthesis_contract",
+            "mandatory_coverage",
+            "required_answer_sections",
+            "measure",
+            "scope",
+            "processing",
+            "stages",
+            "participant_index",
+            "evidence_ledger",
+            "comparison_readiness",
+            "gaps",
+            "transport_compact_mandatory_coverage",
+        )
+        ordered_brief = {
+            name: brief_value[name] for name in brief_priority if name in brief_value
+        }
+        ordered_brief.update(
+            {name: value for name, value in brief_value.items() if name not in ordered_brief}
+        )
+        brief_value.clear()
+        brief_value.update(ordered_brief)
+
+    priority = (
+        "next_action",
+        "answer_scope",
+        "answer_brief",
+        "scoped_synthesis_allowed",
+        "duplicate_evidence_projection",
+        "target_resolution",
+        "stage_coverage",
+        "research_pagination",
+        "query",
+        "evidence_query",
+    )
+    ordered = {name: payload[name] for name in priority if name in payload}
+    ordered.update({name: value for name, value in payload.items() if name not in ordered})
+    payload.clear()
+    payload.update(ordered)
 
 
 def _next_action(

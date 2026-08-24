@@ -8,7 +8,10 @@ from dataclasses import dataclass, field
 
 from .normalizer import normalize_name, normalize_organization, normalize_role, normalize_text
 
-PARSER_VERSION = "korea-rules-v5"
+# Increment whenever attribution-affecting parsing rules change.  Cache reuse
+# is keyed by this value; keeping v5 after the role-layout fixes caused hosted
+# requests to reuse stale speakers and miss otherwise recoverable turns.
+PARSER_VERSION = "korea-rules-v6"
 
 # Real transcripts most commonly use ○ or ◯, with optional spaces and a colon.
 _BULLET_MARKER = re.compile(
@@ -66,6 +69,11 @@ _NOISY_NAME_ROLE = re.compile(
 )
 _NOISY_ROLE_NAME = re.compile(
     rf"^(?P<role>{_ROLE_PATTERN})(?P<name>[가-힣·]{{2,4}})[가-힣?!]{{1,12}}$"
+)
+_INLINE_REPEATED_ROLE_SPEAKER = re.compile(
+    rf"^(?P<role>{_ROLE_PATTERN})\s*(?P<name>[가-힣·]{{2,4}})"
+    rf"(?P<body>.*?(?:{_ROLE_PATTERN})\s*(?P=name)(?:\s|위원|의원|입니다).*)$",
+    re.DOTALL,
 )
 
 # Minutes PDFs sometimes render section headings with the same bullet glyph used
@@ -237,6 +245,11 @@ class KoreaTranscriptParser:
             body = normalize_text(inline + source[marker.end() : body_end])
             raw_label = marker.group("label")
             name, role, organization = split_speaker_label(raw_label)
+            if not name:
+                recovered = _INLINE_REPEATED_ROLE_SPEAKER.match(normalize_text(inline))
+                if recovered is not None:
+                    name = normalize_name(recovered["name"])
+                    role = normalize_role(recovered["role"])
             locator = f"{locator_prefix}:{marker.start()}-{end}"
             if not name:
                 result.failures.append(

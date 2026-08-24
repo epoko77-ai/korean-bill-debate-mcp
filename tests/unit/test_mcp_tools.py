@@ -387,9 +387,112 @@ def test_incident_start_research_call_executes_one_bounded_call_without_recursio
     assert result["answer_brief"]["synthesis_contract"][
         "cover_every_supplemental_excerpt"
     ] is True
+    assert list(result)[:3] == ["next_action", "answer_scope", "answer_brief"]
+    assert list(result["answer_brief"])[:4] == [
+        "schema_version",
+        "synthesis_contract",
+        "mandatory_coverage",
+        "required_answer_sections",
+    ]
+    completion = result["next_action"]["synthesis_completion_check"]
+    assert completion["must_pass_before_final_answer"] is True
+    assert set(completion["by_stage"]) == {
+        "subcommittee",
+        "standing_committee",
+        "plenary",
+    }
+    assert "본회의 직접 근거가 없으면 확인 상태와 한계" in result["next_action"][
+        "instruction_ko"
+    ]
     actual_bytes = len(json.dumps(result, ensure_ascii=False, default=str).encode("utf-8"))
     assert actual_bytes == result["response_budget"]["final_bytes"]
     assert actual_bytes <= result["response_budget"]["max_bytes"]
+
+
+def test_explore_issue_description_frontloads_detailed_coverage_contract() -> None:
+    description = KasmTools.explore_issue.__doc__ or ""
+    head = description[:900]
+
+    assert "mandatory_coverage" in head
+    assert "소위·상임위·본회의" in head
+    assert "supplemental_excerpts" in head
+    assert "미완성 답변" in head
+
+
+def test_budget_disabled_named_measure_preserves_legacy_raw_evidence_arrays() -> None:
+    class NamedCatalog(FakeRepository):
+        def explore_issue(self, query: str, **options: Any) -> dict[str, Any]:
+            del query, options
+            turn = {
+                "speech_id": "plenary-lee",
+                "speaker": "이소영",
+                "speaker_role": "의원",
+                "text": "우려만으로 사업을 전면 금지해서는 안 됩니다.",
+                "meeting_id": "plenary-meeting",
+                "meeting": "제438회 제1차 본회의",
+                "meeting_type": "plenary",
+                "date": "2026-08-20",
+                "citation": {
+                    "official_url": "https://record.assembly.go.kr/example.pdf",
+                    "source_locator": "p.44",
+                },
+                "attribution": {
+                    "state": "exact_bill_number_in_turn_or_agenda",
+                    "bill_numbers": ["2214609"],
+                },
+            }
+            return {
+                "target_resolution": {
+                    "primary_vehicle_bill_no": "2214609",
+                    "measure_family": [
+                        {
+                            "bill_no": "2214609",
+                            "role": "committee_alternative_primary_vehicle",
+                        }
+                    ],
+                    "live_verified_bill_numbers": ["2214609"],
+                    "meeting_verified_bill_numbers": ["2214609"],
+                    "official_bill_verified": True,
+                },
+                "speeches": [turn],
+                "discussion_threads": [
+                    {
+                        "meeting_id": "plenary-meeting",
+                        "meeting_type": "plenary",
+                        "turns": [turn],
+                    }
+                ],
+                "stage_coverage": {
+                    "exact_measure_check": True,
+                    "requested_stages": ["plenary"],
+                    "stages": {
+                        "plenary": {
+                            "state": "discussion_found",
+                            "candidate_count": 1,
+                            "checked_count": 1,
+                            "failed_count": 0,
+                            "pending_count": 0,
+                        }
+                    },
+                },
+                "research_pagination": {"complete": True},
+            }
+
+    catalog = NamedCatalog()
+    tools = KasmTools(
+        ServiceContext(
+            search=catalog,
+            repository=catalog,
+            catalog=catalog,
+        ),
+        enforce_transport_budget=False,
+    )
+
+    result = tools.explore_issue("닥터나우 금지법 본회의 논의를 정리해줘")
+
+    assert [item["speech_id"] for item in result["speeches"]] == ["plenary-lee"]
+    assert result["discussion_threads"][0]["turns"][0]["speech_id"] == "plenary-lee"
+    assert "duplicate_evidence_projection" not in result
 
 
 def test_explore_issue_uses_bounded_live_workflow_and_honors_limit() -> None:

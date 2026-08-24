@@ -22,6 +22,8 @@ _DIRECT_EXCERPT_BYTES = 2400
 _CONTEXT_EXCERPT_BYTES = 800
 _SUPPLEMENTAL_EXCERPT_BYTES = 1800
 _MAX_SUPPLEMENTAL_EXCERPTS = 4
+_MANDATORY_PREVIEW_BYTES = 720
+_MANDATORY_SUPPLEMENTAL_PREVIEW_BYTES = 960
 _MIN_SUBSTANTIVE_EXCERPT_BYTES = 450
 _MAX_EVIDENCE_PER_STAGE = 16
 _ARGUMENT_MARKER = re.compile(r"(?m)(첫째|첫\s*번째|둘째|두\s*번째|셋째|세\s*번째|마지막으로)")
@@ -137,7 +139,12 @@ def build_answer_brief(
             "omitted_count": omitted_count,
             "selected_before_transport_count": returned_count,
             "selection_omitted_count": omitted_count,
+            "selection_omitted_evidence_ids": sorted(
+                discovered_ids - returned_direct_ids
+            ),
             "transport_omitted_count": 0,
+            "transport_omitted_evidence_ids": [],
+            "transport_omitted_evidence": [],
             "supplemental_selected_before_transport_count": supplemental_selected,
             "supplemental_returned_count": supplemental_returned,
             "supplemental_transport_omitted_count": max(
@@ -227,8 +234,15 @@ def build_answer_brief(
                 "reason": "bounded_inventory_projection",
             }
         )
+    # Keep the instructions and a stage-balanced evidence manifest before the
+    # full detail.  Some MCP clients display or attend to only an initial slice
+    # of a large tool result; putting the plenary requirements after all
+    # subcommittee excerpts made a complete retrieval look like a short answer.
     brief = {
         "schema_version": "answer-brief-v1",
+        "synthesis_contract": _synthesis_contract(),
+        "mandatory_coverage": {},
+        "required_answer_sections": _required_answer_sections(),
         "measure": measure,
         "scope": {
             "mode": str(payload.get("research_mode") or "bounded_live"),
@@ -261,32 +275,6 @@ def build_answer_brief(
         },
         "comparison_readiness": {},
         "gaps": gaps,
-        "required_answer_sections": _required_answer_sections(),
-        "synthesis_contract": {
-            "primary_input": "answer_brief.stages[*].evidence",
-            "cover_every_direct_evidence": True,
-            "cover_every_supplemental_excerpt": True,
-            "supplemental_excerpts_are_continuations_of_parent_evidence": True,
-            "do_not_count_supplemental_excerpts_as_additional_turns": True,
-            "group_only_genuinely_redundant_arguments": True,
-            "allow_stance_inference": False,
-            "allow_vote_motive_inference": False,
-            "separate_actor_types": [
-                "legislator",
-                "government",
-                "committee_staff_or_expert",
-                "other",
-            ],
-            "claim_pattern": ["claim", "reason", "response_or_rebuttal", "outcome"],
-            "claim_pattern_only_when_supported": True,
-            "citation_required_per_factual_claim": True,
-            "require_official_citations": True,
-            "official_url_and_locator_required": True,
-            "context_only_evidence_cannot_support_independent_claim": True,
-            "distinguish_record_absence_from_unchecked_or_failed": True,
-            "distinguish_official_fact_from_analysis": True,
-            "bounded_scope_disclosure_belongs_in_limitations_not_in_place_of_answer": True,
-        },
     }
     return reconcile_answer_brief(brief)
 
@@ -372,6 +360,24 @@ def reconcile_answer_brief(brief: dict[str, Any]) -> dict[str, Any]:
             checked,
             _integer(counts.get("discovered_count"), fallback=checked),
         )
+        selection_omitted_ids = list(
+            dict.fromkeys(_string_sequence(counts.get("selection_omitted_evidence_ids")))
+        )
+        transport_omitted_records: list[dict[str, Any]] = []
+        seen_transport_ids: set[str] = set()
+        for record in _sequence_of_mappings(counts.get("transport_omitted_evidence")):
+            evidence_id = str(record.get("evidence_id") or "").strip()
+            if not evidence_id or evidence_id in seen_transport_ids:
+                continue
+            seen_transport_ids.add(evidence_id)
+            transport_omitted_records.append(record)
+        transport_omitted_ids = [
+            str(record.get("evidence_id")) for record in transport_omitted_records
+        ]
+        for evidence_id in _string_sequence(counts.get("transport_omitted_evidence_ids")):
+            if evidence_id and evidence_id not in seen_transport_ids:
+                seen_transport_ids.add(evidence_id)
+                transport_omitted_ids.append(evidence_id)
         counts.update(
             {
                 "discovered_count": discovered,
@@ -380,7 +386,13 @@ def reconcile_answer_brief(brief: dict[str, Any]) -> dict[str, Any]:
                 "omitted_count": max(0, discovered - len(direct_ids)),
                 "selected_before_transport_count": selected_before_transport,
                 "selection_omitted_count": max(0, discovered - selected_before_transport),
-                "transport_omitted_count": max(0, selected_before_transport - len(direct_ids)),
+                "selection_omitted_evidence_ids": selection_omitted_ids,
+                "transport_omitted_count": max(
+                    len(transport_omitted_ids),
+                    selected_before_transport - len(direct_ids),
+                ),
+                "transport_omitted_evidence_ids": transport_omitted_ids,
+                "transport_omitted_evidence": transport_omitted_records,
             }
         )
         supplemental_selected = max(
@@ -593,7 +605,333 @@ def reconcile_answer_brief(brief: dict[str, Any]) -> dict[str, Any]:
         ),
         exact_measure_check=scope.get("exact_measure_check") is True,
     )
+    mandatory = _mandatory_coverage(
+        stages,
+        requested=requested,
+        force_compact=brief.get("transport_compact_mandatory_coverage") is True,
+    )
+    brief["mandatory_coverage"] = mandatory
+    raw_contract = brief.get("synthesis_contract")
+    contract = raw_contract if isinstance(raw_contract, dict) else _synthesis_contract()
+    totals = _mapping(mandatory.get("totals"))
+    mandatory_stages = _mapping(mandatory.get("stages"))
+    plenary_manifest = _mapping(mandatory_stages.get("plenary"))
+    plenary_requested = "plenary" in requested
+    plenary_direct_count = _integer(
+        plenary_manifest.get("direct_evidence_count"), fallback=0
+    )
+    contract.update(
+        {
+            "plenary_debate_must_be_a_separate_section": plenary_requested,
+            "plenary_opposition_or_approval_debate_must_not_be_omitted": (
+                plenary_requested and plenary_direct_count > 0
+            ),
+            "verified_plenary_absence_must_be_reported": (
+                plenary_requested and plenary_direct_count == 0
+            ),
+            "required_direct_evidence_count": _integer(
+                totals.get("direct_evidence_count"), fallback=0
+            ),
+            "required_supplemental_argument_count": _integer(
+                totals.get("supplemental_argument_count"), fallback=0
+            ),
+            "required_argument_point_count": _integer(
+                totals.get("required_argument_point_count"), fallback=0
+            ),
+        }
+    )
+    brief["synthesis_contract"] = contract
     return brief
+
+
+def _synthesis_contract() -> dict[str, Any]:
+    """Return an explicit, mechanically checkable final-answer contract."""
+
+    return {
+        "primary_input": "answer_brief.mandatory_coverage then answer_brief.stages[*].evidence",
+        "synthesis_compliance_required": True,
+        "cover_every_requested_stage": True,
+        "cover_every_direct_evidence": True,
+        "cover_every_supplemental_excerpt": True,
+        "one_named_entry_per_direct_evidence": True,
+        "different_speakers_must_not_be_merged": True,
+        "stage_summary_cannot_replace_speaker_detail": True,
+        "do_not_reduce_substantive_speaker_entries_to_one_line": True,
+        "substantive_entry_detail_standard": (
+            "Explain the claim and every supported reason, response, or outcome in normally "
+            "two or more sentences; procedural-only evidence may be concise."
+        ),
+        "length_policy": "coverage_driven_no_padding_and_no_omission_for_brevity",
+        "plenary_debate_must_be_a_separate_section": True,
+        "plenary_opposition_or_approval_debate_must_not_be_omitted": False,
+        "verified_plenary_absence_must_be_reported": False,
+        "minimum_argument_points_per_evidence": (
+            "one primary point plus each non-continuation supplemental argument; "
+            "merge argument_continuation into its primary point"
+        ),
+        "self_check_returned_counts_before_final": True,
+        "each_evidence_id_must_be_traceable_by_speaker_claim_and_citation": True,
+        "if_output_limit_prevents_compliance_disclose_incomplete_instead_of_omitting": True,
+        "supplemental_excerpts_belong_to_parent_evidence": True,
+        "do_not_count_supplemental_excerpts_as_additional_turns": True,
+        "group_only_genuinely_redundant_arguments": True,
+        "allow_stance_inference": False,
+        "allow_vote_motive_inference": False,
+        "separate_actor_types": [
+            "legislator",
+            "government",
+            "committee_staff_or_expert",
+            "other",
+        ],
+        "claim_pattern": ["claim", "reason", "response_or_rebuttal", "outcome"],
+        "claim_pattern_only_when_supported": True,
+        "citation_required_per_factual_claim": True,
+        "require_official_citations": True,
+        "official_url_and_locator_required": True,
+        "context_only_evidence_cannot_support_independent_claim": True,
+        "distinguish_record_absence_from_unchecked_or_failed": True,
+        "distinguish_official_fact_from_analysis": True,
+        "bounded_scope_disclosure_belongs_in_limitations_not_in_place_of_answer": True,
+    }
+
+
+def _mandatory_coverage(
+    stages: Mapping[str, Any],
+    *,
+    requested: list[str],
+    force_compact: bool = False,
+) -> dict[str, Any]:
+    """Put a balanced, cited checklist for every stage near the response head.
+
+    The full verbatim excerpts remain in ``stages``.  These shorter previews
+    ensure that a client which only attends to the beginning still sees every
+    required speaker and the later enumerated points of a long plenary speech.
+    No policy claim is generated here; every preview is extractive.
+    """
+
+    direct_count = sum(
+        item.get("evidence_use") == "direct_claim_evidence"
+        for stage in stages.values()
+        for item in _sequence_of_mappings(_mapping(stage).get("evidence"))
+    )
+    # Large stress envelopes need a compact manifest.  Normal targeted
+    # research (usually under 24 direct turns) gets enough text to synthesize
+    # meaningfully even before the client reaches the full evidence arrays.
+    detailed_manifest = direct_count <= 24 and not force_compact
+    stage_manifest: dict[str, Any] = {}
+    supplemental_count = 0
+    required_points = 0
+
+    ordered = list(requested)
+    for stage_name in stages:
+        if stage_name not in ordered:
+            ordered.append(stage_name)
+    for stage_name in ordered:
+        stage = _mapping(stages.get(stage_name))
+        evidence = [
+            item
+            for item in _sequence_of_mappings(stage.get("evidence"))
+            if item.get("evidence_use") == "direct_claim_evidence"
+        ]
+        required: list[dict[str, Any]] = []
+        compact_speakers: list[str] = []
+        for item in evidence:
+            supplements = _sequence_of_mappings(item.get("supplemental_excerpts"))
+            supplemental_count += len(supplements)
+            argument_point_count = _argument_point_count(supplements)
+            required_points += argument_point_count
+            citation = _mapping(item.get("citation"))
+            compact_speakers.append(str(item.get("speaker") or "미상"))
+            if not detailed_manifest:
+                continue
+            row = {
+                "evidence_id": item.get("evidence_id"),
+                "speaker": item.get("speaker"),
+                "required_argument_point_count": argument_point_count,
+            }
+            row.update(
+                {
+                    "role": item.get("role"),
+                    "main_excerpt_preview": _clip_utf8(
+                        str(item.get("excerpt_verbatim") or ""),
+                        (
+                            _DIRECT_EXCERPT_BYTES
+                            if supplements
+                            else _MANDATORY_PREVIEW_BYTES
+                        ),
+                    ),
+                    "supplemental_argument_previews": [
+                        {
+                            "excerpt_id": supplement.get("excerpt_id"),
+                            "segment_kind": supplement.get("segment_kind"),
+                            "argument_marker": supplement.get("argument_marker"),
+                            "excerpt_preview": _clip_utf8(
+                                str(supplement.get("excerpt_verbatim") or ""),
+                                _MANDATORY_SUPPLEMENTAL_PREVIEW_BYTES,
+                            ),
+                        }
+                        for supplement in supplements
+                    ],
+                    "citation": {
+                        "official_url": citation.get("official_url"),
+                        "source_locator": citation.get("source_locator"),
+                    },
+                }
+            )
+            required.append(row)
+        if detailed_manifest:
+            stage_entry = {
+                "state": stage.get("state"),
+                "separate_heading_required": True,
+                "speaker_by_speaker_detail_required": True,
+                "plenary_debate_must_not_be_omitted": (
+                    stage_name == "plenary" and bool(evidence)
+                ),
+                "direct_evidence_count": len(evidence),
+            }
+            stage_entry["required_speakers"] = list(dict.fromkeys(compact_speakers))
+            stage_entry["required_evidence"] = required
+        else:
+            stage_entry = {
+                "direct_evidence_count": len(evidence),
+                "required_speakers": list(dict.fromkeys(compact_speakers)),
+                "required_evidence_ids": [
+                    str(item.get("evidence_id"))
+                    for item in evidence
+                    if item.get("evidence_id")
+                ],
+                "transport_omitted_evidence_ids_path": (
+                    "answer_brief.evidence_ledger.by_stage."
+                    f"{stage_name}.transport_omitted_evidence_ids"
+                ),
+                "required_evidence_detail_path": f"answer_brief.stages.{stage_name}.evidence",
+            }
+        stage_manifest[stage_name] = stage_entry
+
+    plenary_direct_count = _integer(
+        _mapping(stage_manifest.get("plenary")).get("direct_evidence_count"),
+        fallback=0,
+    )
+    plenary_instruction = (
+        "반환된 본회의 토론을 생략하면 안 됩니다."
+        if plenary_direct_count > 0
+        else "본회의 직접 근거가 없으면 확인 상태와 한계를 명시하세요."
+    )
+    return {
+        "instruction_ko": (
+            (
+                "아래 단계마다 독립 절을 만들고 required_evidence를 발언자별로 모두 반영하세요. "
+                "각 항목은 발언자의 주장·이유·답변 또는 절차 결과와 공식 인용을 포함해야 합니다. "
+                "실질적인 발언은 한 줄로 축약하지 말고 근거가 허용하는 범위에서 통상 두 문장 "
+                "이상으로 설명하되, 순수 절차 발언만 간결하게 처리하세요. "
+                "supplemental_argument_previews도 모두 반영하되, argument_continuation은 "
+                "앞 논거에 합치고 enumerated_argument만 별도 논거로 설명하세요. "
+                f"{plenary_instruction} 단계 요약 한두 문장으로 대체하면 미완성 답변입니다."
+            )
+            if detailed_manifest
+            else (
+                "각 단계의 전체 evidence를 발언자별로 반영하세요. "
+                f"{plenary_instruction}"
+            )
+        ),
+        "stages": stage_manifest,
+        "totals": {
+            "requested_stage_count": len(requested),
+            "direct_evidence_count": direct_count,
+            "supplemental_argument_count": supplemental_count,
+            "required_argument_point_count": required_points,
+        },
+    }
+
+
+def _argument_point_count(supplements: list[dict[str, Any]]) -> int:
+    """Count distinct argument axes without double-counting a clipped continuation."""
+
+    return 1 + sum(
+        str(supplement.get("segment_kind") or "") != "argument_continuation"
+        for supplement in supplements
+    )
+
+
+def build_synthesis_completion_check(brief: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a post-transport checklist from the evidence that still exists.
+
+    Transport omissions remain explicit by ID, while only returned evidence is
+    required in the synthesized answer.  This keeps a large bounded response
+    honest instead of asking the client to summarize rows no longer present.
+    """
+
+    mandatory = _mapping(brief.get("mandatory_coverage"))
+    mandatory_stages = _mapping(mandatory.get("stages"))
+    brief_stages = _mapping(brief.get("stages"))
+    ledger = _mapping(_mapping(brief.get("evidence_ledger")).get("by_stage"))
+    by_stage: dict[str, Any] = {}
+    for stage_name, raw_manifest in mandatory_stages.items():
+        manifest = _mapping(raw_manifest)
+        stage = _mapping(brief_stages.get(stage_name))
+        full_rows = [
+            row
+            for row in _sequence_of_mappings(stage.get("evidence"))
+            if row.get("evidence_use") == "direct_claim_evidence"
+        ]
+        detailed_rows = _sequence_of_mappings(manifest.get("required_evidence"))
+        required_ids = [
+            str(row.get("evidence_id"))
+            for row in full_rows
+            if row.get("evidence_id")
+        ]
+        required_speakers = list(
+            dict.fromkeys(str(row.get("speaker") or "미상") for row in full_rows)
+        )
+        argument_count = sum(
+            _argument_point_count(
+                _sequence_of_mappings(row.get("supplemental_excerpts"))
+            )
+            for row in full_rows
+        )
+        if detailed_rows:
+            argument_count = sum(
+                _integer(row.get("required_argument_point_count"), fallback=1)
+                for row in detailed_rows
+            )
+        counts = _mapping(ledger.get(stage_name))
+        transport_omitted_ids = _string_sequence(
+            counts.get("transport_omitted_evidence_ids")
+        )
+        by_stage[str(stage_name)] = {
+            "required_direct_evidence_count": len(required_ids),
+            "required_speakers": required_speakers,
+            "required_evidence_ids": required_ids,
+            "required_argument_point_count": argument_count,
+            "selected_before_transport_count": _integer(
+                counts.get("selected_before_transport_count"),
+                fallback=len(required_ids),
+            ),
+            "transport_omitted_count": _integer(
+                counts.get("transport_omitted_count"), fallback=0
+            ),
+            "transport_omitted_evidence_ids": transport_omitted_ids,
+            "required_evidence_detail_path": (
+                f"answer_brief.stages.{stage_name}.evidence"
+            ),
+        }
+    mandatory_totals = _mapping(mandatory.get("totals"))
+    return {
+        "must_pass_before_final_answer": True,
+        "by_stage": by_stage,
+        "totals": {
+            **mandatory_totals,
+            "transport_omitted_direct_evidence_count": sum(
+                _integer(item.get("transport_omitted_count"), fallback=0)
+                for item in by_stage.values()
+            ),
+        },
+        "failure_condition": (
+            "Every returned direct evidence ID, named speaker, and returned supplemental "
+            "argument must appear in the final answer. Any transport-omitted evidence IDs "
+            "must be disclosed as an explicit limitation."
+        ),
+    }
 
 
 def _measure(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1204,6 +1542,8 @@ def _comparison_readiness(
     return {
         "dimensions": dimensions,
         "all_dimensions_ready": all(value["status"] == "ready" for value in dimensions.values()),
+        "evidence_readiness_only": True,
+        "synthesis_compliance_required": True,
         "acceptance_rule": (
             "각 축의 signals와 gaps를 비교표에 공개하고, partial을 ready로 표현하지 마세요."
         ),
@@ -1221,7 +1561,16 @@ def _required_answer_sections() -> list[dict[str, Any]]:
         {"id": "issue_map", "requirement": "쟁점별 찬성·반대·조건부 논거를 함께 배열"},
         {
             "id": "stage_by_stage_discussion",
-            "requirement": "요청한 각 단계의 모든 반환 실명 발언 반영",
+            "requirement": (
+                "요청한 각 단계에 독립 절을 만들고 모든 반환 실명 발언을 주장·이유·"
+                "답변 또는 결과까지 발언자별로 반영"
+            ),
+        },
+        {
+            "id": "plenary_debate",
+            "requirement": (
+                "본회의 심사보고와 찬반토론을 독립 절로 작성하고 열거된 논거를 각각 설명"
+            ),
         },
         {"id": "argument_exchanges", "requirement": "근거가 있으면 주장-이유-반론-답변-결론 복원"},
         {"id": "government_and_expert_views", "requirement": "의원·정부·전문위원 의견을 분리"},
@@ -1419,4 +1768,8 @@ def _integer(value: Any, *, fallback: int) -> int:
         return fallback
 
 
-__all__ = ["build_answer_brief", "reconcile_answer_brief"]
+__all__ = [
+    "build_answer_brief",
+    "build_synthesis_completion_check",
+    "reconcile_answer_brief",
+]

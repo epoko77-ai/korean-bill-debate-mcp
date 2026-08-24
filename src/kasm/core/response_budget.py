@@ -15,7 +15,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from kasm.core.answer_brief import reconcile_answer_brief
+from kasm.core.answer_brief import (
+    build_synthesis_completion_check,
+    reconcile_answer_brief,
+)
 
 MAX_BOUNDED_RESPONSE_BYTES = 128 * 1024
 
@@ -31,15 +34,16 @@ _ANSWER_SUPPLEMENTAL_EXCERPT_BYTES = 1800
 _ANSWER_SUPPLEMENTAL_EXCERPT_LIMIT = 4
 
 _TOP_LEVEL_PRIORITY = (
-    "query",
-    "evidence_query",
     "next_action",
-    "answer_brief",
     "answer_scope",
+    "answer_brief",
     "scoped_synthesis_allowed",
+    "duplicate_evidence_projection",
     "target_resolution",
     "stage_coverage",
     "research_pagination",
+    "query",
+    "evidence_query",
     "quality",
     "provenance",
     "source_provenance",
@@ -53,6 +57,21 @@ _TOP_LEVEL_PRIORITY = (
     "links",
     "scope_inventory",
     "timeline",
+)
+_ANSWER_BRIEF_PRIORITY = (
+    "schema_version",
+    "synthesis_contract",
+    "mandatory_coverage",
+    "required_answer_sections",
+    "measure",
+    "scope",
+    "processing",
+    "stages",
+    "participant_index",
+    "evidence_ledger",
+    "comparison_readiness",
+    "gaps",
+    "transport_compact_mandatory_coverage",
 )
 _IDENTIFIER_FIELDS = (
     "id",
@@ -237,6 +256,7 @@ def enforce_bounded_response_budget(
         if isinstance(original_value, int) and not isinstance(original_value, bool)
         else _size(payload)
     )
+    _project_raw_evidence_to_answer_brief(payload, audit)
     quality_present = isinstance(payload.get("quality"), Mapping)
     quality_inputs_before = _quality_input_signature(payload)
     stage_inputs_before = _stage_input_signature(payload)
@@ -246,7 +266,11 @@ def enforce_bounded_response_budget(
     _compact_stage_coverage(payload, audit)
     _bound_root(payload, audit)
 
-    reserve = min(_METADATA_RESERVE_BYTES, max(256, max_bytes // 4))
+    # Small envelopes need proportionally more room for the cited answer body;
+    # the final-envelope pass still enforces the hard byte ceiling if audit
+    # metadata grows beyond this tighter reserve.
+    reserve_divisor = 8 if max_bytes < MAX_BOUNDED_RESPONSE_BYTES else 4
+    reserve = min(_METADATA_RESERVE_BYTES, max(256, max_bytes // reserve_divisor))
     content_target = max(2, max_bytes - reserve)
     _reduce_known_sections(payload, audit, content_target)
     _drop_optional_top_level(payload, audit, content_target)
@@ -259,6 +283,7 @@ def enforce_bounded_response_budget(
             target=content_target,
             max_bytes=max_bytes,
         )
+    _sync_synthesis_completion_check(payload)
 
     quality_inputs_after = _quality_input_signature(payload)
     stage_inputs_after = _stage_input_signature(payload)
@@ -286,6 +311,100 @@ def enforce_bounded_response_budget(
     if _size(payload) > max_bytes:
         _absolute_fallback(payload, max_bytes=max_bytes, original_bytes=original_bytes)
     return payload
+
+
+def _project_raw_evidence_to_answer_brief(
+    payload: dict[str, Any], audit: _BudgetAudit
+) -> None:
+    """Prefer the cited selected brief and its truthful omission ledger."""
+
+    brief = payload.get("answer_brief")
+    if not isinstance(brief, Mapping):
+        return
+    measure = brief.get("measure")
+    if not isinstance(measure, Mapping) or not measure.get("primary_vehicle_bill_no"):
+        # Preserve the legacy raw contract for generic searches, CLI output,
+        # and workspace callers.  Answer-first projection is reserved for a
+        # verified named measure whose brief can be authoritative.
+        return
+    raw_stages = brief.get("stages")
+    stages = raw_stages if isinstance(raw_stages, Mapping) else {}
+    represented_ids = {
+        str(item.get("speech_id") or item.get("evidence_id") or "")
+        for raw_stage in stages.values()
+        if isinstance(raw_stage, Mapping)
+        for item in (raw_stage.get("evidence") or [])
+        if isinstance(item, Mapping) and (item.get("speech_id") or item.get("evidence_id"))
+    }
+    raw_speeches = payload.get("speeches")
+    speeches = raw_speeches if isinstance(raw_speeches, list) else []
+    speech_ids = {
+        str(item.get("speech_id") or "")
+        for item in speeches
+        if isinstance(item, Mapping) and item.get("speech_id")
+    }
+    raw_threads = payload.get("discussion_threads")
+    threads = raw_threads if isinstance(raw_threads, list) else []
+    thread_turn_ids = {
+        str(turn.get("speech_id") or "")
+        for thread in threads
+        if isinstance(thread, Mapping)
+        for turn in (thread.get("turns") or [])
+        if isinstance(turn, Mapping) and turn.get("speech_id")
+    }
+    speech_rows_identifiable = all(
+        isinstance(item, Mapping) and bool(item.get("speech_id")) for item in speeches
+    )
+    thread_rows_identifiable = all(
+        isinstance(thread, Mapping)
+        and isinstance(thread.get("turns"), list)
+        and all(
+            isinstance(turn, Mapping) and bool(turn.get("speech_id"))
+            for turn in thread.get("turns", [])
+        )
+        for thread in threads
+    )
+    speech_projected = (
+        bool(speeches) and speech_rows_identifiable and speech_ids <= represented_ids
+    )
+    thread_projected = (
+        bool(threads) and thread_rows_identifiable and thread_turn_ids <= represented_ids
+    )
+    if not (speech_projected or thread_projected):
+        return
+    if speech_projected:
+        payload.pop("speeches", None)
+        audit.mark_count(
+            "speeches",
+            observed=len(speeches),
+            returned=0,
+            kind="duplicate_body_projection",
+        )
+    if thread_projected:
+        payload.pop("discussion_threads", None)
+        audit.mark_count(
+            "discussion_threads",
+            observed=len(threads),
+            returned=0,
+            kind="duplicate_body_projection",
+        )
+    existing = payload.get("duplicate_evidence_projection")
+    projection = dict(existing) if isinstance(existing, Mapping) else {}
+    projection.update(
+        {
+            "authoritative_body": "answer_brief.stages[*].evidence",
+            "reason": "raw evidence bodies duplicate the answer-ready cited projection",
+            "speeches_observed_count": len(speeches),
+            "speech_bodies_omitted_as_duplicate": speech_projected,
+            "discussion_threads_observed_count": len(threads),
+            "discussion_turns_observed_count": len(thread_turn_ids),
+            "discussion_bodies_omitted_as_duplicate": thread_projected,
+            "all_raw_evidence_ids_represented": (
+                (speech_ids | thread_turn_ids) <= represented_ids
+            ),
+        }
+    )
+    payload["duplicate_evidence_projection"] = projection
 
 
 def _compact_evidence_text(payload: dict[str, Any], audit: _BudgetAudit) -> None:
@@ -341,6 +460,12 @@ def _compact_answer_brief(payload: dict[str, Any], audit: _BudgetAudit) -> None:
             evidence = stage.get("evidence")
             if isinstance(evidence, list) and len(evidence) > 16:
                 observed = len(evidence)
+                for omitted in evidence[16:]:
+                    if (
+                        isinstance(omitted, Mapping)
+                        and omitted.get("evidence_use") == "direct_claim_evidence"
+                    ):
+                        _record_transport_omitted_evidence(raw, str(stage_name), omitted)
                 stage["evidence"] = evidence[:16]
                 audit.mark_count(
                     f"answer_brief.stages.{stage_name}.evidence",
@@ -422,6 +547,11 @@ def _fit_answer_brief_to_target(
     if not isinstance(raw, dict) or _size(payload) <= target:
         return
 
+    # If the normal reductions could not fit the payload, compact the duplicate
+    # head manifest before shortening or removing any substantive cited turn.
+    # Responses that already fit retain the detailed stage-balanced previews.
+    raw["transport_compact_mandatory_coverage"] = True
+
     _compact_answer_brief_repeated_fields(raw, audit)
     reconcile_answer_brief(raw)
     if _size(payload) <= target:
@@ -474,6 +604,7 @@ def _fit_answer_brief_to_target(
         evidence_use="direct_claim_evidence",
         preserve_per_stage=1,
         preserve_cited=True,
+        include_omission_detail=max_bytes >= MAX_BOUNDED_RESPONSE_BYTES,
     ):
         reconcile_answer_brief(raw)
 
@@ -700,6 +831,7 @@ def _remove_one_answer_evidence(
     evidence_use: str,
     preserve_per_stage: int,
     preserve_cited: bool = False,
+    include_omission_detail: bool = True,
 ) -> bool:
     stages = brief.get("stages")
     if not isinstance(stages, dict):
@@ -738,9 +870,64 @@ def _remove_one_answer_evidence(
     )
     path = f"answer_brief.stages.{stage_name}.evidence"
     observed = audit.observed_count(path, len(evidence))
-    evidence.pop(indices[-1])
+    removed = evidence.pop(indices[-1])
+    if evidence_use == "direct_claim_evidence" and isinstance(removed, Mapping):
+        _record_transport_omitted_evidence(
+            brief,
+            stage_name,
+            removed,
+            include_detail=include_omission_detail,
+        )
     audit.mark_count(path, observed=observed, returned=len(evidence))
     return True
+
+
+def _record_transport_omitted_evidence(
+    brief: dict[str, Any],
+    stage_name: str,
+    evidence: Mapping[str, Any],
+    *,
+    include_detail: bool = True,
+) -> None:
+    evidence_id = str(evidence.get("evidence_id") or evidence.get("speech_id") or "").strip()
+    if not evidence_id:
+        return
+    ledger = brief.get("evidence_ledger")
+    if not isinstance(ledger, dict):
+        return
+    by_stage = ledger.get("by_stage")
+    if not isinstance(by_stage, dict):
+        return
+    counts = by_stage.get(stage_name)
+    if not isinstance(counts, dict):
+        return
+    ids_value = counts.get("transport_omitted_evidence_ids")
+    omitted_ids = ids_value if isinstance(ids_value, list) else []
+    if evidence_id not in omitted_ids:
+        omitted_ids.append(evidence_id)
+    counts["transport_omitted_evidence_ids"] = omitted_ids
+    if not include_detail:
+        return
+    records_value = counts.get("transport_omitted_evidence")
+    records = records_value if isinstance(records_value, list) else []
+    if any(
+        isinstance(record, Mapping) and str(record.get("evidence_id") or "") == evidence_id
+        for record in records
+    ):
+        return
+    citation_value = evidence.get("citation")
+    citation = citation_value if isinstance(citation_value, Mapping) else {}
+    records.append(
+        {
+            "evidence_id": evidence_id,
+            "speaker": evidence.get("speaker"),
+            "citation": {
+                "official_url": citation.get("official_url"),
+                "source_locator": citation.get("source_locator"),
+            },
+        }
+    )
+    counts["transport_omitted_evidence"] = records
 
 
 def _compact_stage_coverage(payload: dict[str, Any], audit: _BudgetAudit) -> None:
@@ -860,7 +1047,8 @@ def _bound_value(value: Any, path: str, audit: _BudgetAudit, *, depth: int) -> A
     if isinstance(value, tuple):
         return _bound_value(list(value), path, audit, depth=depth)
     if isinstance(value, Mapping):
-        keys = _prioritized_keys(value, _IDENTIFIER_FIELDS, _GENERIC_MAPPING_ITEMS)
+        priority = _ANSWER_BRIEF_PRIORITY if path == "answer_brief" else _IDENTIFIER_FIELDS
+        keys = _prioritized_keys(value, priority, _GENERIC_MAPPING_ITEMS)
         if len(keys) < len(value):
             audit.mark_count(path, observed=len(value), returned=len(keys), kind="mapping")
         return {
@@ -995,6 +1183,10 @@ def _replace_with_emergency_projection(payload: dict[str, Any], audit: _BudgetAu
         if name == "answer_brief":
             # This is already a compact, citation-bearing projection.  It is
             # more useful to an MCP client than the duplicated raw arrays.
+            projection[name] = value
+        elif name == "next_action":
+            # The final-answer checklist is small relative to the cited brief
+            # and must survive large-result emergency projection.
             projection[name] = value
         elif name == "stage_coverage":
             # Already reduced by _compact_stage_coverage; its requested-stage
@@ -1448,6 +1640,21 @@ def _truncate_utf8(value: str, limit: int) -> str:
     if limit <= 3:
         return "" if limit == 0 else "." * limit
     return encoded[: limit - 3].decode("utf-8", errors="ignore").rstrip() + "…"
+
+
+def _sync_synthesis_completion_check(payload: dict[str, Any]) -> None:
+    """Reconcile the client checklist after transport has removed evidence."""
+
+    action = payload.get("next_action")
+    brief = payload.get("answer_brief")
+    if (
+        not isinstance(action, dict)
+        or action.get("tool") is not None
+        or not isinstance(brief, Mapping)
+        or "synthesis_completion_check" not in action
+    ):
+        return
+    action["synthesis_completion_check"] = build_synthesis_completion_check(brief)
 
 
 def _settle_final_bytes(payload: dict[str, Any], budget: dict[str, Any]) -> int:
