@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-REGISTRY_VERSION = "2026-08-23"
+REGISTRY_VERSION = "2026-08-24"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,9 +80,7 @@ _DOCTOR_NOW_IDENTITIES = (
         name="약사법 일부개정법률안",
         proposer="김윤의원 등 11인",
         proposed_at="2024-11-13",
-        official_url=(
-            "https://opinion.lawmaking.go.kr/gcom/nsmLmSts/out/2205513/detailRP"
-        ),
+        official_url=("https://opinion.lawmaking.go.kr/gcom/nsmLmSts/out/2205513/detailRP"),
     ),
     MeasureIdentityHint(
         bill_no="2214609",
@@ -90,8 +88,31 @@ _DOCTOR_NOW_IDENTITIES = (
         name="약사법 일부개정법률안(대안)",
         proposer="보건복지위원장",
         proposed_at="2025-11-26",
+        official_url=("https://opinion.lawmaking.go.kr/gcom/nsmLmSts/out/2214609/detailRP"),
+    ),
+)
+
+_AI_BASIC_ACT_IDENTITIES = (
+    MeasureIdentityHint(
+        bill_no="2203072",
+        role="source_member_bill",
+        name="인공지능 기본법안",
+        proposer="한민수의원 등 10인",
+        proposed_at="2024-08-22",
         official_url=(
-            "https://opinion.lawmaking.go.kr/gcom/nsmLmSts/out/2214609/detailRP"
+            "https://likms.assembly.go.kr/bill/billDetail.do?"
+            "billId=PRC_D2C4A0B8I2J1H1I0G2F5F0N5O8M7N4"
+        ),
+    ),
+    MeasureIdentityHint(
+        bill_no="2206772",
+        role="committee_alternative_primary_vehicle",
+        name="인공지능 발전과 신뢰 기반 조성 등에 관한 기본법안(대안)",
+        proposer="과학기술정보방송통신위원장",
+        proposed_at="2024-12-20",
+        official_url=(
+            "https://likms.assembly.go.kr/bill/billDetail.do?"
+            "billId=PRC_R2V4H1W1T2K5M1O6E4Q9T0V7Q9S0U0"
         ),
     ),
 )
@@ -101,12 +122,40 @@ def resolve_measure_alias(query: str) -> MeasureAliasHint | None:
     """Resolve a narrow nickname to retrieval anchors, never to proof by itself."""
 
     normalized = " ".join(query.casefold().split())
-    named = next(
+    ai_named = next(
         (
             alias
-            for alias in ("닥터나우 방지법", "닥터나우 금지법")
+            for alias in (
+                "인공지능 발전과 신뢰 기반 조성 등에 관한 기본법",
+                "인공지능 기본법",
+                "ai 기본법",
+                "ai기본법",
+            )
             if alias in normalized
         ),
+        None,
+    )
+    if ai_named is not None and "일부개정" not in normalized:
+        return MeasureAliasHint(
+            key="artificial_intelligence_basic_act_2024",
+            matched_alias=ai_named,
+            assembly_term=22,
+            committee="과학기술정보방송통신위원회",
+            identities=_AI_BASIC_ACT_IDENTITIES,
+            primary_vehicle_bill_no="2206772",
+            evidence_terms=(
+                "인공지능 기본법",
+                "인공지능 발전과 신뢰 기반 조성",
+                "고영향 인공지능",
+                "생성형 인공지능",
+                "투명성 의무",
+                "인공지능 산업 육성",
+            ),
+            milestone_months=("2024-11", "2024-12"),
+        )
+
+    named = next(
+        (alias for alias in ("닥터나우 방지법", "닥터나우 금지법") if alias in normalized),
         None,
     )
     contextual = (

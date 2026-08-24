@@ -233,6 +233,7 @@ def build_answer_brief(
         "scope": {
             "mode": str(payload.get("research_mode") or "bounded_live"),
             "requested_stages": requested,
+            "exact_measure_check": coverage.get("exact_measure_check") is True,
             "temporal_scope": pagination.get("temporal_scope"),
             "targeted_core_complete": pagination.get("complete"),
             "candidate_inventory_complete": pagination.get("candidate_inventory_complete"),
@@ -590,6 +591,7 @@ def reconcile_answer_brief(brief: dict[str, Any]) -> dict[str, Any]:
             ledger.get("unallocated_candidate_count"),
             fallback=_integer(scope.get("unallocated_candidate_evidence_count"), fallback=0),
         ),
+        exact_measure_check=scope.get("exact_measure_check") is True,
     )
     return brief
 
@@ -635,6 +637,8 @@ def _measure(payload: Mapping[str, Any]) -> dict[str, Any]:
         "lineage": lineage,
         "official_identity_confidence": resolution.get("confidence"),
         "live_verified_bill_numbers": resolution.get("live_verified_bill_numbers") or [],
+        "meeting_verified_bill_numbers": resolution.get("meeting_verified_bill_numbers") or [],
+        "official_bill_verified": resolution.get("official_bill_verified") is True,
         "bills": bills,
         "identity_instruction": (
             "원안·위원회 대안·본회의 처리안을 구분하고, 공식 병합 근거가 없으면 "
@@ -931,6 +935,7 @@ def _comparison_readiness(
     pagination: Mapping[str, Any],
     unselected_meetings: int,
     unallocated_candidates: int,
+    exact_measure_check: bool,
 ) -> dict[str, Any]:
     direct = [
         item
@@ -944,6 +949,54 @@ def _comparison_readiness(
         if _mapping(item.get("citation")).get("official_url")
         and _mapping(item.get("citation")).get("source_locator")
     ]
+    primary = str(measure.get("primary_vehicle_bill_no") or "")
+    family_numbers = {
+        str(item.get("bill_no") or "")
+        for item in _sequence_of_mappings(measure.get("family"))
+        if item.get("bill_no")
+    }
+    live_verified_numbers = {
+        str(value) for value in measure.get("live_verified_bill_numbers") or [] if value
+    }
+    meeting_verified_numbers = {
+        str(value) for value in measure.get("meeting_verified_bill_numbers") or [] if value
+    }
+    returned_bill_numbers = {
+        str(item.get("bill_no") or "")
+        for item in _sequence_of_mappings(measure.get("bills"))
+        if item.get("bill_no")
+    }
+    primary_in_family = bool(primary) and primary in family_numbers
+    primary_officially_verified = primary_in_family and (
+        primary in live_verified_numbers or measure.get("official_bill_verified") is True
+    )
+    official_agenda_verified = bool(family_numbers.intersection(meeting_verified_numbers))
+    official_identity_verified = primary_officially_verified and official_agenda_verified
+    unexpected_bill_numbers = sorted(returned_bill_numbers - family_numbers)
+
+    def is_target_attributed(item: Mapping[str, Any]) -> bool:
+        attribution = _mapping(item.get("attribution"))
+        attributed_numbers = {
+            str(value) for value in attribution.get("bill_numbers") or [] if value
+        }
+        state = str(attribution.get("state") or "")
+        return state.startswith("exact_") and bool(attributed_numbers.intersection(family_numbers))
+
+    target_direct = [item for item in direct if is_target_attributed(item)]
+    target_direct_by_stage = {
+        stage: [
+            item
+            for item in _sequence_of_mappings(_mapping(stages.get(stage)).get("evidence"))
+            if item.get("evidence_use") == "direct_claim_evidence" and is_target_attributed(item)
+        ]
+        for stage in requested
+    }
+    discussion_stages_without_target_direct = [
+        stage
+        for stage in requested
+        if str(_mapping(stages.get(stage)).get("state") or "") == "discussion_found"
+        and not target_direct_by_stage[stage]
+    ]
     complete_stages = [
         stage
         for stage in requested
@@ -953,13 +1006,22 @@ def _comparison_readiness(
         _integer(_mapping(ledger.get(stage)).get("omitted_count"), fallback=0)
         for stage in requested
     )
-    stages_with_evidence_or_verified_absence = [
-        stage
-        for stage in requested
-        if _mapping(stages.get(stage)).get("evidence")
-        or str(_mapping(stages.get(stage)).get("state") or "")
-        in {"record_found_no_member_debate", "checked_no_matching_discussion"}
-    ]
+    stages_with_target_evidence_or_verified_absence: list[str] = []
+    for stage in requested:
+        state = str(_mapping(stages.get(stage)).get("state") or "")
+        stage_counts = _mapping(ledger.get(stage))
+        meeting_counts = _mapping(stage_counts.get("meeting_counts"))
+        verified_absence = (
+            official_identity_verified
+            and exact_measure_check
+            and state in {"record_found_no_member_debate", "checked_no_matching_discussion"}
+            and _integer(meeting_counts.get("checked_count"), fallback=0)
+            == _integer(meeting_counts.get("discovered_count"), fallback=0)
+            and _integer(stage_counts.get("failed_count"), fallback=0) == 0
+            and _integer(stage_counts.get("pending_count"), fallback=0) == 0
+        )
+        if target_direct_by_stage[stage] or verified_absence:
+            stages_with_target_evidence_or_verified_absence.append(stage)
     context_count = sum(
         item.get("evidence_use") == "context_only"
         for stage in stages.values()
@@ -993,25 +1055,76 @@ def _comparison_readiness(
     ]
     dimensions = {
         "content": _dimension(
-            bool(measure.get("primary_vehicle_bill_no")) and bool(direct),
+            official_identity_verified
+            and bool(target_direct)
+            and len(target_direct) == len(direct)
+            and not discussion_stages_without_target_direct
+            and not unexpected_bill_numbers,
             signals={
-                "primary_vehicle_identified": bool(measure.get("primary_vehicle_bill_no")),
+                "primary_vehicle_identified": bool(primary),
+                "official_identity_verified": official_identity_verified,
                 "direct_evidence_count": len(direct),
+                "target_attributed_direct_evidence_count": len(target_direct),
+                "discussion_stage_without_target_direct_count": len(
+                    discussion_stages_without_target_direct
+                ),
+                "unexpected_bill_count": len(unexpected_bill_numbers),
             },
-            gaps=[] if direct else ["no_direct_discussion_evidence"],
+            gaps=([] if direct else ["no_direct_discussion_evidence"])
+            + ([] if primary else ["primary_measure_unresolved"])
+            + (
+                []
+                if official_identity_verified
+                else ["official_measure_identity_or_agenda_unverified"]
+            )
+            + (
+                ["direct_evidence_not_attributed_to_measure"]
+                if len(target_direct) != len(direct)
+                else []
+            )
+            + (
+                ["discussion_stage_without_target_direct_evidence"]
+                if discussion_stages_without_target_direct
+                else []
+            )
+            + (["unexpected_bill_outside_measure_family"] if unexpected_bill_numbers else []),
+            viable=bool(primary) and bool(target_direct),
         ),
         "accuracy": _dimension(
-            bool(direct) and len(cited) == len(direct),
+            official_identity_verified
+            and bool(direct)
+            and len(cited) == len(direct)
+            and len(target_direct) == len(direct)
+            and not unexpected_bill_numbers,
             signals={
                 "official_identity_confidence": measure.get("official_identity_confidence"),
+                "primary_in_official_bill_results": primary_officially_verified,
+                "measure_family_in_official_agenda": official_agenda_verified,
                 "direct_evidence_count": len(direct),
                 "fully_cited_direct_evidence_count": len(cited),
+                "target_attributed_direct_evidence_count": len(target_direct),
+                "unexpected_bill_count": len(unexpected_bill_numbers),
                 "stance_inference_allowed": False,
             },
-            gaps=[] if len(cited) == len(direct) else ["missing_official_url_or_locator"],
+            gaps=([] if primary else ["primary_measure_unresolved"])
+            + (
+                []
+                if official_identity_verified
+                else ["official_measure_identity_or_agenda_unverified"]
+            )
+            + ([] if len(cited) == len(direct) else ["missing_official_url_or_locator"])
+            + (
+                ["direct_evidence_not_attributed_to_measure"]
+                if len(target_direct) != len(direct)
+                else []
+            )
+            + (["unexpected_bill_outside_measure_family"] if unexpected_bill_numbers else []),
+            viable=bool(primary) and bool(target_direct),
         ),
         "completeness": _dimension(
-            len(complete_stages) == len(requested)
+            official_identity_verified
+            and exact_measure_check
+            and len(complete_stages) == len(requested)
             and omitted == 0
             and unselected_meetings == 0
             and unallocated_candidates == 0
@@ -1023,8 +1136,15 @@ def _comparison_readiness(
                 "unselected_candidate_meeting_count": unselected_meetings,
                 "unallocated_candidate_evidence_count": unallocated_candidates,
                 "bounded_core_complete": pagination.get("complete"),
+                "official_identity_verified": official_identity_verified,
+                "exact_measure_check": exact_measure_check,
             },
-            gaps=([] if len(complete_stages) == len(requested) else ["stage_incomplete"])
+            gaps=(
+                []
+                if official_identity_verified and exact_measure_check
+                else ["exact_official_measure_check_not_verified"]
+            )
+            + ([] if len(complete_stages) == len(requested) else ["stage_incomplete"])
             + (["direct_evidence_omitted"] if omitted else [])
             + (["candidate_meetings_unchecked"] if unselected_meetings else [])
             + (["candidate_evidence_unallocated"] if unallocated_candidates else []),
@@ -1039,12 +1159,13 @@ def _comparison_readiness(
             gaps=[] if context_count else ["no_exchange_context"],
         ),
         "breadth": _dimension(
-            len(stages_with_evidence_or_verified_absence) == len(requested)
+            official_identity_verified
+            and len(stages_with_target_evidence_or_verified_absence) == len(requested)
             and len(participant_index) >= 2,
             signals={
                 "requested_stage_count": len(requested),
                 "represented_or_verified_absent_stage_count": len(
-                    stages_with_evidence_or_verified_absence
+                    stages_with_target_evidence_or_verified_absence
                 ),
                 "participant_count": len(participant_index),
                 "actor_role_count": len(
@@ -1053,9 +1174,11 @@ def _comparison_readiness(
             },
             gaps=(
                 []
-                if len(stages_with_evidence_or_verified_absence) == len(requested)
-                else ["requested_stage_not_represented"]
+                if len(stages_with_target_evidence_or_verified_absence) == len(requested)
+                else ["requested_stage_not_directly_represented_or_verified_absent"]
             ),
+            viable=official_identity_verified
+            and bool(stages_with_target_evidence_or_verified_absence),
         ),
         "detail": _dimension(
             bool(direct) and len(detailed) == len(direct) and supplemental_omitted == 0,
@@ -1112,10 +1235,16 @@ def _required_answer_sections() -> list[dict[str, Any]]:
     ]
 
 
-def _dimension(ready: bool, *, signals: dict[str, Any], gaps: list[str]) -> dict[str, Any]:
+def _dimension(
+    ready: bool,
+    *,
+    signals: dict[str, Any],
+    gaps: list[str],
+    viable: bool = True,
+) -> dict[str, Any]:
     rendered_signals = [f"{name}={value}" for name, value in signals.items()]
     return {
-        "status": "ready" if ready else "partial",
+        "status": "ready" if ready else ("partial" if viable else "not_ready"),
         "signals": rendered_signals,
         "metrics": signals,
         "gaps": gaps,

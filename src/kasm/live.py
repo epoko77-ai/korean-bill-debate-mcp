@@ -41,13 +41,9 @@ from kasm.search.terminology import LEGAL_TERMINOLOGY
 from kasm.storage.database import Database
 from kasm.storage.repositories import BillDocumentRepository, MeetingRepository
 
-_DATE_MONTH = re.compile(
-    r"(?P<year>(?:19|20)\d{2})[.\-/년 ]+\s*(?P<month>1[0-2]|0?[1-9])"
-)
+_DATE_MONTH = re.compile(r"(?P<year>(?:19|20)\d{2})[.\-/년 ]+\s*(?P<month>1[0-2]|0?[1-9])")
 _DATE_YEAR = re.compile(r"(?<!\d)(?P<year>(?:19|20)\d{2})(?!\d)")
-_PROPOSAL_YEAR = re.compile(
-    r"(?<!\d)(?P<year>(?:19|20)\d{2})\s*년(?:도)?(?:에)?\s*발의"
-)
+_PROPOSAL_YEAR = re.compile(r"(?<!\d)(?P<year>(?:19|20)\d{2})\s*년(?:도)?(?:에)?\s*발의")
 _ENGLISH_PROPOSAL_YEAR = re.compile(
     r"\b(?:proposed|introduced)\s+in\s+(?P<year>(?:19|20)\d{2})\b",
     re.IGNORECASE,
@@ -170,6 +166,8 @@ class LiveAssemblyServices:
             query=query,
             assembly_term=term,
             include_documents=False,
+            date_from=filters.get("date_from"),
+            date_to=filters.get("date_to"),
         )
         # Natural-language instructions are not bill titles. Query the compact,
         # topic-bearing candidates individually and merge them before applying
@@ -206,18 +204,14 @@ class LiveAssemblyServices:
             self._refresh_bill_documents({**result, **(status_row or {})})
             result = self.local.get_bill_status(bill_no) or result
             _attach_lossless_bill_documents(self.database, result)
-            result["document_coverage"] = self._bill_document_coverage(
-                bill_no, result
-            )
+            result["document_coverage"] = self._bill_document_coverage(bill_no, result)
         return result
 
     def list_meetings(self, **filters: Any) -> list[dict[str, Any]]:
         date_from = filters.get("date_from")
         date_to = filters.get("date_to")
         term = self._selected_assembly_term("", filters)
-        months = self._months_for_query(
-            "", date_from, date_to, assembly_term=term
-        )
+        months = self._months_for_query("", date_from, date_to, assembly_term=term)
         requested_months = _requested_months("", date_from, date_to)
         self._refresh_meetings(
             query="",
@@ -288,9 +282,7 @@ class LiveAssemblyServices:
     ) -> dict[str, Any]:
         measure_hint = resolve_measure_alias(query)
         targeted_deadline_at = (
-            self._monotonic() + self.targeted_deadline_seconds
-            if measure_hint is not None
-            else None
+            self._monotonic() + self.targeted_deadline_seconds if measure_hint is not None else None
         )
         term = self._hydrate_issue(
             query,
@@ -308,9 +300,7 @@ class LiveAssemblyServices:
             measure_hint = None
         proposal_scope = _proposal_date_scope(query)
         local_limit = (
-            max(limit, _BOUNDED_PROPOSAL_DISCOVERY_LIMIT)
-            if proposal_scope is not None
-            else limit
+            max(limit, _BOUNDED_PROPOSAL_DISCOVERY_LIMIT) if proposal_scope is not None else limit
         )
         local_date_from = date_from
         local_date_to = date_to
@@ -342,10 +332,7 @@ class LiveAssemblyServices:
             _filter_issue_to_measure_family(
                 result,
                 measure_hint.bill_numbers,
-                {
-                    str(item.get("meeting_id") or "")
-                    for item in self._latest_meeting_inventory
-                },
+                {str(item.get("meeting_id") or "") for item in self._latest_meeting_inventory},
             )
             self._replace_with_attributed_measure_evidence(
                 result,
@@ -394,8 +381,7 @@ class LiveAssemblyServices:
             ),
             "speech_candidates": cached_inventory.get("speech_candidates")
             or {"complete": True, "total": 0, "items": []},
-            "links": cached_inventory.get("links")
-            or {"complete": True, "total": 0, "items": []},
+            "links": cached_inventory.get("links") or {"complete": True, "total": 0, "items": []},
             "selected_for_synthesis": {
                 **cached_selected,
                 "bill_count": len(result["bills"]),
@@ -500,30 +486,26 @@ class LiveAssemblyServices:
         ).fetchall()
         bill_rows = self.database.connection.execute(
             f"""SELECT id, bill_no FROM bills
-                WHERE bill_no IN ({','.join('?' for _ in hint.bill_numbers)})""",
+                WHERE bill_no IN ({",".join("?" for _ in hint.bill_numbers)})""",
             hint.bill_numbers,
         ).fetchall()
-        bill_number_by_id = {
-            str(row["id"]): str(row["bill_no"]) for row in bill_rows
-        }
+        bill_number_by_id = {str(row["id"]): str(row["bill_no"]) for row in bill_rows}
         linked_numbers_by_speech: dict[str, set[str]] = {}
         if bill_number_by_id:
             bill_ids = tuple(bill_number_by_id)
             link_rows = self.database.connection.execute(
                 f"""SELECT speech_id, bill_id FROM speech_bill_links
-                    WHERE bill_id IN ({','.join('?' for _ in bill_ids)})""",
+                    WHERE bill_id IN ({",".join("?" for _ in bill_ids)})""",
                 bill_ids,
             ).fetchall()
             for link in link_rows:
-                linked_numbers_by_speech.setdefault(
-                    str(link["speech_id"]), set()
-                ).add(bill_number_by_id[str(link["bill_id"])])
+                linked_numbers_by_speech.setdefault(str(link["speech_id"]), set()).add(
+                    bill_number_by_id[str(link["bill_id"])]
+                )
 
         attributed: list[dict[str, Any]] = []
         exact_numbers = set(hint.bill_numbers)
-        informative_anchors = tuple(
-            term for term in hint.evidence_terms if term not in {"약사법"}
-        )
+        informative_anchors = tuple(term for term in hint.evidence_terms if term not in {"약사법"})
         query_tokens = query_terms(payload.get("query") or hint.evidence_query)
         anchored_agenda_numbers: dict[tuple[str, str], set[str]] = {}
         for raw in rows:
@@ -532,9 +514,7 @@ class LiveAssemblyServices:
             if not agenda or agenda.startswith("복수 의사일정"):
                 continue
             observed_all = set(
-                _EXACT_BILL_NUMBER.findall(
-                    f"{agenda}\n{str(row.get('text') or '')}"
-                )
+                _EXACT_BILL_NUMBER.findall(f"{agenda}\n{str(row.get('text') or '')}")
             )
             observed = observed_all.intersection(exact_numbers)
             if observed and not observed_all.difference(exact_numbers):
@@ -580,9 +560,7 @@ class LiveAssemblyServices:
                 base_score = 90
             elif (meeting_id, agenda.strip()) in anchored_agenda_numbers:
                 attribution_state = "exact_agenda_segment_context"
-                attributed_numbers = sorted(
-                    anchored_agenda_numbers[(meeting_id, agenda.strip())]
-                )
+                attributed_numbers = sorted(anchored_agenda_numbers[(meeting_id, agenda.strip())])
                 base_score = 84
             elif speech_id in discussion_segment_rows:
                 segment_kind = discussion_segment_rows[speech_id]
@@ -591,9 +569,7 @@ class LiveAssemblyServices:
                 attribution_state = "exact_measure_discussion_segment"
                 attributed_numbers = sorted(
                     set(
-                        meeting_inventory_by_id.get(meeting_id, {}).get(
-                            "related_bill_numbers", []
-                        )
+                        meeting_inventory_by_id.get(meeting_id, {}).get("related_bill_numbers", [])
                     ).intersection(exact_numbers)
                 )
                 if not attributed_numbers:
@@ -613,9 +589,7 @@ class LiveAssemblyServices:
             if scoping_segment_kind is not None:
                 scoped_text = _scope_target_measure_turn_text(
                     text,
-                    target_agenda_numbers=target_agenda_numbers_by_meeting.get(
-                        meeting_id, set()
-                    ),
+                    target_agenda_numbers=target_agenda_numbers_by_meeting.get(meeting_id, set()),
                     hint=hint,
                     segment_kind=scoping_segment_kind,
                 )
@@ -626,9 +600,7 @@ class LiveAssemblyServices:
             item["matched_terms"] = [
                 term for term in query_tokens if term.casefold() in text.casefold()
             ]
-            is_legislator = _is_legislator_role(
-                str(item.get("speaker_role") or "")
-            )
+            is_legislator = _is_legislator_role(str(item.get("speaker_role") or ""))
             item["attribution"] = {
                 "state": attribution_state,
                 "bill_numbers": attributed_numbers,
@@ -636,9 +608,7 @@ class LiveAssemblyServices:
                 "is_legislator": is_legislator,
             }
             if speech_id in discussion_segment_rows:
-                item["attribution"]["segment_kind"] = discussion_segment_rows[
-                    speech_id
-                ]
+                item["attribution"]["segment_kind"] = discussion_segment_rows[speech_id]
             item["attribution_score"] = (
                 base_score
                 + len(matched_anchors) * 10
@@ -668,9 +638,7 @@ class LiveAssemblyServices:
             requested_stage_names,
             limit=max(1, limit, min(_TARGETED_SPEECH_LIMIT, len(attributed))),
         )
-        stage_order = {
-            stage: index for index, stage in enumerate(requested_stage_names)
-        }
+        stage_order = {stage: index for index, stage in enumerate(requested_stage_names)}
         selected.sort(
             key=lambda item: (
                 stage_order.get(
@@ -699,9 +667,7 @@ class LiveAssemblyServices:
             },
         )
 
-        selected_speech_ids = {
-            str(item.get("speech_id") or "") for item in selected
-        }
+        selected_speech_ids = {str(item.get("speech_id") or "") for item in selected}
         selected_bill_ids = set(bill_number_by_id)
         links: list[dict[str, Any]] = []
         if selected_bill_ids and selected_speech_ids:
@@ -711,8 +677,8 @@ class LiveAssemblyServices:
                 dict(row)
                 for row in self.database.connection.execute(
                     f"""SELECT * FROM speech_bill_links
-                        WHERE bill_id IN ({','.join('?' for _ in bill_ids)})
-                          AND speech_id IN ({','.join('?' for _ in speech_ids)})
+                        WHERE bill_id IN ({",".join("?" for _ in bill_ids)})
+                          AND speech_id IN ({",".join("?" for _ in speech_ids)})
                         ORDER BY confidence DESC, bill_id, speech_id, relation_type""",
                     (*bill_ids, *speech_ids),
                 ).fetchall()
@@ -750,10 +716,10 @@ class LiveAssemblyServices:
             assembly_term=term,
             include_documents=False,
             deadline_at=filters.get("targeted_deadline_at"),
+            date_from=date_from,
+            date_to=date_to,
         )
-        months = self._months_for_query(
-            query, date_from, date_to, assembly_term=term
-        )
+        months = self._months_for_query(query, date_from, date_to, assembly_term=term)
         requested_months = _requested_months(query, date_from, date_to)
         if measure_hint is not None and not requested_months:
             # Search exact bill numbers from their proposal month through the
@@ -782,9 +748,7 @@ class LiveAssemblyServices:
             date_to = effective_end.isoformat()
         explicit_temporal_scope = bool(requested_months)
         bill_committees = {
-            value
-            for bill in bills
-            if (value := _value(bill, "COMMITTEE", "COMMITTEE_NM"))
+            value for bill in bills if (value := _value(bill, "COMMITTEE", "COMMITTEE_NM"))
         }
         if committee is None and len(bill_committees) == 1:
             committee = next(iter(bill_committees))
@@ -848,9 +812,7 @@ class LiveAssemblyServices:
         )
         return term
 
-    def _selected_assembly_term(
-        self, query: str, filters: dict[str, Any]
-    ) -> int:
+    def _selected_assembly_term(self, query: str, filters: dict[str, Any]) -> int:
         return _selected_assembly_term(
             default_term=self.assembly_term,
             query=query,
@@ -867,15 +829,16 @@ class LiveAssemblyServices:
         assembly_term: int,
         include_documents: bool = True,
         deadline_at: float | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> list[dict[str, Any]]:
         queries = _bill_queries(query)
         measure_hint = resolve_measure_alias(query)
         if measure_hint is not None and measure_hint.assembly_term != assembly_term:
             measure_hint = None
         requested_bill_numbers = extract_bill_numbers(query)
-        bill_numbers = (
-            requested_bill_numbers
-            or (list(measure_hint.bill_numbers) if measure_hint is not None else [])
+        bill_numbers = requested_bill_numbers or (
+            list(measure_hint.bill_numbers) if measure_hint is not None else []
         )
         rows: list[dict[str, Any]] = []
         hashes: list[str] = []
@@ -888,9 +851,7 @@ class LiveAssemblyServices:
                 page_size=10,
                 parameters={"AGE": assembly_term, "BILL_NO": bill_no},
             )
-            exact_rows = [
-                row for row in fetched_rows if _value(row, "BILL_NO") == bill_no
-            ]
+            exact_rows = [row for row in fetched_rows if _value(row, "BILL_NO") == bill_no]
             rows.extend(exact_rows)
             hashes.extend(source_hashes)
             if exact_rows:
@@ -905,9 +866,7 @@ class LiveAssemblyServices:
                 page_size=10,
                 parameters={"AGE": assembly_term, "BILL_NO": bill_no},
             )
-            exact_status_rows = [
-                row for row in status_rows if _value(row, "BILL_NO") == bill_no
-            ]
+            exact_status_rows = [row for row in status_rows if _value(row, "BILL_NO") == bill_no]
             if exact_status_rows:
                 recovered = exact_status_rows[0]
                 rows.append(recovered)
@@ -928,6 +887,11 @@ class LiveAssemblyServices:
         rows = _filter_bills_by_proposal_scope(
             rows,
             _proposal_date_scope(query),
+        )
+        rows = _filter_bills_by_temporal_scope(
+            rows,
+            date_from=date_from,
+            date_to=date_to,
         )
         if rows:
             source_hash = hashlib.sha256("".join(hashes).encode()).hexdigest()
@@ -952,9 +916,7 @@ class LiveAssemblyServices:
                     self._refresh_bill_documents(row)
         self._latest_bill_inventory = [_bill_inventory_entry(row) for row in rows]
         if measure_hint is not None:
-            observed = {
-                str(item.get("bill_no") or "") for item in self._latest_bill_inventory
-            }
+            observed = {str(item.get("bill_no") or "") for item in self._latest_bill_inventory}
             for identity in measure_hint.identities:
                 if identity.bill_no in observed:
                     continue
@@ -1020,9 +982,7 @@ class LiveAssemblyServices:
             term = _bill_assembly_term(bill_no) or assembly_term or self.assembly_term
             status_row = self._refresh_bill_status(bill_no, assembly_term=term)
             if status_row is None:
-                status_row = self._refresh_bill_by_number(
-                    bill_no, assembly_term=term
-                )
+                status_row = self._refresh_bill_by_number(bill_no, assembly_term=term)
             self._refresh_bill_documents({**bill, **(status_row or {})})
             refreshed = self.local.get_bill_status(bill_no)
             if refreshed is None:
@@ -1036,21 +996,15 @@ class LiveAssemblyServices:
                 if key in bill:
                     refreshed[key] = bill[key]
             _attach_lossless_bill_documents(self.database, refreshed)
-            refreshed["document_coverage"] = self._bill_document_coverage(
-                bill_no, refreshed
-            )
+            refreshed["document_coverage"] = self._bill_document_coverage(bill_no, refreshed)
             hydrated.append(refreshed)
         return hydrated
 
-    def _bill_document_coverage(
-        self, bill_no: str, bill: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _bill_document_coverage(self, bill_no: str, bill: dict[str, Any]) -> dict[str, Any]:
         known = self._document_refresh.get(bill_no)
         if known is not None:
             return known
-        document_count = len(
-            [item for item in bill.get("documents", []) if isinstance(item, dict)]
-        )
+        document_count = len([item for item in bill.get("documents", []) if isinstance(item, dict)])
         return {
             "complete": False,
             "discovered": document_count,
@@ -1086,9 +1040,7 @@ class LiveAssemblyServices:
                 self._latest_bill_inventory.append(item)
                 by_number[bill_no] = item
             documents = [
-                document
-                for document in bill.get("documents", [])
-                if isinstance(document, dict)
+                document for document in bill.get("documents", []) if isinstance(document, dict)
             ]
             item.update(
                 {
@@ -1232,9 +1184,9 @@ class LiveAssemblyServices:
             if not fetched.text.strip():
                 failed_urls.append(link.official_url)
                 continue
-            document_id = "kna:bill-document:" + hashlib.sha256(
-                link.official_url.encode()
-            ).hexdigest()[:24]
+            document_id = (
+                "kna:bill-document:" + hashlib.sha256(link.official_url.encode()).hexdigest()[:24]
+            )
             self.bill_documents.save(
                 BillDocument(
                     id=document_id,
@@ -1329,13 +1281,9 @@ class LiveAssemblyServices:
                 )
                 api_calls += 1
                 rows.extend(
-                    row
-                    for row in fetched_rows
-                    if _row_mentions_exact_bill(row, (bill_no,))
+                    row for row in fetched_rows if _row_mentions_exact_bill(row, (bill_no,))
                 )
-                deadline_exceeded = deadline_exceeded or self._deadline_expired(
-                    deadline_at
-                )
+                deadline_exceeded = deadline_exceeded or self._deadline_expired(deadline_at)
         else:
             for date_query in _meeting_date_queries(
                 queried_months,
@@ -1358,9 +1306,7 @@ class LiveAssemblyServices:
                     rows.extend(fetched_rows)
                 if deadline_exceeded:
                     break
-            subcommittee_parameters: dict[str, str | int] = {
-                "ERACO": f"제{term}대"
-            }
+            subcommittee_parameters: dict[str, str | int] = {"ERACO": f"제{term}대"}
             if committee:
                 subcommittee_parameters["CMIT_NM"] = committee
             if not self._deadline_expired(deadline_at):
@@ -1386,9 +1332,7 @@ class LiveAssemblyServices:
                 )
             except (TypeError, ValueError):
                 continue
-        self._latest_meeting_inventory = _meeting_inventory(
-            self.database, candidates
-        )
+        self._latest_meeting_inventory = _meeting_inventory(self.database, candidates)
         if not ingest_minutes:
             self.last_refresh = {
                 "meeting_api_calls": api_calls,
@@ -1398,9 +1342,7 @@ class LiveAssemblyServices:
                 "minutes_ingested": 0,
                 "minutes_failures": 0,
                 "deadline_seconds": (
-                    self.targeted_deadline_seconds
-                    if measure_hint is not None
-                    else None
+                    self.targeted_deadline_seconds if measure_hint is not None else None
                 ),
                 "deadline_exceeded": deadline_exceeded,
                 "months_queried": effective_queried_months,
@@ -1428,17 +1370,11 @@ class LiveAssemblyServices:
                 requested_stage_names,
                 limit=len(candidates),
             )
-            window = ordered_candidates[
-                candidate_offset : candidate_offset + targeted_limit
-            ]
+            window = ordered_candidates[candidate_offset : candidate_offset + targeted_limit]
         else:
-            window = candidates[
-                candidate_offset : candidate_offset + self.max_minutes_per_request
-            ]
+            window = candidates[candidate_offset : candidate_offset + self.max_minutes_per_request]
         bounded_core_urls = [
-            value
-            for row in window
-            if (value := _optional_minutes_url(row)) is not None
+            value for row in window if (value := _optional_minutes_url(row)) is not None
         ]
         cached_current_urls = {
             str(item.get("official_url") or "")
@@ -1464,21 +1400,15 @@ class LiveAssemblyServices:
                 failures += 1
                 if official_url:
                     self._minutes_failed_urls.add(official_url)
-                deadline_exceeded = deadline_exceeded or self._deadline_expired(
-                    deadline_at
-                )
+                deadline_exceeded = deadline_exceeded or self._deadline_expired(deadline_at)
                 continue
             if official_url:
                 self._minutes_failed_urls.discard(official_url)
             ingested += 1
-            deadline_exceeded = deadline_exceeded or self._deadline_expired(
-                deadline_at
-            )
+            deadline_exceeded = deadline_exceeded or self._deadline_expired(deadline_at)
             if deadline_exceeded:
                 break
-        self._latest_meeting_inventory = _meeting_inventory(
-            self.database, candidates
-        )
+        self._latest_meeting_inventory = _meeting_inventory(self.database, candidates)
         next_offset = candidate_offset + attempted
         has_more = next_offset < len(candidates)
         candidate_urls = {
@@ -1497,8 +1427,7 @@ class LiveAssemblyServices:
             "bounded_core_official_urls": bounded_core_urls,
             "attempted_candidate_count": min(len(candidates), next_offset),
             "checked_candidate_count": sum(
-                item.get("full_text_loaded") is True
-                for item in self._latest_meeting_inventory
+                item.get("full_text_loaded") is True for item in self._latest_meeting_inventory
             ),
             "unselected_candidate_count": max(0, len(candidates) - next_offset),
             "deadline_seconds": (
@@ -1546,9 +1475,7 @@ class LiveAssemblyServices:
             if previous_month >= term.date_from:
                 months.add(previous_month.strftime("%Y-%m"))
         return {
-            month
-            for month in months
-            if _month_intersects_term(month, term.date_from, term.date_to)
+            month for month in months if _month_intersects_term(month, term.date_from, term.date_to)
         }
 
 
@@ -1591,6 +1518,11 @@ def create_live_services(
 
 def _bill_queries(query: str) -> list[str]:
     inferred = infer_bill_title_query(query)
+    # A high-signal named statute is already the narrowest official BILL_NAME
+    # key. Related-concept expansion here only multiplies API calls and admits
+    # unrelated bills before exact identity resolution.
+    if inferred:
+        return [inferred]
     try:
         reviewed = []
         for expansion in LEGAL_TERMINOLOGY.expand(query).expansions:
@@ -1601,13 +1533,8 @@ def _bill_queries(query: str) -> list[str]:
                 reviewed.append("AI")
     except ValueError:
         reviewed = []
-    terms = [
-        term
-        for term in query_terms(query)
-        if _is_bill_query_term(term)
-    ]
+    terms = [term for term in query_terms(query) if _is_bill_query_term(term)]
     candidates = [
-        *([inferred] if inferred else []),
         *reviewed,
         *terms,
     ]
@@ -1674,6 +1601,43 @@ def _filter_bills_by_proposal_scope(
     ]
 
 
+def _filter_bills_by_temporal_scope(
+    bills: Iterable[dict[str, Any]],
+    *,
+    date_from: str | None,
+    date_to: str | None,
+) -> list[dict[str, Any]]:
+    """Keep bills with at least one official lifecycle date in the request window."""
+
+    lower = _date_value(date_from or "")
+    upper = _date_value(date_to or "")
+    values = list(bills)
+    if lower is None and upper is None:
+        return values
+    date_fields = (
+        "PROPOSE_DT",
+        "PROC_DT",
+        "CMT_PROC_DT",
+        "COMMITTEE_PROC_DT",
+        "LAW_PROC_DT",
+        "RGS_PROC_DT",
+        "ANNOUNCE_DT",
+    )
+    bounded: list[dict[str, Any]] = []
+    for bill in values:
+        dates = [
+            parsed
+            for field in date_fields
+            if (parsed := _date_value(_value(bill, field) or "")) is not None
+        ]
+        if any(
+            (lower is None or observed >= lower) and (upper is None or observed <= upper)
+            for observed in dates
+        ):
+            bounded.append(bill)
+    return bounded
+
+
 def _bounded_bill_payloads(bills: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep broad overviews compact while routing report text to targeted lookup."""
 
@@ -1710,14 +1674,8 @@ def _rank_bills_by_observed_importance(
     for value in bills:
         bill = dict(value)
         relevance = bill.get("selection_relevance")
-        topical_score = (
-            int(relevance.get("score") or 0)
-            if isinstance(relevance, dict)
-            else 0
-        )
-        discussion_count = len(
-            speech_ids_by_bill.get(str(bill.get("id") or ""), set())
-        )
+        topical_score = int(relevance.get("score") or 0) if isinstance(relevance, dict) else 0
+        discussion_count = len(speech_ids_by_bill.get(str(bill.get("id") or ""), set()))
         processed = bool(
             bill.get("processed_at")
             or (
@@ -1751,9 +1709,7 @@ def _rank_bills_by_observed_importance(
         key=lambda bill: (
             -int((bill.get("importance") or {}).get("score") or 0),
             -int(
-                ((bill.get("importance") or {}).get("signals") or {}).get(
-                    "linked_discussion_count"
-                )
+                ((bill.get("importance") or {}).get("signals") or {}).get("linked_discussion_count")
                 or 0
             ),
             -(_bill_proposal_date(bill) or date.min).toordinal(),
@@ -1776,16 +1732,10 @@ def _filter_issue_by_proposal_scope(
     """Apply proposal-year semantics to selected bills and every bill inventory view."""
 
     scoped_bills = _filter_bills_by_proposal_scope(
-        (
-            bill
-            for bill in payload.get("bills", [])
-            if isinstance(bill, dict)
-        ),
+        (bill for bill in payload.get("bills", []) if isinstance(bill, dict)),
         scope,
     )
-    observed_links = [
-        link for link in payload.get("links", []) if isinstance(link, dict)
-    ]
+    observed_links = [link for link in payload.get("links", []) if isinstance(link, dict)]
     ranked_bills = _rank_bills_by_observed_importance(
         scoped_bills,
         observed_links,
@@ -1808,15 +1758,11 @@ def _filter_issue_by_proposal_scope(
         ),
     }
 
-    speeches = [
-        speech
-        for speech in payload.get("speeches", [])
-        if isinstance(speech, dict)
-    ][:requested_limit]
+    speeches = [speech for speech in payload.get("speeches", []) if isinstance(speech, dict)][
+        :requested_limit
+    ]
     payload["speeches"] = speeches
-    selected_speech_ids = {
-        str(speech.get("speech_id") or "") for speech in speeches
-    }
+    selected_speech_ids = {str(speech.get("speech_id") or "") for speech in speeches}
     threads = [
         thread
         for thread in payload.get("discussion_threads", [])
@@ -1830,28 +1776,16 @@ def _filter_issue_by_proposal_scope(
     raw_inventory = payload.get("scope_inventory")
     inventory = raw_inventory if isinstance(raw_inventory, dict) else {}
     raw_bill_candidates = inventory.get("bill_candidates")
-    bill_candidates = (
-        raw_bill_candidates if isinstance(raw_bill_candidates, dict) else {}
-    )
+    bill_candidates = raw_bill_candidates if isinstance(raw_bill_candidates, dict) else {}
     candidate_items = _filter_bills_by_proposal_scope(
-        (
-            item
-            for item in bill_candidates.get("items", [])
-            if isinstance(item, dict)
-        ),
+        (item for item in bill_candidates.get("items", []) if isinstance(item, dict)),
         scope,
     )
     selected_bill_ids = {str(bill.get("id") or "") for bill in selected}
-    selected_bill_numbers = {
-        str(bill.get("bill_no") or "") for bill in selected
-    }
-    importance_by_id = {
-        str(bill.get("id") or ""): bill.get("importance")
-        for bill in ranked_bills
-    }
+    selected_bill_numbers = {str(bill.get("bill_no") or "") for bill in selected}
+    importance_by_id = {str(bill.get("id") or ""): bill.get("importance") for bill in ranked_bills}
     importance_by_number = {
-        str(bill.get("bill_no") or ""): bill.get("importance")
-        for bill in ranked_bills
+        str(bill.get("bill_no") or ""): bill.get("importance") for bill in ranked_bills
     }
     eligible_count = 0
     for item in candidate_items:
@@ -1873,12 +1807,8 @@ def _filter_issue_by_proposal_scope(
     bill_candidates["total"] = len(candidate_items)
     inventory["bill_candidates"] = bill_candidates
 
-    allowed_bill_ids = {
-        str(item.get("bill_id") or "") for item in candidate_items
-    }
-    allowed_bill_numbers = {
-        str(item.get("bill_no") or "") for item in candidate_items
-    }
+    allowed_bill_ids = {str(item.get("bill_id") or "") for item in candidate_items}
+    allowed_bill_numbers = {str(item.get("bill_no") or "") for item in candidate_items}
 
     def allowed_link(link: Any) -> bool:
         if not isinstance(link, dict):
@@ -1887,14 +1817,10 @@ def _filter_issue_by_proposal_scope(
         bill_no = str(link.get("bill_no") or "")
         return bill_id in allowed_bill_ids or bill_no in allowed_bill_numbers
 
-    payload["links"] = [
-        link for link in payload.get("links", []) if allowed_link(link)
-    ]
+    payload["links"] = [link for link in payload.get("links", []) if allowed_link(link)]
     raw_links = inventory.get("links")
     links_inventory = raw_links if isinstance(raw_links, dict) else {}
-    link_items = [
-        link for link in links_inventory.get("items", []) if allowed_link(link)
-    ]
+    link_items = [link for link in links_inventory.get("items", []) if allowed_link(link)]
     links_inventory["items"] = link_items
     links_inventory["total"] = len(link_items)
     inventory["links"] = links_inventory
@@ -1952,9 +1878,7 @@ def _meeting_date_queries(
         if month_numbers == full_year or elapsed_current_year:
             queries.append(year)
         else:
-            queries.extend(
-                f"{year}-{month:02d}" for month in sorted(month_numbers)
-            )
+            queries.extend(f"{year}-{month:02d}" for month in sorted(month_numbers))
     return queries
 
 
@@ -1966,11 +1890,7 @@ def _targeted_measure_meeting_queries(
     """Build the smallest exact agenda query plan for a resolved measure family."""
 
     years = sorted(
-        {
-            value[:4]
-            for value in months
-            if re.fullmatch(r"(?:19|20)\d{2}-(?:1[0-2]|0[1-9])", value)
-        }
+        {value[:4] for value in months if re.fullmatch(r"(?:19|20)\d{2}-(?:1[0-2]|0[1-9])", value)}
     )
     if not years:
         return []
@@ -1978,43 +1898,29 @@ def _targeted_measure_meeting_queries(
     if not requested:
         requested = {"subcommittee", "standing_committee", "plenary"}
     source_identity = next(
-        (
-            identity
-            for identity in hint.identities
-            if identity.role == "source_member_bill"
-        ),
+        (identity for identity in hint.identities if identity.role == "source_member_bill"),
         hint.identities[0],
     )
     primary_identity = hint.identity(hint.primary_vehicle_bill_no)
     source_year = source_identity.proposed_at[:4]
     primary_year = primary_identity.proposed_at[:4] if primary_identity else years[0]
-    source_years = [
-        year for year in years if source_year <= year <= primary_year
-    ] or [years[0]]
-    vehicle_years = [year for year in years if year >= primary_year] or [years[-1]]
+    source_years = [year for year in years if source_year <= year <= primary_year] or [years[0]]
+    milestone_years = sorted(
+        {value[:4] for value in hint.milestone_months if value[:4] in years}
+    )
+    plenary_year = milestone_years[-1] if milestone_years else years[-1]
     result: list[tuple[MeetingSource, str, str]] = []
     if requested.intersection({"subcommittee", "standing_committee"}):
-        # Query only the source bill's proposal-to-alternative years, then the
-        # alternative's own years.  Later referrals to another committee (for
-        # example Legislation and Judiciary) remain visible because no
-        # originating committee-name filter is applied.
+        # Deliberation is indexed under a member bill while the committee
+        # alternative usually appears only after that deliberation. Querying
+        # both numbers doubles calls and commonly adds an empty result.
         for year in source_years:
-            result.append(
-                (MeetingSource.COMMITTEE, year, source_identity.bill_no)
-            )
-        for year in vehicle_years:
-            result.append(
-                (
-                    MeetingSource.COMMITTEE,
-                    year,
-                    hint.primary_vehicle_bill_no,
-                )
-            )
+            result.append((MeetingSource.COMMITTEE, year, source_identity.bill_no))
     if "plenary" in requested:
         result.append(
             (
                 MeetingSource.PLENARY,
-                years[-1],
+                plenary_year,
                 hint.primary_vehicle_bill_no,
             )
         )
@@ -2036,11 +1942,7 @@ def _row_mentions_exact_bill(row: dict[str, Any], bill_numbers: Iterable[str]) -
         elif value is not None:
             yield str(value)
 
-    observed = {
-        match.group(1)
-        for raw in values(row)
-        for match in _EXACT_BILL_NUMBER.finditer(raw)
-    }
+    observed = {match.group(1) for raw in values(row) for match in _EXACT_BILL_NUMBER.finditer(raw)}
     return bool(expected.intersection(observed))
 
 
@@ -2088,9 +1990,7 @@ def _stage_balanced_meeting_rows(
 
 
 def _normalized_phrase_present(phrase: str, text: str) -> bool:
-    return re.sub(r"\s+", "", phrase).casefold() in re.sub(
-        r"\s+", "", text
-    ).casefold()
+    return re.sub(r"\s+", "", phrase).casefold() in re.sub(r"\s+", "", text).casefold()
 
 
 def _is_structural_speaker_label(value: str) -> bool:
@@ -2111,9 +2011,7 @@ def _stage_for_meeting_type(meeting_type: str) -> str | None:
     }.get(meeting_type)
 
 
-def _target_agenda_numbers(
-    meeting: dict[str, Any], *, exact_numbers: set[str]
-) -> set[int]:
+def _target_agenda_numbers(meeting: dict[str, Any], *, exact_numbers: set[str]) -> set[int]:
     """Return official agenda ordinals tied to the exact target bill family."""
 
     result: set[int] = set()
@@ -2186,10 +2084,7 @@ def _agenda_references_form_named_range(
     following_start, following_end, _following_numbers = following
     between = text[current_end:following_start]
     after_following = text[following_end:following_boundary]
-    return bool(
-        re.search(r"부터\s*$", between)
-        and re.search(r"까지", after_following)
-    )
+    return bool(re.search(r"부터\s*$", between) and re.search(r"까지", after_following))
 
 
 def _scope_target_measure_turn_text(
@@ -2217,12 +2112,8 @@ def _scope_target_measure_turn_text(
     if target_index is not None:
         start, reference_end, _numbers = references[target_index]
         if target_index > 0:
-            previous_start, _previous_end, _previous_numbers = references[
-                target_index - 1
-            ]
-            preceding = re.sub(
-                r"\s+", "", text[previous_start:start]
-            ).casefold()
+            previous_start, _previous_end, _previous_numbers = references[target_index - 1]
+            preceding = re.sub(r"\s+", "", text[previous_start:start]).casefold()
             target_titles = {
                 re.sub(r"\s+", "", identity.name).casefold()
                 for identity in hint.identities
@@ -2234,8 +2125,7 @@ def _scope_target_measure_turn_text(
         alternative_patterns = [
             _phrase_pattern(identity.name)
             for identity in hint.identities
-            if identity.name
-            and identity.role == "committee_alternative_primary_vehicle"
+            if identity.name and identity.role == "committee_alternative_primary_vehicle"
         ]
         title_match = next(
             (
@@ -2328,9 +2218,7 @@ def _measure_discussion_segment_rows(
             observed_numbers = set(_EXACT_BILL_NUMBER.findall(compact))
             exact_identifier = bool(observed_numbers.intersection(exact_numbers))
             exact_link = bool(
-                linked_numbers_by_speech.get(speech_id, set()).intersection(
-                    exact_numbers
-                )
+                linked_numbers_by_speech.get(speech_id, set()).intersection(exact_numbers)
             )
             omnibus = (
                 bool(observed_numbers.difference(exact_numbers))
@@ -2340,20 +2228,13 @@ def _measure_discussion_segment_rows(
                 title and title in text_compact for title in alternative_titles
             )
             platform_anchor = any(
-                term in compact
-                for term in ("플랫폼", "비대면", "약국중개", "원격의료산업협의회")
+                term in compact for term in ("플랫폼", "비대면", "약국중개", "원격의료산업협의회")
             )
-            wholesale_anchor = any(
-                term in compact for term in ("의약품도매", "도매상", "도매업")
-            )
+            wholesale_anchor = any(term in compact for term in ("의약품도매", "도매상", "도매업"))
             rebate_anchor = "리베이트" in compact
             alias_anchor = "닥터나우" in compact
-            concept_count = sum(
-                (platform_anchor, wholesale_anchor, rebate_anchor)
-            )
-            referenced_agenda_numbers = _referenced_agenda_numbers(
-                f"{agenda}\n{text}"
-            )
+            concept_count = sum((platform_anchor, wholesale_anchor, rebate_anchor))
+            referenced_agenda_numbers = _referenced_agenda_numbers(f"{agenda}\n{text}")
             target_agenda_reference = bool(
                 target_agenda_numbers.intersection(referenced_agenda_numbers)
             )
@@ -2362,13 +2243,11 @@ def _measure_discussion_segment_rows(
                 for term in ("상정", "심사", "토론", "의결", "투표", "채택", "가결")
             )
             outcome = any(
-                term in text_compact
-                for term in ("투표결과", "가결되었음을선포", "대안으로채택")
+                term in text_compact for term in ("투표결과", "가결되었음을선포", "대안으로채택")
             )
             safe_specific_anchor = (
-                (alias_anchor or concept_count >= 2)
-                and not observed_numbers.difference(exact_numbers)
-            )
+                alias_anchor or concept_count >= 2
+            ) and not observed_numbers.difference(exact_numbers)
             target_procedure_anchor = target_agenda_reference and procedural
             alternative_outcome_anchor = alternative_title_anchor and outcome
             if not (
@@ -2381,8 +2260,7 @@ def _measure_discussion_segment_rows(
                 continue
             anchor_kinds[position] = (
                 "outcome"
-                if outcome
-                and (target_agenda_reference or alternative_title_anchor)
+                if outcome and (target_agenda_reference or alternative_title_anchor)
                 else "anchor"
             )
         anchor_positions = sorted(anchor_kinds)
@@ -2395,9 +2273,7 @@ def _measure_discussion_segment_rows(
             if not clusters:
                 clusters.append([position])
                 continue
-            previous_sequence = int(
-                ordered[clusters[-1][-1]].get("sequence") or 0
-            )
+            previous_sequence = int(ordered[clusters[-1][-1]].get("sequence") or 0)
             if sequence - previous_sequence <= 8:
                 clusters[-1].append(position)
             else:
@@ -2467,8 +2343,7 @@ def _stage_balanced_speeches(
         candidates = [
             speech
             for speech in speeches
-            if meeting_type_by_id.get(str(speech.get("meeting_id") or ""))
-            == meeting_type
+            if meeting_type_by_id.get(str(speech.get("meeting_id") or "")) == meeting_type
         ]
         diverse: list[dict[str, Any]] = []
         seen_speakers: set[str] = set()
@@ -2515,8 +2390,7 @@ def _bound_measure_threads(
     """Keep direct turns plus context proven to sit inside a target segment."""
 
     attributed_by_id = {
-        str(speech.get("speech_id") or ""): speech
-        for speech in attributed_speeches
+        str(speech.get("speech_id") or ""): speech for speech in attributed_speeches
     }
     segment_context_ids = segment_context_ids or set()
     bounded: list[dict[str, Any]] = []
@@ -2628,14 +2502,10 @@ def _month_value(value: str | None) -> str | None:
 
 def _requested_months(query: str, *values: str | None) -> list[str]:
     month_matches = tuple(_DATE_MONTH.finditer(query))
-    months = [
-        f"{match.group('year')}-{int(match.group('month')):02d}"
-        for match in month_matches
-    ]
+    months = [f"{match.group('year')}-{int(match.group('month')):02d}" for match in month_matches]
     for match in _DATE_YEAR.finditer(query):
         if any(
-            match.start() >= month_match.start()
-            and match.end() <= month_match.end()
+            match.start() >= month_match.start() and match.end() <= month_match.end()
             for month_match in month_matches
         ):
             continue
@@ -2671,9 +2541,7 @@ def _selected_assembly_term(
 
     default = official_assembly_term(int(default_term)).number
     explicit = (
-        official_assembly_term(int(explicit_term)).number
-        if explicit_term is not None
-        else None
+        official_assembly_term(int(explicit_term)).number if explicit_term is not None else None
     )
     bill_terms = {
         term
@@ -2745,6 +2613,16 @@ def _validate_date_scope_intersects_term(
 
 
 def _date_value(value: str) -> date | None:
+    compact = re.fullmatch(r"\s*((?:19|20)\d{6})\s*", value)
+    if compact is not None:
+        try:
+            return date(
+                int(compact.group(1)[:4]),
+                int(compact.group(1)[4:6]),
+                int(compact.group(1)[6:8]),
+            )
+        except ValueError:
+            return None
     match = re.match(
         r"^\s*((?:19|20)\d{2})[-./년 ]+\s*(1[0-2]|0?[1-9])"
         r"(?:[-./월 ]+\s*(3[01]|[12]\d|0?[1-9]))?",
@@ -2829,9 +2707,7 @@ def _research_pagination(refresh: dict[str, Any]) -> dict[str, Any]:
     )
     temporal_scope.update(
         _temporal_window(
-            temporal_scope.get("queried_months")
-            or refresh.get("months_queried")
-            or ()
+            temporal_scope.get("queried_months") or refresh.get("months_queried") or ()
         )
     )
     window_complete = not has_more and failures == 0 and not deadline_exceeded
@@ -2847,9 +2723,7 @@ def _research_pagination(refresh: dict[str, Any]) -> dict[str, Any]:
         "window_complete": window_complete,
         "partial": not overall_complete,
         "window_partial": not window_complete,
-        "completion_scope": (
-            "bounded_targeted_core" if targeted_measure else "temporal_window"
-        ),
+        "completion_scope": ("bounded_targeted_core" if targeted_measure else "temporal_window"),
         "candidate_inventory_complete": unselected_candidates == 0,
         "unselected_candidate_count": unselected_candidates,
         "deadline_exceeded": deadline_exceeded,
@@ -2893,9 +2767,7 @@ def _optional_minutes_url(row: dict[str, Any]) -> str | None:
         return None
 
 
-def _bounded_inventory_page(
-    items: list[dict[str, Any]], *, limit: int
-) -> dict[str, Any]:
+def _bounded_inventory_page(items: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
     total = len(items)
     returned = items[:limit]
     return {
@@ -2914,9 +2786,8 @@ def _bill_inventory_entry(row: dict[str, Any]) -> dict[str, Any]:
     bill_id = _value(row, "BILL_ID")
     official_url = _value(row, "DETAIL_LINK", "LINK_URL")
     if not official_url and bill_id:
-        official_url = (
-            "https://likms.assembly.go.kr/bill/billDetail.do?"
-            + urllib.parse.urlencode({"billId": bill_id})
+        official_url = "https://likms.assembly.go.kr/bill/billDetail.do?" + urllib.parse.urlencode(
+            {"billId": bill_id}
         )
     return {
         "bill_no": bill_no,
@@ -2930,18 +2801,14 @@ def _bill_inventory_entry(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _meeting_inventory(
-    database: Database, rows: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+def _meeting_inventory(database: Database, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     speech_stats: dict[str, dict[str, Any]] = {}
     for row in database.connection.execute(
         """SELECT meeting_id, parser_version, count(*) AS speech_count
            FROM speeches GROUP BY meeting_id, parser_version"""
     ).fetchall():
         meeting_id = str(row["meeting_id"])
-        stats = speech_stats.setdefault(
-            meeting_id, {"speech_count": 0, "parser_versions": set()}
-        )
+        stats = speech_stats.setdefault(meeting_id, {"speech_count": 0, "parser_versions": set()})
         stats["speech_count"] += int(row["speech_count"])
         if row["parser_version"]:
             stats["parser_versions"].add(str(row["parser_version"]))
@@ -2967,12 +2834,8 @@ def _meeting_inventory(
             )
         )
         if not related_bill_numbers:
-            related_bill_numbers = list(
-                dict.fromkeys(_EXACT_BILL_NUMBER.findall(repr(row)))
-            )
-        stats = speech_stats.get(
-            meeting.id, {"speech_count": 0, "parser_versions": set()}
-        )
+            related_bill_numbers = list(dict.fromkeys(_EXACT_BILL_NUMBER.findall(repr(row))))
+        stats = speech_stats.get(meeting.id, {"speech_count": 0, "parser_versions": set()})
         speech_count = int(stats["speech_count"])
         parser_versions = sorted(stats["parser_versions"])
         items.append(
@@ -2986,9 +2849,7 @@ def _meeting_inventory(
                 "agenda_items": agendas,
                 "agenda_item_count": len(agendas),
                 "official_url": meeting.source_url,
-                "full_text_loaded": (
-                    speech_count > 0 and parser_versions == [PARSER_VERSION]
-                ),
+                "full_text_loaded": (speech_count > 0 and parser_versions == [PARSER_VERSION]),
                 "cached_speech_rows_present": speech_count > 0,
                 "speech_count": speech_count,
                 "parser_versions": parser_versions,
@@ -3044,23 +2905,19 @@ def _filter_issue_to_measure_family(
         if isinstance(bill, dict) and str(bill.get("bill_no") or "") in numbers
     ]
     payload["bills"] = bills
-    allowed_bill_ids = {
-        str(bill.get("id") or f"kna:bill:{bill.get('bill_no')}") for bill in bills
-    }
+    allowed_bill_ids = {str(bill.get("id") or f"kna:bill:{bill.get('bill_no')}") for bill in bills}
     allowed_bill_ids.update(f"kna:bill:{number}" for number in numbers)
     speeches = [
         speech
         for speech in payload.get("speeches", [])
-        if isinstance(speech, dict)
-        and str(speech.get("meeting_id") or "") in meeting_ids
+        if isinstance(speech, dict) and str(speech.get("meeting_id") or "") in meeting_ids
     ]
     payload["speeches"] = speeches
     speech_ids = {str(speech.get("speech_id") or "") for speech in speeches}
     payload["discussion_threads"] = [
         thread
         for thread in payload.get("discussion_threads", [])
-        if isinstance(thread, dict)
-        and str(thread.get("meeting_id") or "") in meeting_ids
+        if isinstance(thread, dict) and str(thread.get("meeting_id") or "") in meeting_ids
     ]
     payload["links"] = [
         link
@@ -3093,8 +2950,7 @@ def _filter_issue_to_measure_family(
     speech_items = [
         item
         for item in speech_inventory.get("items", [])
-        if isinstance(item, dict)
-        and str(item.get("meeting_id") or "") in meeting_ids
+        if isinstance(item, dict) and str(item.get("meeting_id") or "") in meeting_ids
     ]
     speech_inventory.update({"items": speech_items, "total": len(speech_items)})
     raw_links = inventory.get("links")
@@ -3124,9 +2980,7 @@ def _is_legislator_role(role: str) -> bool:
         for excluded in ("전문위원", "국무위원", "정부위원", "장관", "차관", "처장", "국장")
     ):
         return False
-    return normalized == "의원" or normalized.endswith("위원") or normalized.endswith(
-        "위원장"
-    )
+    return normalized == "의원" or normalized.endswith("위원") or normalized.endswith("위원장")
 
 
 def _issue_stage_coverage(
@@ -3180,9 +3034,7 @@ def _issue_stage_coverage(
         candidates = all_candidates
         checked = [item for item in candidates if item.get("full_text_loaded") is True]
         matched = [
-            item
-            for item in candidates
-            if str(item.get("meeting_id") or "") in speech_meeting_ids
+            item for item in candidates if str(item.get("meeting_id") or "") in speech_meeting_ids
         ]
         member_matched = [
             item
@@ -3190,9 +3042,7 @@ def _issue_stage_coverage(
             if str(item.get("meeting_id") or "") in member_speech_meeting_ids
         ]
         failures = [
-            item
-            for item in candidates
-            if str(item.get("official_url") or "") in failed_urls
+            item for item in candidates if str(item.get("official_url") or "") in failed_urls
         ]
         if failures:
             state = "failed"
@@ -3242,9 +3092,7 @@ def _issue_stage_coverage(
             "state": state,
             "candidate_count": len(candidates),
             "observed_candidate_count": len(all_candidates),
-            "unselected_candidate_count": max(
-                0, len(all_candidates) - len(candidates)
-            ),
+            "unselected_candidate_count": max(0, len(all_candidates) - len(candidates)),
             "checked_count": len(checked),
             "matched_speech_count": len(matched),
             "matched_discussion_count": len(member_matched),
@@ -3252,16 +3100,13 @@ def _issue_stage_coverage(
             "pending_count": max(0, len(candidates) - len(checked) - len(failures)),
             "meetings": meeting_records,
             "gap_reason": (
-                None
-                if state in {"discussion_found", "record_found_no_member_debate"}
-                else state
+                None if state in {"discussion_found", "record_found_no_member_debate"} else state
             ),
         }
     return {
         "requested_stages": list(requested),
         "complete": all(
-            str(stages[stage].get("state") or "") in complete_states
-            for stage in requested
+            str(stages[stage].get("state") or "") in complete_states for stage in requested
         ),
         "stages": stages,
         "exact_measure_check": exact_check_performed,

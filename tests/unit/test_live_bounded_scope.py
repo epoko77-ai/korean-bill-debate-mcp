@@ -10,6 +10,7 @@ from kasm.live import (
     LiveAssemblyServices,
     _bill_queries,
     _filter_bills_by_proposal_scope,
+    _filter_bills_by_temporal_scope,
     _filter_meeting_rows_by_scope,
     _measure_discussion_segment_rows,
     _meeting_date_queries,
@@ -26,6 +27,10 @@ QUERY = (
 INCIDENT_QUERY = (
     "최근 본회의를 통과한 닥터나우 금지법과 관련하여, 소위원회, 상임위원회, "
     "본회의에서 의원들의 주요 논의 내용을 정리해줘"
+)
+AI_BASIC_ACT_QUERY = (
+    "제22대 국회 AI 기본법의 법안소위·과방위 전체회의·본회의 주요 논의를 "
+    "정확하고 충분하게 정리해줘."
 )
 
 
@@ -212,6 +217,108 @@ class IncidentClient:
         )
 
 
+class AiBasicActClient:
+    api_key = "fixture-key"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, str | int]]] = []
+
+    def fetch_page(
+        self,
+        dataset: str,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        parameters: dict[str, str | int] | None = None,
+        refresh: bool = False,
+    ) -> ApiPage:
+        del refresh
+        values = dict(parameters or {})
+        self.calls.append((dataset, values))
+        rows: tuple[dict[str, Any], ...]
+        if dataset == BILL_DATASET and values.get("BILL_NO") == "2203072":
+            rows = (
+                {
+                    "BILL_ID": "PRC_AI_BASIC_ACT_SOURCE",
+                    "BILL_NO": "2203072",
+                    "BILL_NAME": "인공지능 기본법안",
+                    "AGE": "22",
+                    "PROPOSER": "한민수의원 등 10인",
+                    "COMMITTEE": "과학기술정보방송통신위원회",
+                    "PROPOSE_DT": "2024-08-22",
+                    "PROC_RESULT": "대안반영폐기",
+                    "CMT_PROC_DT": "2024-11-26",
+                    "PROC_DT": "2024-12-26",
+                },
+            )
+        elif dataset == BILL_DATASET:
+            rows = ()
+        elif dataset == BILL_STATUS_DATASET and values.get("BILL_NO") == "2206772":
+            rows = (
+                {
+                    "BILL_ID": "PRC_AI_BASIC_ACT_VEHICLE",
+                    "BILL_NO": "2206772",
+                    "BILL_NAME": (
+                        "인공지능 발전과 신뢰 기반 조성 등에 관한 "
+                        "기본법안(대안)"
+                    ),
+                    "AGE": "22",
+                    "PROPOSER": "과학기술정보방송통신위원장",
+                    "COMMITTEE": "과학기술정보방송통신위원회",
+                    "PROPOSE_DT": "2024-12-20",
+                    "PROC_RESULT": "원안가결",
+                    "PROC_DT": "2024-12-26",
+                },
+            )
+        elif dataset == BILL_STATUS_DATASET:
+            rows = ()
+        elif dataset == DATASET_BY_SOURCE[MeetingSource.COMMITTEE]:
+            assert values == {
+                "DAE_NUM": 22,
+                "CONF_DATE": "2024",
+                "SUB_NAME": "2203072",
+            }
+            rows = (
+                _ai_basic_act_meeting_row(
+                    "2024-11-21",
+                    "과학기술정보방송통신위원회 정보통신방송법안심사소위원회",
+                    "2203072",
+                    "ai-subcommittee",
+                ),
+                _ai_basic_act_meeting_row(
+                    "2024-11-26",
+                    "과학기술정보방송통신위원회 전체회의",
+                    "2203072",
+                    "ai-standing",
+                ),
+            )
+        elif dataset == DATASET_BY_SOURCE[MeetingSource.PLENARY]:
+            assert values == {
+                "DAE_NUM": 22,
+                "CONF_DATE": "2024",
+                "SUB_NAME": "2206772",
+            }
+            rows = (
+                _ai_basic_act_meeting_row(
+                    "2024-12-26",
+                    "제420회 제1차 국회본회의",
+                    "2206772",
+                    "ai-plenary",
+                ),
+            )
+        else:
+            raise AssertionError((dataset, values))
+        return ApiPage(
+            dataset,
+            page,
+            page_size,
+            len(rows),
+            rows,
+            "https://open.assembly.go.kr/portal/openapi/fixture",
+            dataset,
+        )
+
+
 class ManyIncidentMeetingsClient(IncidentClient):
     """Expose more exact agenda candidates than one bounded targeted window."""
 
@@ -281,6 +388,23 @@ def _incident_meeting_row(
     }
 
 
+def _ai_basic_act_meeting_row(
+    meeting_date: str,
+    title: str,
+    bill_no: str,
+    suffix: str,
+) -> dict[str, Any]:
+    return {
+        "DAE_NUM": "22",
+        "CONF_DATE": meeting_date,
+        "COMM_NAME": title,
+        "TITLE": title,
+        "SUB_NAME": f"인공지능 기본법안 의안번호 {bill_no}",
+        "CONF_ID": suffix,
+        "PDF_LINK_URL": f"https://record.assembly.go.kr/{suffix}.pdf",
+    }
+
+
 def test_exact_question_uses_only_three_topic_bill_queries() -> None:
     assert _bill_queries(QUERY) == ["인공지능", "AI", "인공지능 기본법"]
 
@@ -293,6 +417,142 @@ def test_exact_question_has_hard_proposal_scope_and_one_year_meeting_query() -> 
     assert _meeting_date_queries(
         [f"2026-{month:02d}" for month in range(1, 13)]
     ) == ["2026"]
+
+
+def test_ai_basic_act_alias_resolves_source_and_final_vehicle() -> None:
+    hint = resolve_measure_alias(AI_BASIC_ACT_QUERY)
+
+    assert hint is not None
+    assert hint.key == "artificial_intelligence_basic_act_2024"
+    assert hint.assembly_term == 22
+    assert hint.committee == "과학기술정보방송통신위원회"
+    assert hint.bill_numbers == ("2203072", "2206772")
+    assert hint.primary_vehicle_bill_no == "2206772"
+    assert [identity.role for identity in hint.identities] == [
+        "source_member_bill",
+        "committee_alternative_primary_vehicle",
+    ]
+
+
+def test_ai_basic_act_uses_source_for_committee_and_vehicle_for_plenary(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "ai-basic-act-targeted.sqlite3")
+    database.initialize()
+    client = AiBasicActClient()
+    service = LiveAssemblyServices(
+        database,
+        client=client,  # type: ignore[arg-type]
+        fetcher=None,  # type: ignore[arg-type]
+        max_minutes_per_request=1,
+        now=lambda: datetime(2026, 8, 24, tzinfo=UTC),
+    )
+    synced: list[str] = []
+
+    def sync_ai_basic_act(row: dict[str, Any]):
+        suffix = str(row["CONF_ID"])
+        bill_no = "2206772" if suffix == "ai-plenary" else "2203072"
+        synced.append(suffix)
+        if suffix == "ai-subcommittee":
+            body = (
+                f"1. 인공지능 기본법안 (의안번호 {bill_no})\n"
+                "○한민수 위원  인공지능 산업 육성과 고영향 인공지능의 "
+                "안전·신뢰 기반을 함께 논의해야 합니다.\n"
+                "○과학기술정보통신부장관 유상임  산업 진흥과 투명성 의무를 "
+                "균형 있게 집행하겠습니다."
+            )
+        elif suffix == "ai-standing":
+            body = (
+                f"7. 인공지능 기본법안 (의안번호 {bill_no})\n"
+                "○이정헌 위원  인공지능 발전과 신뢰 기반 조성을 위해 "
+                "산업 진흥과 규제의 균형을 보장해야 합니다.\n"
+                "○최민희 위원장  위원회 대안으로 채택하였음을 선포합니다."
+            )
+        else:
+            body = (
+                "25. 인공지능 발전과 신뢰 기반 조성 등에 관한 "
+                f"기본법안(대안) (의안번호 {bill_no})\n"
+                "○최형두 의원  AI G3 도약을 위한 법제와 예산 기반이 "
+                "필요합니다.\n"
+                "○의장 우원식  재석 264인 중 찬성 260인, 반대 1인, "
+                "기권 3인으로 가결되었음을 선포합니다."
+            )
+        return service.pipeline.ingestor.ingest(
+            row,
+            body,
+            source_hash=f"fixture-{suffix}",
+            source_url=str(row["PDF_LINK_URL"]),
+        )
+
+    service.pipeline.sync = sync_ai_basic_act  # type: ignore[method-assign]
+
+    result = service.explore_issue(AI_BASIC_ACT_QUERY, limit=20)
+
+    meeting_calls = [
+        (dataset, parameters)
+        for dataset, parameters in client.calls
+        if dataset
+        in {
+            DATASET_BY_SOURCE[MeetingSource.COMMITTEE],
+            DATASET_BY_SOURCE[MeetingSource.PLENARY],
+            DATASET_BY_SOURCE[MeetingSource.SUBCOMMITTEE],
+        }
+    ]
+    assert meeting_calls == [
+        (
+            DATASET_BY_SOURCE[MeetingSource.COMMITTEE],
+            {"DAE_NUM": 22, "CONF_DATE": "2024", "SUB_NAME": "2203072"},
+        ),
+        (
+            DATASET_BY_SOURCE[MeetingSource.PLENARY],
+            {"DAE_NUM": 22, "CONF_DATE": "2024", "SUB_NAME": "2206772"},
+        ),
+    ]
+    assert service.last_refresh["meeting_api_calls"] == 2
+    assert service.last_refresh["meeting_candidates"] == 3
+    assert service.last_refresh["checked_candidate_count"] == 3
+    assert service.last_refresh["unselected_candidate_count"] == 0
+    assert service.last_refresh["has_more"] is False
+    assert set(synced) == {"ai-subcommittee", "ai-standing", "ai-plenary"}
+    assert result["target_resolution"]["live_verified_bill_numbers"] == [
+        "2203072",
+        "2206772",
+    ]
+    assert result["target_resolution"]["meeting_verified_bill_numbers"] == [
+        "2203072",
+        "2206772",
+    ]
+    assert result["stage_coverage"]["exact_measure_check"] is True
+    assert {
+        stage: coverage["state"]
+        for stage, coverage in result["stage_coverage"]["stages"].items()
+    } == {
+        "subcommittee": "discussion_found",
+        "standing_committee": "discussion_found",
+        "plenary": "discussion_found",
+    }
+    assert result["stage_coverage"]["complete"] is True
+    assert {bill["bill_no"] for bill in result["bills"]} == {
+        "2203072",
+        "2206772",
+    }
+    assert result["speeches"]
+    assert all(
+        set(speech["attribution"]["bill_numbers"]).intersection(
+            {"2203072", "2206772"}
+        )
+        for speech in result["speeches"]
+    )
+    assert all(
+        speech["attribution"]["state"]
+        in {
+            "exact_bill_number_in_turn_or_agenda",
+            "exact_speech_bill_link",
+            "exact_measure_discussion_segment",
+            "exact_agenda_segment_context",
+        }
+        for speech in result["speeches"]
+    )
     assert _meeting_date_queries(["2026-01", "2026-02", "2026-03"]) == [
         "2026-01",
         "2026-02",
@@ -338,6 +598,33 @@ def test_proposal_scope_rejects_2025_and_missing_proposal_dates() -> None:
             (date(2026, 1, 1), date(2026, 12, 31)),
         )
     ] == ["2210002"]
+
+
+def test_explicit_temporal_bill_scope_rejects_later_official_compact_date() -> None:
+    bills = [
+        {
+            "BILL_NO": "2203072",
+            "BILL_NAME": "인공지능 기본법안",
+            "PROPOSE_DT": "20240822",
+            "CMT_PROC_DT": "20241126",
+        },
+        {
+            "BILL_NO": "2210037",
+            "BILL_NAME": (
+                "장애인 차별조항 정비를 위한 과학기술정보방송통신위원회 "
+                "소관 6개 법률 일부개정을 위한 법률안"
+            ),
+            "PROPOSE_DT": "20250422",
+        },
+    ]
+
+    scoped = _filter_bills_by_temporal_scope(
+        bills,
+        date_from="2024-01-01",
+        date_to="2024-12-31",
+    )
+
+    assert [bill["BILL_NO"] for bill in scoped] == ["2203072"]
 
 
 def test_live_metadata_calls_are_bounded_to_three_bill_and_three_meeting_queries(
@@ -447,7 +734,7 @@ def test_incident_alias_checks_full_vehicle_path_and_three_stage_minutes(
             DATASET_BY_SOURCE[MeetingSource.SUBCOMMITTEE],
         }
     ]
-    assert len(meeting_calls) == 5
+    assert len(meeting_calls) == 3
     assert all("SUB_NAME" in parameters for _dataset, parameters in meeting_calls)
     assert not any(
         dataset == DATASET_BY_SOURCE[MeetingSource.SUBCOMMITTEE]

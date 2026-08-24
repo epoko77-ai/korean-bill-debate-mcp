@@ -223,6 +223,7 @@ _COMMITTEE_FIELDS: Final = (
     "SB_CMIT_NM",
 )
 _PROPOSAL_DATE_FIELDS: Final = (
+    "proposed_at",
     "proposed_date",
     "proposal_date",
     "propose_date",
@@ -232,6 +233,12 @@ _PROPOSAL_DATE_FIELDS: Final = (
 _DATE_FIELDS: Final = (
     "date",
     "meeting_date",
+    "processed_at",
+    "processed_date",
+    "PROC_DT",
+    "CMT_PROC_DT",
+    "COMMITTEE_PROC_DT",
+    "LAW_PROC_DT",
     "RGS_PROC_DT",
     *_PROPOSAL_DATE_FIELDS,
 )
@@ -342,6 +349,13 @@ class RelevanceCriteria:
             if expansion.relation is TermRelation.EQUIVALENT
             and expansion.category is TermCategory.ISSUE
         )
+        equivalent_committees = tuple(
+            expansion.term
+            for expansion in terminology.expansions
+            if expansion.relation is TermRelation.EQUIVALENT
+            and expansion.category is TermCategory.COMMITTEE
+        )
+        resolved_committees = _distinct((*committees, *equivalent_committees))
         related_statutes = tuple(
             expansion.term
             for expansion in terminology.expansions
@@ -363,7 +377,7 @@ class RelevanceCriteria:
                 *equivalent_issues,
                 *related_statutes,
                 *related_issues,
-                *committees,
+                *resolved_committees,
                 *representative_names,
                 *co_names,
                 *any_names,
@@ -383,7 +397,7 @@ class RelevanceCriteria:
             issue_terms=_meaningful_terms((*issue_terms, *equivalent_issues, *literal_issues)),
             related_statute_terms=_meaningful_terms(related_statutes),
             related_issue_terms=_meaningful_terms(related_issues),
-            committees=_distinct(committees),
+            committees=resolved_committees,
             representative_proposer_names=representative_names,
             co_proposer_names=co_names,
             proposer_names=any_names,
@@ -944,7 +958,7 @@ def _literal_issue_terms(
         if _is_generic_term(raw_key):
             continue
         token = _strip_particle(raw.casefold())
-        key = _match_key(token)
+        key = _match_key(_normalize_text(token))
         if (
             len(key) < 2
             or not _HANGUL.search(token)

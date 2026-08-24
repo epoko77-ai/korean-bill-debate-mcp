@@ -63,6 +63,7 @@ def _turn(
         "citation": _citation(url, page, speaker),
         "attribution": {
             "state": "exact_bill_number_in_turn_or_agenda",
+            "bill_numbers": ["2205513", "2214609"],
             "is_legislator": role in {"위원", "의원"},
         },
         # Upstream ranking metadata is not evidence of a political position.
@@ -572,6 +573,95 @@ def test_comparison_readiness_covers_six_product_acceptance_dimensions() -> None
     assert brief["synthesis_contract"]["require_official_citations"] is True
     assert brief["synthesis_contract"]["citation_required_per_factual_claim"] is True
     assert brief["synthesis_contract"]["official_url_and_locator_required"] is True
+
+
+def test_fully_cited_unrelated_bill_without_target_resolution_is_not_ready() -> None:
+    payload = _doctor_now_payload()
+    payload.pop("target_resolution")
+    payload["bills"] = [
+        {
+            "bill_no": "2210037",
+            "name": "장애인 차별조항 정비 법률안",
+            "official_url": "https://example.test/bill/2210037",
+        }
+    ]
+
+    brief = build_answer_brief(payload, requested_stages=REQUESTED_STAGES)
+
+    content = brief["comparison_readiness"]["dimensions"]["content"]
+    accuracy = brief["comparison_readiness"]["dimensions"]["accuracy"]
+    assert content["status"] == "not_ready"
+    assert accuracy["status"] == "not_ready"
+    assert accuracy["metrics"]["fully_cited_direct_evidence_count"] == 9
+    assert accuracy["metrics"]["target_attributed_direct_evidence_count"] == 0
+    assert "primary_measure_unresolved" in accuracy["gaps"]
+    assert "official_measure_identity_or_agenda_unverified" in accuracy["gaps"]
+
+
+def test_official_bill_without_agenda_verification_is_not_accuracy_ready() -> None:
+    payload = _doctor_now_payload()
+    payload["target_resolution"]["meeting_verified_bill_numbers"] = []
+    payload["target_resolution"]["confidence"] = "official_bill_matched_vehicle_agenda_pending"
+
+    brief = build_answer_brief(payload, requested_stages=REQUESTED_STAGES)
+
+    accuracy = brief["comparison_readiness"]["dimensions"]["accuracy"]
+    assert accuracy["status"] == "partial"
+    assert accuracy["metrics"]["primary_in_official_bill_results"] is True
+    assert accuracy["metrics"]["measure_family_in_official_agenda"] is False
+    assert "official_measure_identity_or_agenda_unverified" in accuracy["gaps"]
+
+
+def test_context_only_stages_do_not_satisfy_content_or_breadth() -> None:
+    payload = _doctor_now_payload()
+    payload["speeches"] = [
+        item for item in payload["speeches"] if item["meeting_type"] == "committee"
+    ]
+
+    brief = build_answer_brief(payload, requested_stages=REQUESTED_STAGES)
+
+    assert {item["evidence_use"] for item in brief["stages"]["subcommittee"]["evidence"]} == {
+        "context_only"
+    }
+    assert {item["evidence_use"] for item in brief["stages"]["plenary"]["evidence"]} == {
+        "context_only"
+    }
+    content = brief["comparison_readiness"]["dimensions"]["content"]
+    breadth = brief["comparison_readiness"]["dimensions"]["breadth"]
+    assert content["status"] == "partial"
+    assert content["metrics"]["discussion_stage_without_target_direct_count"] == 2
+    assert "discussion_stage_without_target_direct_evidence" in content["gaps"]
+    assert breadth["status"] == "partial"
+    assert breadth["metrics"]["represented_or_verified_absent_stage_count"] == 1
+    assert "requested_stage_not_directly_represented_or_verified_absent" in breadth["gaps"]
+
+
+def test_checked_exact_absence_can_represent_a_requested_stage() -> None:
+    payload = _doctor_now_payload()
+    payload["speeches"] = [
+        item for item in payload["speeches"] if item["meeting_type"] != "plenary"
+    ]
+    payload["discussion_threads"] = [
+        thread for thread in payload["discussion_threads"] if thread["meeting_type"] != "plenary"
+    ]
+    plenary = payload["stage_coverage"]["stages"]["plenary"]
+    plenary.update(
+        {
+            "state": "checked_no_matching_discussion",
+            "observed_candidate_count": 1,
+            "candidate_count": 1,
+            "unselected_candidate_count": 0,
+            "matched_discussion_count": 0,
+            "failed_count": 0,
+            "pending_count": 0,
+        }
+    )
+
+    brief = build_answer_brief(payload, requested_stages=REQUESTED_STAGES)
+
+    breadth = brief["comparison_readiness"]["dimensions"]["breadth"]
+    assert breadth["status"] == "ready"
+    assert breadth["metrics"]["represented_or_verified_absent_stage_count"] == 3
 
 
 def test_answer_brief_survives_transport_budget_with_stage_and_ledger_contract() -> None:

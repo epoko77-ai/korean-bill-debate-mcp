@@ -152,6 +152,78 @@ def test_broad_issue_keeps_noisy_bill_in_map_but_selects_reviewed_statute() -> N
     ] is False
 
 
+def test_ai_basic_act_selection_hard_filters_date_committee_and_statute() -> None:
+    services = create_services()
+    local = services.catalog
+    assert isinstance(local, LocalServices)
+    candidates = [
+        {
+            "id": "ai-basic-act-source",
+            "bill_no": "2203072",
+            "name": "인공지능 기본법안",
+            "committee": "과학기술정보방송통신위원회",
+            "proposed_at": "2024-08-22",
+        },
+        {
+            "id": "later-omnibus",
+            "bill_no": "2210037",
+            "name": (
+                "장애인 차별조항 정비를 위한 과학기술정보방송통신위원회 "
+                "소관 6개 법률 일부개정을 위한 법률안"
+            ),
+            "committee": "과학기술정보방송통신위원회",
+            "proposed_at": "2025-04-22",
+        },
+        {
+            "id": "committee-name-only",
+            "bill_no": "2209000",
+            "name": "과학기술정보방송통신위원회 소관 법률 정비법안",
+            "committee": "과학기술정보방송통신위원회",
+            "proposed_at": "2024-10-01",
+        },
+        {
+            "id": "wrong-committee",
+            "bill_no": "2209001",
+            "name": "인공지능 기본법안",
+            "committee": "산업통상자원중소벤처기업위원회",
+            "proposed_at": "2024-08-20",
+        },
+    ]
+    speeches = [
+        {
+            "speech_id": "later-omnibus-speech",
+            "text": "AI 기본법 후속 정비 필요성을 논의합니다.",
+        }
+    ]
+    links = [
+        {
+            "bill_id": "later-omnibus",
+            "speech_id": "later-omnibus-speech",
+            "evidence": "같은 회의에서 AI 기본법을 언급",
+        }
+    ]
+
+    selected = local._select_relevant_bills(
+        "제22대 국회 AI 기본법의 법안소위·과방위 전체회의·본회의 주요 논의",
+        candidates,
+        speeches,
+        links,
+        limit=10,
+        committee="과학기술정보방송통신위원회",
+        date_from="2024-01-01",
+        date_to="2024-12-31",
+        statute_title="인공지능 기본법",
+    )
+
+    assert [bill["bill_no"] for bill in selected] == ["2203072"]
+    relevance = {
+        bill["bill_no"]: bill["selection_relevance"] for bill in candidates
+    }
+    assert relevance["2210037"]["rejection_reasons"] == ["date_out_of_range"]
+    assert relevance["2209000"]["rejection_reasons"] == ["below_minimum_score"]
+    assert relevance["2209001"]["rejection_reasons"] == ["committee_mismatch"]
+
+
 def test_bill_status_returns_every_linked_speech_without_a_hidden_top_twenty() -> None:
     services = create_services()
     local = services.catalog
